@@ -387,9 +387,9 @@ mod tests {
         // dbg!(&ts);
         let ts = dummy_f32();
 
-        assert_eq!(2, ts.time.get_index(0.02).unwrap()); // finding exactly matching time
-        assert_eq!(2, ts.time.get_index(0.02).unwrap()); // running again should give same result
-        assert_eq!(2, ts.time.get_index(0.015).unwrap()); // finding next closest time stamp
+        assert_eq!(2, ts.time.get_index(2.0).unwrap()); // finding exactly matching time
+        assert_eq!(2, ts.time.get_index(2.0).unwrap()); // running again should give same result
+        assert_eq!(2, ts.time.get_index(1.5).unwrap()); // finding next closest time stamp
     }
 
     #[test]
