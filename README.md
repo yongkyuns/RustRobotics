@@ -32,17 +32,6 @@ To run the interactive simulator:
 cargo run -p rust_robotics_sim
 ```
 
-### Running the Examples
-
-There are standalone examples in the `examples` directory:
-
-```bash
-cargo run --example particle_filter
-cargo run --example inverted_pendulum_lqr_control
-```
-
-*(Note: Examples might require specific dependencies like `nannou`)*
-
 ### Building for Web (WASM)
 
 You can build the simulator for the web using the provided script:

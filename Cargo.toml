@@ -5,7 +5,6 @@ members = [
 ]
 exclude = [
 	"python_interface",
-	"examples",
 ]
 
 
