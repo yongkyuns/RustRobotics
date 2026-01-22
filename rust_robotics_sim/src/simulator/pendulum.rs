@@ -28,10 +28,20 @@ impl Controller {
         match self {
             Self::LQR(model) => *model.control(x, dt).index(0),
             Self::PID(pid) => pid.control(0.0 - x[2], dt),
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::MPC(model) => mpc_control(x, *model, dt),
-            #[cfg(target_arch = "wasm32")]
-            Self::MPC(model) => *model.control(x, dt).index(0), // Fallback to LQR on WASM
+            Self::MPC(model) => {
+                #[cfg(target_arch = "wasm32")]
+                let start = web_sys::window().unwrap().performance().unwrap().now();
+
+                let u = mpc_control(x, *model, dt);
+
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let elapsed = web_sys::window().unwrap().performance().unwrap().now() - start;
+                    web_sys::console::log_1(&format!("MPC took {:.2}ms", elapsed).into());
+                }
+
+                u
+            }
         }
     }
     /// Instantiate a new LQR controller for [`InvertedPendulum`]
@@ -178,7 +188,10 @@ impl Controller {
                             .prefix("Ball Mass: ")
                             .suffix(" kg"),
                     );
-                    ui.label("(Horizon: 12, Control bounds: ±30N)");
+                    #[cfg(not(target_arch = "wasm32"))]
+                    ui.label("(Horizon: 12, Control bounds: ±50N)");
+                    #[cfg(target_arch = "wasm32")]
+                    ui.label("(Falls back to LQR on web)");
                 });
             }
         }

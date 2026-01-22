@@ -13,8 +13,6 @@ pub mod prelude {
     pub use nalgebra;
     pub use nalgebra::{matrix, vector};
 
-    #[cfg(feature = "osqp")]
-    pub use osqp::{CscMatrix, Problem, Settings};
 
     // #[cfg(not(feature = "libm"))]
     // pub mod std {

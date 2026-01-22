@@ -5,12 +5,12 @@ const N: usize = 12; // Prediction horizon
 
 /// Total number of decision variables: (N+1) states + N controls
 const N_VARS: usize = (N + 1) * NX + N * NU;
-/// Total number of constraints: equality (dynamics) + inequality (bounds)
+/// Total number of equality constraints (dynamics)
 const N_EQ: usize = (N + 1) * NX;
-const N_INEQ: usize = N_VARS;
-const N_CONSTRAINTS: usize = N_EQ + N_INEQ;
+/// Number of inequality constraints (control bounds only: upper + lower for each control)
+const N_INEQ: usize = 2 * N * NU;
 
-/// MPC control using quadratic programming (requires "osqp" feature)
+/// MPC control using quadratic programming with Clarabel solver
 ///
 /// This function computes the optimal control input for an inverted pendulum
 /// using Model Predictive Control with a quadratic cost function.
@@ -22,10 +22,10 @@ const N_CONSTRAINTS: usize = N_EQ + N_INEQ;
 ///
 /// # Returns
 /// The optimal control input (force on cart)
-#[cfg(feature = "osqp")]
 pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     use crate::control::LQR;
-    use osqp::{CscMatrix, Problem, Settings};
+    use clarabel::algebra::*;
+    use clarabel::solver::*;
 
     let (Ad, Bd) = model.model(dt);
 
@@ -33,13 +33,7 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let umin = -50.0_f64;
     let umax = 50.0_f64;
 
-    // State bounds (using infinity for unconstrained states)
-    use std::f64::INFINITY;
-    let xmin: [f64; NX] = [-INFINITY, -INFINITY, -INFINITY, -INFINITY];
-    let xmax: [f64; NX] = [INFINITY, INFINITY, INFINITY, INFINITY];
-
     // Stage cost weights - add position regulation to prevent drift
-    // Base on model's Q but ensure position is penalized
     let Q = diag![1.0_f32, 1., 10., 1.]; // [pos, vel, angle, angular_vel]
     let R = model.R; // Use model's R matrix
 
@@ -48,7 +42,6 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     mpc_model.Q = Q;
 
     // Terminal cost: Use LQR cost-to-go (DARE solution) for stability
-    // This ensures the MPC has a stabilizing terminal cost
     let QN = mpc_model.solve_DARE(Ad, Bd);
 
     // Initial state (from input) and reference state
@@ -73,100 +66,123 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let Bu = kron!(vstack!(zeros!(1, N), eye!(N)), Bd);
     let Aeq = hstack!(Ax, Bu);
 
-    // Inequality constraints (bounds on states and inputs)
-    let Aineq = eye!((N + 1) * NX + N * NU);
+    // Inequality constraints for control bounds: umin <= u <= umax
+    // Reformulate as: u <= umax and -u <= -umin
+    // Stack: [I; -I] * u <= [umax; -umin]
+    // In terms of full decision vector z = [x; u]:
+    // [0 I; 0 -I] * z <= [umax; -umin]
+
+    // Build inequality constraint matrix for controls only
+    let zeros_xu = zeros!({ N * NU }, { (N + 1) * NX }); // Zero block for state part
+    let eye_u = eye!(N * NU);
+    let Aineq_upper = hstack!(zeros_xu, eye_u);  // u <= umax
+    let Aineq_lower = hstack!(zeros_xu, -eye_u); // -u <= -umin
+    let Aineq = vstack!(Aineq_upper, Aineq_lower);
 
     // Stack equality and inequality constraints
     let A_mat = vstack!(Aeq, Aineq);
 
-    // Convert matrices to f64 arrays for OSQP
-    let mut P_data: [[f64; N_VARS]; N_VARS] = [[0.0; N_VARS]; N_VARS];
-    let mut A_data: [[f64; N_VARS]; N_CONSTRAINTS] = [[0.0; N_VARS]; N_CONSTRAINTS];
-    let mut q_data: [f64; N_VARS] = [0.0; N_VARS];
-    let mut l_data: [f64; N_CONSTRAINTS] = [0.0; N_CONSTRAINTS];
-    let mut u_data: [f64; N_CONSTRAINTS] = [0.0; N_CONSTRAINTS];
+    // Convert P matrix to Clarabel format (upper triangular CSC)
+    let mut P_row_indices: Vec<usize> = Vec::new();
+    let mut P_col_ptrs: Vec<usize> = vec![0];
+    let mut P_values: Vec<f64> = Vec::new();
 
-    // Copy P matrix (symmetric, we use full matrix then extract upper tri)
-    for i in 0..N_VARS {
-        for j in 0..N_VARS {
-            P_data[i][j] = P_mat[(i, j)] as f64;
+    for j in 0..N_VARS {
+        for i in 0..=j {
+            // Upper triangular only
+            let val = P_mat[(i, j)] as f64;
+            if val.abs() > 1e-12 {
+                P_row_indices.push(i);
+                P_values.push(val);
+            }
         }
+        P_col_ptrs.push(P_row_indices.len());
     }
 
-    // Copy A matrix
-    for i in 0..N_CONSTRAINTS {
-        for j in 0..N_VARS {
-            A_data[i][j] = A_mat[(i, j)] as f64;
+    let P_csc = CscMatrix::new(
+        N_VARS,
+        N_VARS,
+        P_col_ptrs,
+        P_row_indices,
+        P_values,
+    );
+
+    // Convert A matrix to Clarabel format (CSC)
+    let n_constraints = N_EQ + N_INEQ;
+    let mut A_row_indices: Vec<usize> = Vec::new();
+    let mut A_col_ptrs: Vec<usize> = vec![0];
+    let mut A_values: Vec<f64> = Vec::new();
+
+    for j in 0..N_VARS {
+        for i in 0..n_constraints {
+            let val = A_mat[(i, j)] as f64;
+            if val.abs() > 1e-12 {
+                A_row_indices.push(i);
+                A_values.push(val);
+            }
         }
+        A_col_ptrs.push(A_row_indices.len());
     }
 
-    // Copy q vector
+    let A_csc = CscMatrix::new(
+        n_constraints,
+        N_VARS,
+        A_col_ptrs,
+        A_row_indices,
+        A_values,
+    );
+
+    // Build q vector
+    let mut q_vec: Vec<f64> = vec![0.0; N_VARS];
     for i in 0..N_VARS {
-        q_data[i] = q_mat[(i, 0)] as f64;
+        q_vec[i] = q_mat[(i, 0)] as f64;
     }
 
-    // Build constraint bounds
-    // Equality constraints: leq = ueq = [-x0, 0, 0, ...]
+    // Build b vector (RHS of constraints)
+    let mut b_vec: Vec<f64> = vec![0.0; n_constraints];
+
+    // Equality constraints RHS: [-x0, 0, 0, ...]
     for i in 0..NX {
-        l_data[i] = -x0_vec[i];
-        u_data[i] = -x0_vec[i];
+        b_vec[i] = -x0_vec[i];
     }
-    for i in NX..N_EQ {
-        l_data[i] = 0.0;
-        u_data[i] = 0.0;
-    }
+    // Rest of equality constraints are 0 (already initialized)
 
-    // Inequality constraints: bounds on states and inputs
-    for k in 0..=N {
-        for i in 0..NX {
-            let idx = N_EQ + k * NX + i;
-            l_data[idx] = xmin[i];
-            u_data[idx] = xmax[i];
-        }
-    }
+    // Inequality constraints RHS: [umax, umax, ..., -umin, -umin, ...]
     for k in 0..N {
-        let idx = N_EQ + (N + 1) * NX + k * NU;
-        l_data[idx] = umin;
-        u_data[idx] = umax;
+        b_vec[N_EQ + k] = umax;           // u <= umax
+        b_vec[N_EQ + N * NU + k] = -umin; // -u <= -umin
     }
 
-    // Create OSQP problem
-    let P_csc = CscMatrix::from(&P_data).into_upper_tri();
-    let A_csc = CscMatrix::from(&A_data);
+    // Define cones: equality (ZeroCone) + inequality (NonnegativeCone)
+    let cones = [ZeroConeT(N_EQ), NonnegativeConeT(N_INEQ)];
 
-    let settings = Settings::default().verbose(false);
+    // Solver settings
+    let settings = DefaultSettingsBuilder::default()
+        .verbose(false)
+        .build()
+        .unwrap();
 
-    let mut prob = Problem::new(P_csc, &q_data, A_csc, &l_data, &u_data, &settings)
-        .expect("Failed to setup OSQP problem");
-
-    // Solve
-    let result = prob.solve();
+    // Create and solve
+    let mut solver = DefaultSolver::new(&P_csc, &q_vec, &A_csc, &b_vec, &cones, settings);
+    solver.solve();
 
     // Extract first control input u(0)
     // Decision variables are ordered: [x(0)..x(N), u(0)..u(N-1)]
     // u(0) starts at index (N+1)*NX
     let u_idx = (N + 1) * NX;
 
-    match result.x() {
-        Some(solution) => solution[u_idx] as f32,
-        None => {
+    match solver.solution.status {
+        SolverStatus::Solved | SolverStatus::AlmostSolved => {
+            solver.solution.x[u_idx] as f32
+        }
+        _ => {
             // Solver failed - return 0 as safe fallback
-            // This can happen if the problem is infeasible
             0.0
         }
     }
 }
 
-/// Fallback MPC control when OSQP is not available
-#[cfg(not(feature = "osqp"))]
-pub fn mpc_control(_x: Vector4, _model: Model, _dt: f32) -> f32 {
-    // Without OSQP, we cannot solve the QP problem
-    // Return zero control input
-    0.0
-}
-
 #[cfg(test)]
-#[cfg(feature = "osqp")]
 mod tests {
     use super::*;
     use std::time::Instant;
