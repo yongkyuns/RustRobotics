@@ -1,5 +1,6 @@
 use super::{Point, Shape, Size, WithAngle, WithPosition, WithSize};
-use egui::{plot::LineStyle, Color32, Stroke};
+use egui::{Color32, Stroke};
+use egui_plot::{LineStyle, Polygon};
 
 pub struct Rectangle {
     size: Size,
@@ -24,9 +25,9 @@ impl Default for Rectangle {
 }
 
 impl Rectangle {
-    pub fn into_polygon(self) -> egui::plot::Polygon {
-        egui::plot::Polygon::new(self.bounding_box())
-            .fill_alpha(self.fill_alpha)
+    pub fn into_polygon(self) -> Polygon<'static> {
+        Polygon::new("", self.bounding_box())
+            .fill_color(Color32::from_black_alpha((self.fill_alpha * 255.0) as u8))
             .stroke(self.stroke)
             .style(self.style)
     }

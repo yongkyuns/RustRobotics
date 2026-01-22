@@ -1,14 +1,10 @@
-pub mod lqr;
-pub mod pid;
-
-#[cfg(not(feature = "libm"))]
-pub mod mpc;
+mod lqr;
+mod mpc;
+mod pid;
 
 pub use lqr::*;
-pub use pid::*;
-
-#[cfg(not(feature = "libm"))]
 pub use mpc::*;
+pub use pid::*;
 
 pub use crate::control::{StateSpace, LQR};
 use crate::prelude::*;

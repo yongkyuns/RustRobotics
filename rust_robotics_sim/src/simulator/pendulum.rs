@@ -4,8 +4,8 @@ use super::Draw;
 use crate::data::{IntoValues, TimeTable};
 use crate::prelude::draw_cart;
 
-use egui::plot::Line;
-use egui::{plot::PlotUi, ComboBox, DragValue, Ui};
+use egui::{ComboBox, DragValue, Ui};
+use egui_plot::{Line, PlotUi};
 use rand::Rng;
 use rb::inverted_pendulum::*;
 use rb::prelude::*;
@@ -69,21 +69,21 @@ impl Controller {
                     ui.add(
                         DragValue::new(&mut model.l_bar)
                             .speed(0.01)
-                            .clamp_range(0.1_f32..=10.0)
+                            .range(0.1_f32..=10.0)
                             .prefix("Beam Length: ")
                             .suffix(" m"),
                     );
                     ui.add(
                         DragValue::new(&mut model.m_cart)
                             .speed(0.01)
-                            .clamp_range(0.1_f32..=3.0)
+                            .range(0.1_f32..=3.0)
                             .prefix("Cart Mass: ")
                             .suffix(" kg"),
                     );
                     ui.add(
                         DragValue::new(&mut model.m_ball)
                             .speed(0.01)
-                            .clamp_range(0.1_f32..=10.0)
+                            .range(0.1_f32..=10.0)
                             .prefix("Ball Mass: ")
                             .suffix(" kg"),
                     );
@@ -91,31 +91,31 @@ impl Controller {
                     ui.add(
                         DragValue::new(model.Q.get_mut(0).unwrap())
                             .speed(0.01)
-                            .clamp_range(0.0_f32..=100.0)
+                            .range(0.0_f32..=100.0)
                             .prefix("Lateral Position: "),
                     );
                     ui.add(
                         DragValue::new(model.Q.get_mut(5).unwrap())
                             .speed(0.01)
-                            .clamp_range(0.0_f32..=100.0)
+                            .range(0.0_f32..=100.0)
                             .prefix("Lateral Velocity: "),
                     );
                     ui.add(
                         DragValue::new(model.Q.get_mut(10).unwrap())
                             .speed(0.01)
-                            .clamp_range(0.0_f32..=100.0)
+                            .range(0.0_f32..=100.0)
                             .prefix("Rod Angle: "),
                     );
                     ui.add(
                         DragValue::new(model.Q.get_mut(15).unwrap())
                             .speed(0.01)
-                            .clamp_range(0.0_f32..=100.0)
+                            .range(0.0_f32..=100.0)
                             .prefix("Rod Angular Vel: "),
                     );
                     ui.add(
                         DragValue::new(model.R.get_mut(0).unwrap())
                             .speed(0.01)
-                            .clamp_range(0.0_f32..=100.0)
+                            .range(0.0_f32..=100.0)
                             .prefix("Control Input: "),
                     );
                 });
@@ -126,19 +126,19 @@ impl Controller {
                     ui.add(
                         DragValue::new(&mut pid.P)
                             .speed(0.01)
-                            .clamp_range(0.01_f32..=10000.0)
+                            .range(0.01_f32..=10000.0)
                             .prefix("P gain: "),
                     );
                     ui.add(
                         DragValue::new(&mut pid.I)
                             .speed(0.01)
-                            .clamp_range(0.01_f32..=10000.0)
+                            .range(0.01_f32..=10000.0)
                             .prefix("I gain: "),
                     );
                     ui.add(
                         DragValue::new(&mut pid.D)
                             .speed(0.01)
-                            .clamp_range(0.01_f32..=10000.0)
+                            .range(0.01_f32..=10000.0)
                             .prefix("D gain: "),
                     );
                 });
@@ -254,7 +254,7 @@ impl Simulate for InvertedPendulum {
 }
 
 impl Draw for InvertedPendulum {
-    fn plot(&self, plot_ui: &mut PlotUi) {
+    fn plot(&self, plot_ui: &mut PlotUi<'_>) {
         let names: Vec<String> = self
             .data
             .names()
@@ -265,11 +265,11 @@ impl Draw for InvertedPendulum {
         (0..self.data.ncols()).for_each(|i| {
             self.data
                 .values_shifted(i, self.time_init, 0.0)
-                .map(|values| plot_ui.line(Line::new(values).name(&names[i])));
+                .map(|values| plot_ui.line(Line::new(&names[i], values)));
         });
     }
 
-    fn scene(&self, plot_ui: &mut PlotUi) {
+    fn scene(&self, plot_ui: &mut PlotUi<'_>) {
         draw_cart(
             plot_ui,
             self.x_position(),
@@ -289,21 +289,21 @@ impl Draw for InvertedPendulum {
                             ui.add(
                                 DragValue::new(&mut self.model.l_bar)
                                     .speed(0.01)
-                                    .clamp_range(0.1_f32..=10.0)
+                                    .range(0.1_f32..=10.0)
                                     .prefix("Beam Length: ")
                                     .suffix(" m"),
                             );
                             ui.add(
                                 DragValue::new(&mut self.model.m_cart)
                                     .speed(0.01)
-                                    .clamp_range(0.1_f32..=3.0)
+                                    .range(0.1_f32..=3.0)
                                     .prefix("Cart Mass: ")
                                     .suffix(" kg"),
                             );
                             ui.add(
                                 DragValue::new(&mut self.model.m_ball)
                                     .speed(0.01)
-                                    .clamp_range(0.1_f32..=10.0)
+                                    .range(0.1_f32..=10.0)
                                     .prefix("Ball Mass: ")
                                     .suffix(" kg"),
                             );

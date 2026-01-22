@@ -9,7 +9,7 @@ license = "MIT"
 
 [dependencies]
 rust_robotics_algo = {version="0.1", path="../rust_robotics_algo"}
-nannou = {version="0.18"}
+nannou = {version="0.19.0"}
 osqp ="0.6"
 
 [[example]]

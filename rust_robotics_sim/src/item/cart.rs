@@ -1,9 +1,9 @@
 use super::{Circle, Point, Rectangle, Shape, WithPosition, WithSize};
 use crate::math::{cos, sin};
-use egui::plot::{Line, PlotUi, Values};
+use egui_plot::{Line, PlotUi, PlotPoints};
 use rust_robotics_algo::inverted_pendulum::Model;
 
-pub fn draw_cart(plot_ui: &mut PlotUi, x_pos: f32, rod_angle: f32, model: &Model, name: &str) {
+pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &Model, name: &str) {
     let x = x_pos as f64;
     let y = 0.0;
 
@@ -34,11 +34,17 @@ pub fn draw_cart(plot_ui: &mut PlotUi, x_pos: f32, rod_angle: f32, model: &Model
         .with_radius(r_ball)
         .at(rod_top.x, rod_top.y)
         .into_polygon();
-    let rod = Line::new(Values::from_values(vec![rod_bottom, rod_top]));
+    let rod = Line::new(
+        "Rod",
+        PlotPoints::new(vec![
+            [rod_bottom.x, rod_bottom.y],
+            [rod_top.x, rod_top.y],
+        ]),
+    );
 
     plot_ui.polygon(body.name(name));
-    plot_ui.polygon(left_wheel);
-    plot_ui.polygon(right_wheel);
-    plot_ui.polygon(ball);
-    plot_ui.line(rod);
+    plot_ui.polygon(left_wheel.name("Left Wheel"));
+    plot_ui.polygon(right_wheel.name("Right Wheel"));
+    plot_ui.polygon(ball.name("Ball"));
+    plot_ui.line(rod.name("Rod"));
 }

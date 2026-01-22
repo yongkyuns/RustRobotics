@@ -2,7 +2,6 @@
 members = [
 	"rust_robotics_algo",
 	"rust_robotics_sim",
-	"examples",
 ]
 exclude = [
 	"python_interface"

@@ -1,51 +1,48 @@
 use super::*;
 
-use egui::plot::{Value, Values};
+use egui_plot::PlotPoints;
 use rust_robotics_algo as rb;
 
-/// Allows converting from a column in [`TimeTable`] into [`egui`] [`Values`].
+/// Allows converting from a column in [`TimeTable`] into [`egui`] [`PlotPoints`].
 ///
-/// This is convenience trait for plotting on [`egui`] [`Plot`](egui::plot::Plot)
+/// This is convenience trait for plotting on [`egui`] [`Plot`](egui_plot::Plot)
 pub trait IntoValues {
-    fn values(&self, column: usize) -> Option<Values>;
-    fn values_shifted(&self, column: usize, x: f32, y: f32) -> Option<Values>;
+    fn values(&self, column: usize) -> Option<PlotPoints<'static>>;
+    fn values_shifted(&self, column: usize, x: f32, y: f32) -> Option<PlotPoints<'static>>;
 }
 
 impl IntoValues for TimeTable<f32> {
-    fn values(&self, column: usize) -> Option<Values> {
+    fn values(&self, column: usize) -> Option<PlotPoints<'static>> {
         self.values_shifted(column, 0.0, 0.0)
     }
-    fn values_shifted(&self, column: usize, x: f32, y: f32) -> Option<Values> {
+    fn values_shifted(&self, column: usize, x: f32, y: f32) -> Option<PlotPoints<'static>> {
         self.zipped_iter(column).map(|zip| {
-            Values::from_values(
+            PlotPoints::new(
                 zip.into_iter()
-                    .map(|(t, v)| Value {
-                        x: (*t + x) as f64,
-                        y: (*v + y) as f64,
-                    })
+                    .map(|(t, v)| [(*t + x) as f64, (*v + y) as f64])
                     .collect(),
             )
         })
     }
 }
 
-/// Allows extracting information for [`plot`](egui::plot::Plot) from array of
+/// Allows extracting information for [`plot`](egui_plot::Plot) from array of
 /// 4-element vectors. The following assignments are assumed:
 ///
 /// - [0] = x position
 /// - [1] = y position
 pub trait VehiclePlot {
-    fn positions(&self) -> Values;
+    fn positions(&self) -> PlotPoints<'static>;
 }
 
 impl VehiclePlot for Vec<rb::Vector4> {
-    fn positions(&self) -> Values {
-        Values::from_values(
+    fn positions(&self) -> PlotPoints<'static> {
+        PlotPoints::new(
             self.into_iter()
-                .map(|&state| Value {
-                    x: *state.get(0).unwrap() as f64,
-                    y: *state.get(1).unwrap() as f64,
-                })
+                .map(|&state| [
+                    *state.get(0).unwrap() as f64,
+                    *state.get(1).unwrap() as f64,
+                ])
                 .collect(),
         )
     }

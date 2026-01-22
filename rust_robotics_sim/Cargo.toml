@@ -17,8 +17,9 @@ crate-type = ["cdylib", "rlib"]
 rust_robotics_algo = {version="0.1", path="../rust_robotics_algo"}
 rand = "0.8"
 chrono = { version = "0.4", features = ["js-sys", "wasmbind"] }
-egui = "0.18.0"
-eframe = { version = "0.18.0", features = ["persistence"] }
+egui = "0.32.3"
+egui_plot = "0.33.0"
+eframe = { version = "0.32.3", features = ["persistence"] }
 serde = { version = "1", features = ["derive"] } # You only need this if you want app persistence
 
 # native:

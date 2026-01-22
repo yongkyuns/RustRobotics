@@ -5,8 +5,8 @@ use crate::prelude::*;
 use localization::ParticleFilter;
 use pendulum::InvertedPendulum;
 
-use egui::{plot::PlotUi, *};
-use plot::{Corner, Legend, Plot};
+use egui::*;
+use egui_plot::{Corner, Legend, Plot, PlotUi};
 
 /// Base trait to make simulation work within `rust robotics`.
 ///
@@ -46,11 +46,11 @@ pub trait Simulate {
 /// Trait to allow visually representing simulation (simulation graphics + GUI)
 pub trait Draw {
     /// Draw the simulation onto a 2D scene
-    fn scene(&self, plot_ui: &mut PlotUi);
+    fn scene(&self, plot_ui: &mut PlotUi<'_>);
     /// Draw any GUI elements to interact with the simulation
     fn options(&mut self, ui: &mut Ui);
     /// Draw time-domain plot (optional)
-    fn plot(&self, _plot_ui: &mut PlotUi) {}
+    fn plot(&self, _plot_ui: &mut PlotUi<'_>) {}
 }
 
 /// Super-trait for objects which implement both [`Simulate`] and [`Draw`]
@@ -225,7 +225,7 @@ impl Simulator {
             });
     }
 
-    fn options(&mut self, ui: &mut Ui) {
+    fn options(&mut self, _ui: &mut Ui) {
         // ComboBox::from_label("Simulator options")
         //     .selected_text(self.controller.to_string())
         //     .show_ui(ui, |ui| {

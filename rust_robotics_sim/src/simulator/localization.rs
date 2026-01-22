@@ -1,10 +1,10 @@
 use super::*;
 
-use crate::data::{TimeTable, VehiclePlot};
+use crate::data::VehiclePlot;
 use crate::item::draw_vehicle;
 
-use egui::plot::Line;
-use egui::{plot::PlotUi, ComboBox, DragValue, Ui};
+use egui::Ui;
+use egui_plot::{Line, LineStyle, PlotPoints, PlotUi, Points};
 use rb::localization::{particle_filter::*, StateVector};
 use rb::prelude::*;
 use rust_robotics_algo as rb;
@@ -86,42 +86,45 @@ impl Simulate for ParticleFilter {
 }
 
 impl Draw for ParticleFilter {
-    fn plot(&self, _plot_ui: &mut PlotUi) {}
-    fn scene(&self, plot_ui: &mut PlotUi) {
-        plot_ui.points(egui::plot::Points::new(Values::from_values(
-            self.px
-                .column_iter()
-                .map(|state| Value {
-                    x: *state.get(0).unwrap() as f64,
-                    y: *state.get(1).unwrap() as f64,
-                })
-                .collect(),
-        )));
+    fn plot(&self, _plot_ui: &mut PlotUi<'_>) {}
+    fn scene(&self, plot_ui: &mut PlotUi<'_>) {
+        plot_ui.points(Points::new(
+            "",
+            PlotPoints::new(
+                self.px
+                    .column_iter()
+                    .map(|state| [
+                        *state.get(0).unwrap() as f64,
+                        *state.get(1).unwrap() as f64,
+                    ])
+                    .collect(),
+            ),
+        ));
         MARKERS.iter().for_each(|marker| {
-            plot_ui.points(egui::plot::Points::new(marker_values()).radius(2.0));
+            plot_ui.points(Points::new("", marker_values()).radius(2.0));
             if is_detected(marker, &self.x_true) {
                 plot_ui.line(
-                    Line::new(values_from_marker_state(marker, &self.x_true))
-                        .style(plot::LineStyle::Dotted { spacing: 10.0 }),
+                    Line::new("", values_from_marker_state(marker, &self.x_true))
+                        .style(LineStyle::Dotted { spacing: 10.0 }),
                 );
             }
         });
-        plot_ui.line(Line::new(self.h_x_true.positions()));
+        plot_ui.line(Line::new("", self.h_x_true.positions()));
         draw_vehicle(
             plot_ui,
             self.x_true,
             &format!("Vehicle {} (Actual)", self.id),
         );
-        plot_ui.line(Line::new(self.h_x_dr.positions()));
+        plot_ui.line(Line::new("", self.h_x_dr.positions()));
         draw_vehicle(plot_ui, self.x_dr, &format!("Vehicle {} (DR)", self.id));
-        plot_ui.line(Line::new(self.h_x_est.positions()));
+        plot_ui.line(Line::new("", self.h_x_est.positions()));
         draw_vehicle(
             plot_ui,
             self.x_est,
             &format!("Vehicle {} (Estimate)", self.id),
         );
     }
-    fn options(&mut self, ui: &mut Ui) {}
+    fn options(&mut self, _ui: &mut Ui) {}
 }
 
 fn is_detected(marker: &rb::Vector2, state: &rb::Vector4) -> bool {
@@ -131,28 +134,18 @@ fn is_detected(marker: &rb::Vector2, state: &rb::Vector4) -> bool {
     d <= MAX_RANGE
 }
 
-use egui::plot::{Value, Values};
-fn values_from_marker_state(marker: &rb::Vector2, state: &rb::Vector4) -> Values {
-    Values::from_values(vec![
-        Value {
-            x: marker.x() as f64,
-            y: marker.y() as f64,
-        },
-        Value {
-            x: state.x() as f64,
-            y: state.y() as f64,
-        },
+fn values_from_marker_state(marker: &rb::Vector2, state: &rb::Vector4) -> PlotPoints<'static> {
+    PlotPoints::new(vec![
+        [marker.x() as f64, marker.y() as f64],
+        [state.x() as f64, state.y() as f64],
     ])
 }
 
-fn marker_values() -> Values {
-    Values::from_values(
+fn marker_values() -> PlotPoints<'static> {
+    PlotPoints::new(
         MARKERS
             .iter()
-            .map(|marker| Value {
-                x: marker.x() as f64,
-                y: marker.y() as f64,
-            })
+            .map(|marker| [marker.x() as f64, marker.y() as f64])
             .collect(),
     )
 }

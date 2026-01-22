@@ -9,9 +9,9 @@ pub use rectangle::Rectangle;
 pub use vehicle::draw_vehicle;
 
 use crate::prelude::*;
-use egui::plot::{Value, Values};
+use egui_plot::{PlotPoint, PlotPoints};
 
-pub type Point = Value;
+pub type Point = PlotPoint;
 
 impl WithAngle for Point {
     fn angle(&self) -> f64 {
@@ -90,7 +90,7 @@ pub trait WithPosition {
 
 pub trait Shape {
     fn new() -> Self;
-    fn bounding_box(&self) -> Values;
+    fn bounding_box(&self) -> PlotPoints<'static>;
     fn local2global(&self, x: f64, y: f64) -> Point;
     fn upper_left(&self) -> Point;
     fn upper_right(&self) -> Point;
@@ -105,12 +105,12 @@ where
     fn new() -> Self {
         Self::default()
     }
-    fn bounding_box(&self) -> Values {
-        Values::from_values(vec![
-            self.upper_left(),
-            self.upper_right(),
-            self.lower_right(),
-            self.lower_left(),
+    fn bounding_box(&self) -> PlotPoints<'static> {
+        PlotPoints::new(vec![
+            [self.upper_left().x, self.upper_left().y],
+            [self.upper_right().x, self.upper_right().y],
+            [self.lower_right().x, self.lower_right().y],
+            [self.lower_left().x, self.lower_left().y],
         ])
     }
     fn local2global(&self, x: f64, y: f64) -> Point {
