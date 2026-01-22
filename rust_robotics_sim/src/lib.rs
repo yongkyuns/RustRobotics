@@ -24,20 +24,37 @@ pub mod prelude {
 // When compiling for web:
 
 #[cfg(target_arch = "wasm32")]
-use eframe::wasm_bindgen::{self, prelude::*};
+use wasm_bindgen::prelude::*;
 
-/// This is the entry-point for all the web-assembly.
-/// This is called once from the HTML.
-/// It loads the app, installs some callbacks, then returns.
-/// You can add more callbacks like this if you want to call in to your code.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn start(canvas_id: &str) -> Result<(), eframe::wasm_bindgen::JsValue> {
+pub async fn start(canvas_id: &str) -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast;
+
     // Make sure panics are logged using `console.error`.
     console_error_panic_hook::set_once();
 
     // Redirect tracing to console.log and friends:
     tracing_wasm::set_as_global_default();
 
-    eframe::start_web(canvas_id, Box::new(|cc| Box::new(App::new(cc))))
+    let document = web_sys::window()
+        .ok_or("No window")?
+        .document()
+        .ok_or("No document")?;
+
+    let canvas = document
+        .get_element_by_id(canvas_id)
+        .ok_or("No canvas element found")?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| "Element is not a canvas")?;
+
+    let web_options = eframe::WebOptions::default();
+
+    eframe::WebRunner::new()
+        .start(
+            canvas,
+            web_options,
+            Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        )
+        .await
 }

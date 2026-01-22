@@ -14,3 +14,6 @@ fn main() {
         Box::new(|cc| Ok(Box::new(rust_robotics_sim::App::new(cc)))),
     );
 }
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
