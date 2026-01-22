@@ -20,6 +20,7 @@ pub type State = rb::Vector4;
 pub enum Controller {
     LQR(Model),
     PID(PID),
+    MPC(Model),
 }
 
 impl Controller {
@@ -27,6 +28,10 @@ impl Controller {
         match self {
             Self::LQR(model) => *model.control(x, dt).index(0),
             Self::PID(pid) => pid.control(0.0 - x[2], dt),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::MPC(model) => mpc_control(x, *model, dt),
+            #[cfg(target_arch = "wasm32")]
+            Self::MPC(model) => *model.control(x, dt).index(0), // Fallback to LQR on WASM
         }
     }
     /// Instantiate a new LQR controller for [`InvertedPendulum`]
@@ -37,6 +42,10 @@ impl Controller {
     pub fn pid() -> Self {
         Self::PID(PID::with_gains(25.0, 3.0, 3.0))
     }
+    /// Instantiate a new MPC controller for [`InvertedPendulum`]
+    pub fn mpc(model: Model) -> Self {
+        Self::MPC(model)
+    }
     /// Reset the states of the current [`Controller`]
     ///
     /// If there are parameters related to the controller (e.g. PID gains),
@@ -46,6 +55,7 @@ impl Controller {
         match self {
             Self::LQR(_) => (),
             Self::PID(pid) => pid.reset_state(),
+            Self::MPC(_) => (),
         }
     }
     /// Reset the states and any parameters to it's default values
@@ -58,6 +68,7 @@ impl Controller {
         match self {
             Self::LQR(_) => *self = Self::lqr(Model::default()),
             Self::PID(_) => *self = Self::pid(),
+            Self::MPC(_) => *self = Self::mpc(Model::default()),
         }
     }
     /// Method to draw onto [`egui`] UI.
@@ -143,6 +154,33 @@ impl Controller {
                     );
                 });
             }
+            Self::MPC(model) => {
+                ui.vertical(|ui| {
+                    ui.label("MPC Parameters:");
+                    ui.add(
+                        DragValue::new(&mut model.l_bar)
+                            .speed(0.01)
+                            .range(0.1_f32..=10.0)
+                            .prefix("Beam Length: ")
+                            .suffix(" m"),
+                    );
+                    ui.add(
+                        DragValue::new(&mut model.m_cart)
+                            .speed(0.01)
+                            .range(0.1_f32..=3.0)
+                            .prefix("Cart Mass: ")
+                            .suffix(" kg"),
+                    );
+                    ui.add(
+                        DragValue::new(&mut model.m_ball)
+                            .speed(0.01)
+                            .range(0.1_f32..=10.0)
+                            .prefix("Ball Mass: ")
+                            .suffix(" kg"),
+                    );
+                    ui.label("(Horizon: 12, Control bounds: ±30N)");
+                });
+            }
         }
     }
 
@@ -151,6 +189,7 @@ impl Controller {
         match self {
             Self::LQR(_) => "LQR".to_owned(),
             Self::PID(_) => "PID".to_owned(),
+            Self::MPC(_) => "MPC".to_owned(),
         }
     }
 }
@@ -319,7 +358,7 @@ impl Draw for InvertedPendulum {
                                         .selected_text(self.controller.to_string())
                                         .show_ui(ui, |ui| {
                                             for options in
-                                                [Controller::lqr(self.model), Controller::pid()]
+                                                [Controller::lqr(self.model), Controller::pid(), Controller::mpc(self.model)]
                                                     .iter()
                                             {
                                                 ui.selectable_value(

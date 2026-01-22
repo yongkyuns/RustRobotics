@@ -4,7 +4,8 @@ members = [
 	"rust_robotics_sim",
 ]
 exclude = [
-	"python_interface"
+	"python_interface",
+	"examples",
 ]
 
 

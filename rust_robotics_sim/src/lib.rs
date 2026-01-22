@@ -50,11 +50,15 @@ pub async fn start(canvas_id: &str) -> Result<(), wasm_bindgen::JsValue> {
 
     let web_options = eframe::WebOptions::default();
 
-    eframe::WebRunner::new()
+    let runner = eframe::WebRunner::new();
+
+    runner
         .start(
             canvas,
             web_options,
             Box::new(|cc| Ok(Box::new(App::new(cc)))),
         )
-        .await
+        .await?;
+
+    Ok(())
 }

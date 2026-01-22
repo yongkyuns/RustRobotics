@@ -28,6 +28,7 @@ wasm-bindgen = "0.2.108"
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tracing-subscriber = "0.3"
+rust_robotics_algo = {version="0.1", path="../rust_robotics_algo", features = ["osqp"]}
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
