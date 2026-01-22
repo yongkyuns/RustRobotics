@@ -1,16 +1,10 @@
 use crate::simulator::Simulator;
-use crate::View;
 
 use eframe::egui;
 
 #[derive(Default)]
-pub struct State {
-    sim: Simulator,
-}
-
-#[derive(Default)]
 pub struct App {
-    state: State,
+    sim: Simulator,
 }
 
 impl App {
@@ -21,10 +15,11 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.state.sim.update();
-        egui::CentralPanel::default().show(ctx, |_ui| {
+        self.sim.update();
+
+        egui::CentralPanel::default().show(ctx, |ui| {
             ctx.set_visuals(egui::Visuals::dark());
-            self.state.sim.show(ctx, &mut true);
+            self.sim.ui(ui);
         });
 
         ctx.request_repaint();

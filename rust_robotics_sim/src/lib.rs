@@ -6,10 +6,8 @@ pub mod item;
 pub mod math;
 pub mod simulator;
 pub mod time;
-pub mod view;
 
 pub use app::App;
-pub use view::View;
 
 pub mod prelude {
     pub use crate::item::{
@@ -17,7 +15,6 @@ pub mod prelude {
     };
     pub use crate::math::{cos, sin};
     pub use crate::time::Timer;
-    pub use crate::View;
 }
 
 // ----------------------------------------------------------------------------

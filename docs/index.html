@@ -180,16 +180,17 @@
       }
     </script>
 
-    <!-- Service Worker disabled for debugging -->
-    <!--
+    <!-- Unregister any stale service workers -->
     <script>
       if ("serviceWorker" in navigator) {
-        window.addEventListener("load", function () {
-          navigator.serviceWorker.register("/sw.js");
+        navigator.serviceWorker.getRegistrations().then(function (registrations) {
+          for (let registration of registrations) {
+            registration.unregister();
+            console.log("Unregistered stale service worker");
+          }
         });
       }
     </script>
-    -->
   </body>
 </html>
 
