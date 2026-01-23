@@ -286,7 +286,7 @@ impl Simulate for ParticleFilter {
             DriveMode::Kinematic => {
                 // Original kinematic mode using particle filter observation model
                 let u = self.calc_input();
-                let (z, ud) = observation(&mut self.x_true, &mut self.x_dr, u, &MARKERS, dt);
+                let (z, ud) = observation(&mut self.x_true, &mut self.x_dr, u, &MARKERS, dt, self.config.max_range);
                 self.p_est = pf_localization_with_state(
                     &mut self.x_est, &mut self.px, &mut self.pw, z, ud, dt, &mut self.pf_state
                 );
@@ -308,7 +308,7 @@ impl Simulate for ParticleFilter {
 
                 // For particle filter, use computed velocity and yaw rate
                 let u = self.calc_input();
-                let (z, ud) = observation_from_state(&self.x_true, &mut self.x_dr, u, &MARKERS, dt);
+                let (z, ud) = observation_from_state(&self.x_true, &mut self.x_dr, u, &MARKERS, dt, self.config.max_range);
                 self.p_est = pf_localization_with_state(
                     &mut self.x_est, &mut self.px, &mut self.pw, z, ud, dt, &mut self.pf_state
                 );

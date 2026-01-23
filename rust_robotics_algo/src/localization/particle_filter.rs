@@ -34,6 +34,7 @@ pub fn observation(
     u: Vector2,
     rf_id: &[Vector2],
     dt: f32,
+    max_range: f32,
 ) -> (Vec<Vector3>, Vector2) {
     *x_true = motion_model(*x_true, u, dt);
 
@@ -45,7 +46,7 @@ pub fn observation(
         let dx = x_true.x() - rf_id.x();
         let dy = x_true.y() - rf_id.y();
         let d = hypot(dx, dy);
-        if d <= MAX_RANGE {
+        if d <= max_range {
             let dn = d + rand() * sqrt(Q_sim[0]);
             let zi = Vector3::new(dn, rf_id.x(), rf_id.y());
             z.push(zi);
@@ -70,6 +71,7 @@ pub fn observation_from_state(
     u: Vector2,
     rf_id: &[Vector2],
     dt: f32,
+    max_range: f32,
 ) -> (Vec<Vector3>, Vector2) {
     let Q_sim = diag![0.2];
     let R_sim = diag![1.0, (30_f32).to_radians()];
@@ -79,7 +81,7 @@ pub fn observation_from_state(
         let dx = x_true.x() - rf_id.x();
         let dy = x_true.y() - rf_id.y();
         let d = hypot(dx, dy);
-        if d <= MAX_RANGE {
+        if d <= max_range {
             let dn = d + rand() * sqrt(Q_sim[0]);
             let zi = Vector3::new(dn, rf_id.x(), rf_id.y());
             z.push(zi);
@@ -363,7 +365,7 @@ mod tests {
             time += dt;
             let u = calc_input();
 
-            let (z, ud) = observation(&mut x_true, &mut x_dr, u, &rf_id, dt);
+            let (z, ud) = observation(&mut x_true, &mut x_dr, u, &rf_id, dt, MAX_RANGE);
             let _PEst = pf_localization(&mut x_est, &mut px, &mut pw, z, ud, dt);
 
             h_x_est.push(x_est);
