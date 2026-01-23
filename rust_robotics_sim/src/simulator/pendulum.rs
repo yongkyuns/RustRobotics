@@ -339,9 +339,11 @@ impl Draw for InvertedPendulum {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(format!("Pendulum {}", self.id));
-                            if ui.small_button("🗙").clicked() {
-                                keep = false;
-                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("🗙").clicked() {
+                                    keep = false;
+                                }
+                            });
                         });
                         ui.group(|ui| {
                             ui.label("Cart:");
