@@ -49,8 +49,8 @@ pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &M
     plot_ui.line(rod.name(""));            // Hide from legend
 
     // Draw wheel tick marks to show rotation
-    // Wheel rotation angle = distance traveled / radius
-    let wheel_angle = x / r_whl;
+    // Wheel rotation angle = -distance traveled / radius (negative for clockwise when moving right)
+    let wheel_angle = -x / r_whl;
 
     // Left wheel tick
     let left_wheel_cx = x - w / 4.0;
