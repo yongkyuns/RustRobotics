@@ -477,15 +477,12 @@ impl Draw for ParticleFilter {
     fn options(&mut self, ui: &mut Ui) -> bool {
         let mut keep = true;
         ui.group(|ui| {
-            ui.set_min_width(180.0);
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!("Vehicle {}", self.id));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("🗙").clicked() {
-                            keep = false;
-                        }
-                    });
+                    if ui.small_button("🗙").clicked() {
+                        keep = false;
+                    }
                 });
 
                 // Drive mode selector
