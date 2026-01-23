@@ -339,7 +339,7 @@ impl Draw for InvertedPendulum {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(format!("Pendulum {}", self.id));
-                            if ui.small_button("x").clicked() {
+                            if ui.small_button("🗙").clicked() {
                                 keep = false;
                             }
                         });
