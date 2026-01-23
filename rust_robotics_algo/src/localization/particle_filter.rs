@@ -2,7 +2,7 @@ use super::*;
 use nalgebra::{ArrayStorage, Matrix, U1, U100, U4};
 
 /// Maximum observation range
-pub const MAX_RANGE: f32 = 20.0;
+pub const MAX_RANGE: f32 = 60.0;
 
 pub const NP: usize = 100;
 pub const NTh: f32 = NP as f32 / 2.0;
@@ -60,6 +60,40 @@ pub fn observation(
     (z, ud)
 }
 
+/// Generate observations from an externally-controlled state
+///
+/// Unlike `observation`, this function does not update x_true using motion_model.
+/// Use this when x_true is controlled by an external dynamics model (e.g., bicycle model).
+pub fn observation_from_state(
+    x_true: &Vector4,
+    xd: &mut Vector4,
+    u: Vector2,
+    rf_id: &[Vector2],
+    dt: f32,
+) -> (Vec<Vector3>, Vector2) {
+    let Q_sim = diag![0.2];
+    let R_sim = diag![1.0, (30_f32).to_radians()];
+    let mut z = Vec::new();
+
+    for rf_id in rf_id.iter() {
+        let dx = x_true.x() - rf_id.x();
+        let dy = x_true.y() - rf_id.y();
+        let d = hypot(dx, dy);
+        if d <= MAX_RANGE {
+            let dn = d + rand() * sqrt(Q_sim[0]);
+            let zi = Vector3::new(dn, rf_id.x(), rf_id.y());
+            z.push(zi);
+        }
+    }
+    let ud1 = u.x() + rand() * sqrt(R_sim.get_diagonal(0));
+    let ud2 = u.y() + rand() * sqrt(R_sim.get_diagonal(1));
+    let ud = Vector2::new(ud1, ud2);
+
+    *xd = motion_model(*xd, ud, dt);
+
+    (z, ud)
+}
+
 pub fn motion_model(x: Vector4, u: Vector2, dt: f32) -> Vector4 {
     let F = diag![1., 1., 1., 0.];
 
@@ -86,6 +120,24 @@ pub fn calc_covariance(x_est: &Vector4, px: &PX, pw: &PW) -> Matrix3 {
     cov
 }
 
+/// Minimum weight sum threshold - below this, particles have diverged
+const DIVERGENCE_THRESHOLD: f32 = 1e-10;
+/// Spread for resetting particles around observations
+const RESET_SPREAD: f32 = 2.0;
+/// Base smoothing factor for estimate updates (0 = no smoothing, 1 = full smoothing)
+const ESTIMATE_SMOOTHING_BASE: f32 = 0.5;
+/// High smoothing factor used during recovery from no observations
+const ESTIMATE_SMOOTHING_RECOVERY: f32 = 0.9;
+/// Weight for uniform component in likelihood (prevents complete weight collapse)
+const LIKELIHOOD_UNIFORM_WEIGHT: f32 = 0.01;
+
+/// Compute likelihood with uniform mixture to prevent weight collapse
+fn robust_likelihood(dz: f32, sigma: f32) -> f32 {
+    let gauss = gauss_likelihood(dz, sigma);
+    // Mix with small uniform probability to prevent complete collapse
+    (1.0 - LIKELIHOOD_UNIFORM_WEIGHT) * gauss + LIKELIHOOD_UNIFORM_WEIGHT * 0.01
+}
+
 pub fn pf_localization(
     x_est: &mut Vector4,
     px: &mut PX,
@@ -94,8 +146,45 @@ pub fn pf_localization(
     u: Vector2,
     dt: f32,
 ) -> Matrix3 {
-    let Q = diag![0.2];
+    pf_localization_with_state(x_est, px, pw, z, u, dt, &mut PFState::default())
+}
+
+/// Particle filter state for tracking recovery phases
+#[derive(Default)]
+pub struct PFState {
+    /// Number of consecutive steps without observations
+    pub no_obs_count: u32,
+    /// Number of steps since observations resumed (for recovery smoothing)
+    pub recovery_count: u32,
+}
+
+/// Extended particle filter localization with state tracking
+pub fn pf_localization_with_state(
+    x_est: &mut Vector4,
+    px: &mut PX,
+    pw: &mut PW,
+    z: Vec<Vector3>,
+    u: Vector2,
+    dt: f32,
+    state: &mut PFState,
+) -> Matrix3 {
+    // Softer observation noise for more robust likelihood
+    let Q = diag![1.0];  // Increased from 0.2 for softer likelihood
     let R = diag![2.0, (40_f32).to_radians()];
+
+    // Track observation state
+    let has_observations = !z.is_empty();
+    if !has_observations {
+        state.no_obs_count = state.no_obs_count.saturating_add(1);
+        state.recovery_count = 0;
+    } else if state.no_obs_count > 10 {
+        // Was without observations for a while, now in recovery
+        state.recovery_count = state.recovery_count.saturating_add(1);
+        state.no_obs_count = 0;
+    } else {
+        state.no_obs_count = 0;
+        state.recovery_count = state.recovery_count.saturating_add(1);
+    }
 
     for ip in 0..NP {
         let x = px.column(ip).into_owned();
@@ -111,16 +200,41 @@ pub fn pf_localization(
             let dy = x[1] - zi.y();
             let pre_z = hypot(dx, dy);
             let dz = pre_z - zi.d();
-            w = w * gauss_likelihood(dz, sqrt(Q[(0, 0)]));
+            w = w * robust_likelihood(dz, sqrt(Q[(0, 0)]));
         }
         px.set_column(ip, &x);
         pw[ip] = w;
     }
 
-    *pw /= pw.sum();
+    let w_sum = pw.sum();
 
-    // let x_est = *px * pw.transpose();
-    *x_est = *px * pw.transpose();
+    // Check for divergence: if weight sum is too small, reset particles
+    if w_sum < DIVERGENCE_THRESHOLD && has_observations {
+        // Reset particles around observed landmarks
+        reset_particles_around_observations(px, pw, &z, x_est);
+        state.recovery_count = 1; // Start recovery phase
+    } else if w_sum > 0.0 {
+        *pw /= w_sum;
+    } else {
+        // No observations and weights collapsed - reset to uniform
+        *pw = ones!(1, NP) * (1. / NP as f32);
+    }
+
+    // Compute new estimate from particles
+    let x_new = *px * pw.transpose();
+
+    // Adaptive smoothing: use higher smoothing during recovery phase
+    let smoothing = if state.recovery_count > 0 && state.recovery_count < 50 {
+        // Gradually reduce smoothing from recovery to base over 50 steps
+        let t = state.recovery_count as f32 / 50.0;
+        ESTIMATE_SMOOTHING_RECOVERY * (1.0 - t) + ESTIMATE_SMOOTHING_BASE * t
+    } else {
+        ESTIMATE_SMOOTHING_BASE
+    };
+
+    // Smooth the estimate to avoid sudden jumps
+    *x_est = *x_est * smoothing + x_new * (1.0 - smoothing);
+
     let p_est = calc_covariance(x_est, px, pw);
 
     let N_eff = 1. / (*pw * pw.transpose())[0];
@@ -128,6 +242,26 @@ pub fn pf_localization(
         re_sampling(px, pw);
     }
     p_est
+}
+
+/// Reset particles around observed landmarks when filter has diverged
+fn reset_particles_around_observations(px: &mut PX, pw: &mut PW, z: &[Vector3], x_est: &Vector4) {
+    for ip in 0..NP {
+        // Pick a random observation to reset around
+        let zi = &z[ip % z.len()];
+        // The observation gives distance to landmark at (zi.x(), zi.y())
+        // Place particle at random angle from landmark at observed distance
+        let angle = rand() * 2.0 * PI; // Full circle
+        let dist = zi.d() + rand() * RESET_SPREAD;
+        let new_particle = vector![
+            zi.x() + dist * cos(angle),
+            zi.y() + dist * sin(angle),
+            x_est[2] + rand() * 0.3,  // Keep approximate heading with small noise
+            x_est[3]                   // Keep velocity
+        ];
+        px.set_column(ip, &new_particle);
+    }
+    *pw = ones!(1, NP) * (1. / NP as f32);
 }
 
 pub fn re_sampling(px: &mut PX, pw: &mut PW) {

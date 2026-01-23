@@ -189,6 +189,25 @@ impl Simulator {
 
     /// Draw the UI directly into a Ui (for embedding in CentralPanel)
     pub fn ui(&mut self, ui: &mut Ui) {
+        // Handle space key to pause/resume simulation
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) {
+            self.paused = !self.paused;
+        }
+
+        // Handle enter key to restart simulation
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.time = 0.0;
+            self.reset_state();
+        }
+
+        // Handle keyboard input for vehicle simulations
+        if self.mode == SimMode::Localization {
+            let ctx = ui.ctx().clone();
+            for vehicle in &mut self.vehicles {
+                vehicle.handle_keyboard(&ctx);
+            }
+        }
+
         // Mode selector at the top
         ui.horizontal(|ui| {
             ui.label("Simulation:");
@@ -241,6 +260,18 @@ impl Simulator {
                 }
             }
         });
+
+        // Show keyboard controls hint if any vehicle is in dynamic mode
+        if self.mode == SimMode::Localization && self.vehicles.iter().any(|v| v.is_dynamic_mode()) {
+            ui.collapsing("Keyboard Controls", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("← → : Steering");
+                    ui.label("   ↑ ↓ : Accelerate/Brake");
+                    ui.label("   Space : Pause");
+                    ui.label("   Enter : Restart");
+                });
+            });
+        }
 
         ui.separator();
 

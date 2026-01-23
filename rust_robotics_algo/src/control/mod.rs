@@ -1,4 +1,5 @@
 pub mod inverted_pendulum;
+pub mod vehicle;
 
 use crate::prelude::*;
 
