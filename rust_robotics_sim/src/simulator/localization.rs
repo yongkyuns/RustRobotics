@@ -282,13 +282,20 @@ impl Simulate for ParticleFilter {
     }
 
     fn step(&mut self, dt: f32) {
+        // Create noise params from config
+        let noise = PFNoiseParams {
+            obs_noise: self.config.obs_noise,
+            motion_noise_v: self.config.motion_noise_v,
+            motion_noise_yaw: self.config.motion_noise_yaw.to_radians(),
+        };
+
         match self.config.drive_mode {
             DriveMode::Kinematic => {
                 // Original kinematic mode using particle filter observation model
                 let u = self.calc_input();
                 let (z, ud) = observation(&mut self.x_true, &mut self.x_dr, u, &MARKERS, dt, self.config.max_range);
                 self.p_est = pf_localization_with_state(
-                    &mut self.x_est, &mut self.px, &mut self.pw, z, ud, dt, &mut self.pf_state
+                    &mut self.x_est, &mut self.px, &mut self.pw, z, ud, dt, &mut self.pf_state, &noise
                 );
             }
             DriveMode::Dynamic => {
@@ -310,7 +317,7 @@ impl Simulate for ParticleFilter {
                 let u = self.calc_input();
                 let (z, ud) = observation_from_state(&self.x_true, &mut self.x_dr, u, &MARKERS, dt, self.config.max_range);
                 self.p_est = pf_localization_with_state(
-                    &mut self.x_est, &mut self.px, &mut self.pw, z, ud, dt, &mut self.pf_state
+                    &mut self.x_est, &mut self.px, &mut self.pw, z, ud, dt, &mut self.pf_state, &noise
                 );
             }
         }

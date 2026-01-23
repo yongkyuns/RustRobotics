@@ -148,7 +148,7 @@ pub fn pf_localization(
     u: Vector2,
     dt: f32,
 ) -> Matrix3 {
-    pf_localization_with_state(x_est, px, pw, z, u, dt, &mut PFState::default())
+    pf_localization_with_state(x_est, px, pw, z, u, dt, &mut PFState::default(), &PFNoiseParams::default())
 }
 
 /// Particle filter state for tracking recovery phases
@@ -160,6 +160,27 @@ pub struct PFState {
     pub recovery_count: u32,
 }
 
+/// Noise parameters for particle filter
+#[derive(Debug, Clone, Copy)]
+pub struct PFNoiseParams {
+    /// Observation noise (std dev for distance measurement)
+    pub obs_noise: f32,
+    /// Motion noise for velocity
+    pub motion_noise_v: f32,
+    /// Motion noise for yaw rate (radians)
+    pub motion_noise_yaw: f32,
+}
+
+impl Default for PFNoiseParams {
+    fn default() -> Self {
+        Self {
+            obs_noise: 1.0,
+            motion_noise_v: 2.0,
+            motion_noise_yaw: (40_f32).to_radians(),
+        }
+    }
+}
+
 /// Extended particle filter localization with state tracking
 pub fn pf_localization_with_state(
     x_est: &mut Vector4,
@@ -169,10 +190,11 @@ pub fn pf_localization_with_state(
     u: Vector2,
     dt: f32,
     state: &mut PFState,
+    noise: &PFNoiseParams,
 ) -> Matrix3 {
-    // Softer observation noise for more robust likelihood
-    let Q = diag![1.0];  // Increased from 0.2 for softer likelihood
-    let R = diag![2.0, (40_f32).to_radians()];
+    // Use configurable noise parameters
+    let Q = diag![noise.obs_noise];
+    let R = diag![noise.motion_noise_v, noise.motion_noise_yaw];
 
     // Track observation state
     let has_observations = !z.is_empty();
