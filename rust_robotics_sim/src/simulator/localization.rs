@@ -474,10 +474,16 @@ impl Draw for ParticleFilter {
         ));
     }
 
-    fn options(&mut self, ui: &mut Ui) {
+    fn options(&mut self, ui: &mut Ui) -> bool {
+        let mut keep = true;
         ui.group(|ui| {
             ui.vertical(|ui| {
-                ui.label(format!("Vehicle {}", self.id));
+                ui.horizontal(|ui| {
+                    ui.label(format!("Vehicle {}", self.id));
+                    if ui.small_button("✕").clicked() {
+                        keep = false;
+                    }
+                });
 
                 // Drive mode selector
                 ui.horizontal(|ui| {
@@ -637,6 +643,7 @@ impl Draw for ParticleFilter {
                 });
             });
         });
+        keep
     }
 }
 

@@ -47,7 +47,8 @@ pub trait Draw {
     /// Draw the simulation onto a 2D scene
     fn scene(&self, plot_ui: &mut PlotUi<'_>);
     /// Draw any GUI elements to interact with the simulation
-    fn options(&mut self, ui: &mut Ui);
+    /// Returns true to keep the simulation, false to remove it
+    fn options(&mut self, ui: &mut Ui) -> bool;
     /// Draw time-domain plot (optional)
     fn plot(&self, _plot_ui: &mut PlotUi<'_>) {}
 }
@@ -257,10 +258,10 @@ impl Simulator {
         ui.horizontal(|ui| {
             match self.mode {
                 SimMode::InvertedPendulum => {
-                    self.pendulums.iter_mut().for_each(|sim| sim.options(ui));
+                    self.pendulums.retain_mut(|sim| sim.options(ui));
                 }
                 SimMode::Localization => {
-                    self.vehicles.iter_mut().for_each(|sim| sim.options(ui));
+                    self.vehicles.retain_mut(|sim| sim.options(ui));
                 }
             }
         });

@@ -331,11 +331,18 @@ impl Draw for InvertedPendulum {
         );
     }
 
-    fn options(&mut self, ui: &mut Ui) {
+    fn options(&mut self, ui: &mut Ui) -> bool {
+        let mut keep = true;
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.group(|ui| {
                     ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Pendulum {}", self.id));
+                            if ui.small_button("✕").clicked() {
+                                keep = false;
+                            }
+                        });
                         ui.group(|ui| {
                             ui.label("Cart:");
                             ui.add(
@@ -389,6 +396,7 @@ impl Draw for InvertedPendulum {
                 });
             });
         });
+        keep
     }
 }
 
