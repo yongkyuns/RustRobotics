@@ -127,11 +127,13 @@ const DIVERGENCE_THRESHOLD: f32 = 1e-10;
 /// Spread for resetting particles around observations
 const RESET_SPREAD: f32 = 2.0;
 /// Base smoothing factor for estimate updates (0 = no smoothing, 1 = full smoothing)
-const ESTIMATE_SMOOTHING_BASE: f32 = 0.5;
+const ESTIMATE_SMOOTHING_BASE: f32 = 0.3;
 /// High smoothing factor used during recovery from no observations
-const ESTIMATE_SMOOTHING_RECOVERY: f32 = 0.9;
+const ESTIMATE_SMOOTHING_RECOVERY: f32 = 0.7;
 /// Weight for uniform component in likelihood (prevents complete weight collapse)
 const LIKELIHOOD_UNIFORM_WEIGHT: f32 = 0.01;
+/// Particle spread threshold - if particles are spread wider than this, use more smoothing
+const PARTICLE_SPREAD_THRESHOLD: f32 = 10.0;
 
 /// Compute likelihood with uniform mixture to prevent weight collapse
 fn robust_likelihood(dz: f32, sigma: f32) -> f32 {
@@ -247,13 +249,23 @@ pub fn pf_localization_with_state(
     // Compute new estimate from particles
     let x_new = *px * pw.transpose();
 
-    // Adaptive smoothing: use higher smoothing during recovery phase
-    let smoothing = if state.recovery_count > 0 && state.recovery_count < 50 {
-        // Gradually reduce smoothing from recovery to base over 50 steps
-        let t = state.recovery_count as f32 / 50.0;
-        ESTIMATE_SMOOTHING_RECOVERY * (1.0 - t) + ESTIMATE_SMOOTHING_BASE * t
+    // Compute particle spread (standard deviation of x,y positions)
+    let mean_x = px.row(0).mean();
+    let mean_y = px.row(1).mean();
+    let var_x: f32 = px.row(0).iter().map(|x| (x - mean_x).powi(2)).sum::<f32>() / NP as f32;
+    let var_y: f32 = px.row(1).iter().map(|y| (y - mean_y).powi(2)).sum::<f32>() / NP as f32;
+    let particle_spread = (var_x + var_y).sqrt();
+
+    // Adaptive smoothing based on particle convergence
+    // - If particles are spread out (uncertain), use more smoothing to avoid jumps
+    // - If particles have converged (confident), trust the new estimate more
+    let spread_factor = (particle_spread / PARTICLE_SPREAD_THRESHOLD).min(1.0);
+    let smoothing = if state.recovery_count > 0 && state.recovery_count < 20 {
+        // During early recovery, blend based on spread
+        ESTIMATE_SMOOTHING_RECOVERY * spread_factor + ESTIMATE_SMOOTHING_BASE * (1.0 - spread_factor)
     } else {
-        ESTIMATE_SMOOTHING_BASE
+        // Normal operation - light smoothing
+        ESTIMATE_SMOOTHING_BASE * spread_factor
     };
 
     // Smooth the estimate to avoid sudden jumps
