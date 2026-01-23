@@ -480,11 +480,9 @@ impl Draw for ParticleFilter {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!("Vehicle {}", self.id));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("🗙").clicked() {
-                            keep = false;
-                        }
-                    });
+                    if ui.small_button("🗙").clicked() {
+                        keep = false;
+                    }
                 });
 
                 // Drive mode selector
