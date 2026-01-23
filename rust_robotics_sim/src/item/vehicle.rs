@@ -74,7 +74,7 @@ pub fn draw_vehicle(plot_ui: &mut PlotUi<'_>, state: Vector4, name: &str, steeri
         local_to_global(tri_offset, -tri_base * 0.5, x, y, ang),
         local_to_global(tri_offset + tri_height, 0.0, x, y, ang),
     ]);
-    let triangle = Polygon::new(name, tri_points)
+    let triangle = Polygon::new("", tri_points)  // Hide from legend
         .fill_color(Color32::TRANSPARENT);
     plot_ui.polygon(triangle);
 

@@ -393,9 +393,9 @@ impl Draw for ParticleFilter {
     }
 
     fn scene(&self, plot_ui: &mut PlotUi<'_>) {
-        // Draw particles
+        // Draw particles (hidden from legend)
         plot_ui.points(Points::new(
-            format!("Particles {}", self.id),
+            "",
             PlotPoints::new(
                 self.px
                     .column_iter()
@@ -407,9 +407,9 @@ impl Draw for ParticleFilter {
             ),
         ));
 
-        // Draw landmarks and detection lines
+        // Draw landmarks and detection lines (hidden from legend)
         MARKERS.iter().for_each(|marker| {
-            plot_ui.points(Points::new("Landmarks", marker_values()).radius(5.0));
+            plot_ui.points(Points::new("", marker_values()).radius(5.0));
             if is_detected(marker, &self.x_true, self.config.max_range) {
                 plot_ui.line(
                     Line::new("", values_from_marker_state(marker, &self.x_true))
@@ -421,9 +421,9 @@ impl Draw for ParticleFilter {
         // Label offset above vehicle (in plot coordinates)
         let label_offset = 3.0;
 
-        // Draw trajectories and vehicles with labels
+        // Draw trajectories (hidden from legend) and vehicles with labels
         plot_ui.line(Line::new(
-            format!("True Path {}", self.id),
+            "",
             self.h_x_true.positions(),
         ));
         draw_vehicle(
@@ -440,7 +440,7 @@ impl Draw for ParticleFilter {
         ));
 
         plot_ui.line(Line::new(
-            format!("DR Path {}", self.id),
+            "",
             self.h_x_dr.positions(),
         ));
         draw_vehicle(
@@ -457,7 +457,7 @@ impl Draw for ParticleFilter {
         ));
 
         plot_ui.line(Line::new(
-            format!("Est Path {}", self.id),
+            "",
             self.h_x_est.positions(),
         ));
         draw_vehicle(
