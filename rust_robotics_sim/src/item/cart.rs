@@ -47,4 +47,32 @@ pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &M
     plot_ui.polygon(right_wheel.name("")); // Hide from legend
     plot_ui.polygon(ball.name(""));        // Hide from legend
     plot_ui.line(rod.name(""));            // Hide from legend
+
+    // Draw wheel tick marks to show rotation
+    // Wheel rotation angle = distance traveled / radius
+    let wheel_angle = x / r_whl;
+
+    // Left wheel tick
+    let left_wheel_cx = x - w / 4.0;
+    let left_wheel_cy = y + r_whl;
+    let left_tick = Line::new(
+        "",
+        PlotPoints::new(vec![
+            [left_wheel_cx, left_wheel_cy],
+            [left_wheel_cx + r_whl * cos(wheel_angle), left_wheel_cy + r_whl * sin(wheel_angle)],
+        ]),
+    );
+    plot_ui.line(left_tick);
+
+    // Right wheel tick
+    let right_wheel_cx = x + w / 4.0;
+    let right_wheel_cy = y + r_whl;
+    let right_tick = Line::new(
+        "",
+        PlotPoints::new(vec![
+            [right_wheel_cx, right_wheel_cy],
+            [right_wheel_cx + r_whl * cos(wheel_angle), right_wheel_cy + r_whl * sin(wheel_angle)],
+        ]),
+    );
+    plot_ui.line(right_tick);
 }
