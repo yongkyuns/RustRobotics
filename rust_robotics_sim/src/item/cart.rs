@@ -35,7 +35,7 @@ pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &M
         .at(rod_top.x, rod_top.y)
         .into_polygon();
     let rod = Line::new(
-        "Rod",
+        "",
         PlotPoints::new(vec![
             [rod_bottom.x, rod_bottom.y],
             [rod_top.x, rod_top.y],
@@ -43,8 +43,8 @@ pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &M
     );
 
     plot_ui.polygon(body.name(name));
-    plot_ui.polygon(left_wheel.name("Left Wheel"));
-    plot_ui.polygon(right_wheel.name("Right Wheel"));
-    plot_ui.polygon(ball.name("Ball"));
-    plot_ui.line(rod.name("Rod"));
+    plot_ui.polygon(left_wheel.name(""));  // Hide from legend
+    plot_ui.polygon(right_wheel.name("")); // Hide from legend
+    plot_ui.polygon(ball.name(""));        // Hide from legend
+    plot_ui.line(rod.name(""));            // Hide from legend
 }
