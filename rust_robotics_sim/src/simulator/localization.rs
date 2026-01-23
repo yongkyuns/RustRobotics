@@ -4,7 +4,7 @@ use crate::data::VehiclePlot;
 use crate::item::draw_vehicle;
 
 use egui::{DragValue, Ui};
-use egui_plot::{Line, LineStyle, PlotPoints, PlotUi, Points};
+use egui_plot::{Line, LineStyle, PlotPoint, PlotPoints, PlotUi, Points, Text};
 use rb::control::vehicle::{BicycleModel, TireModel, TireParams, VehicleParams, VehicleState};
 use rb::localization::{particle_filter::*, StateVector};
 use rb::prelude::*;
@@ -411,7 +411,10 @@ impl Draw for ParticleFilter {
             }
         });
 
-        // Draw trajectories
+        // Label offset above vehicle (in plot coordinates)
+        let label_offset = 3.0;
+
+        // Draw trajectories and vehicles with labels
         plot_ui.line(Line::new(
             format!("True Path {}", self.id),
             self.h_x_true.positions(),
@@ -423,6 +426,11 @@ impl Draw for ParticleFilter {
             self.keyboard.steering,
             &self.vehicle_params,
         );
+        plot_ui.text(Text::new(
+            "",
+            PlotPoint::new(self.x_true.x() as f64, self.x_true.y() as f64 + label_offset),
+            "GT",
+        ));
 
         plot_ui.line(Line::new(
             format!("DR Path {}", self.id),
@@ -435,6 +443,11 @@ impl Draw for ParticleFilter {
             self.keyboard.steering,
             &self.vehicle_params,
         );
+        plot_ui.text(Text::new(
+            "",
+            PlotPoint::new(self.x_dr.x() as f64, self.x_dr.y() as f64 + label_offset),
+            "DR",
+        ));
 
         plot_ui.line(Line::new(
             format!("Est Path {}", self.id),
@@ -447,6 +460,11 @@ impl Draw for ParticleFilter {
             self.keyboard.steering,
             &self.vehicle_params,
         );
+        plot_ui.text(Text::new(
+            "",
+            PlotPoint::new(self.x_est.x() as f64, self.x_est.y() as f64 + label_offset),
+            "PF",
+        ));
     }
 
     fn options(&mut self, ui: &mut Ui) {
