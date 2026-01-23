@@ -248,7 +248,7 @@ impl Simulator {
 
             ui.separator();
             ui.label("Speed:");
-            ui.add(Slider::new(&mut self.sim_speed, 1..=10).show_value(true));
+            ui.add(Slider::new(&mut self.sim_speed, 1..=20).show_value(true));
         });
 
         ui.separator();
