@@ -148,6 +148,8 @@ pub struct GraphSlam {
     pub fix_first_pose: bool,
     /// Optimizer configuration
     pub config: OptimizerConfig,
+    /// Maximum number of poses (sliding window size, 0 = unlimited)
+    pub max_poses: usize,
 }
 
 impl Default for GraphSlam {
@@ -166,6 +168,7 @@ impl GraphSlam {
             observation_constraints: Vec::new(),
             fix_first_pose: true,
             config: OptimizerConfig::default(),
+            max_poses: 50, // Default sliding window size
         }
     }
 
@@ -216,6 +219,44 @@ impl GraphSlam {
             measurement: Vector2::new(range, bearing),
             information,
         });
+    }
+
+    /// Prune old poses to maintain sliding window size
+    /// Returns the number of poses removed (for index adjustment by caller)
+    pub fn prune_old_poses(&mut self) -> usize {
+        if self.max_poses == 0 || self.poses.len() <= self.max_poses {
+            return 0;
+        }
+
+        let n_remove = self.poses.len() - self.max_poses;
+
+        // Remove old poses
+        self.poses.drain(0..n_remove);
+
+        // Update odometry constraint indices and remove invalid ones
+        self.odometry_constraints.retain_mut(|c| {
+            if c.from_idx < n_remove || c.to_idx < n_remove {
+                // Constraint references a removed pose
+                false
+            } else {
+                c.from_idx -= n_remove;
+                c.to_idx -= n_remove;
+                true
+            }
+        });
+
+        // Update observation constraint indices and remove invalid ones
+        self.observation_constraints.retain_mut(|c| {
+            if c.pose_idx < n_remove {
+                // Constraint references a removed pose
+                false
+            } else {
+                c.pose_idx -= n_remove;
+                true
+            }
+        });
+
+        n_remove
     }
 
     /// Get the total number of variables
