@@ -143,13 +143,13 @@ impl Default for EkfSlamConfig {
             motion_noise: Matrix3::new(
                 0.02, 0.0, 0.0,    // x variance per meter traveled
                 0.0, 0.02, 0.0,    // y variance per meter traveled
-                0.0, 0.0, 0.2,     // theta variance per radian turned (higher for better correction)
+                0.0, 0.0, 0.05,    // theta variance per radian turned (lower to reduce heading drift)
             ),
             // Observation noise (range, bearing variances)
             // Lower bearing noise helps constrain heading better
             observation_noise: Matrix2::new(
                 0.1, 0.0,     // range variance (0.32m std dev)
-                0.0, 0.005,   // bearing variance (~4 deg std dev) - lower to better constrain heading
+                0.0, 0.002,   // bearing variance (~2.5 deg std dev) - tighter to better constrain heading
             ),
             // Mahalanobis distance gate for data association
             association_gate: 5.0,
@@ -548,9 +548,22 @@ pub fn update(
     }
 
     // Add new landmarks after updating with known ones
-    for obs in new_obs {
-        add_landmark(state, obs, config);
+    // When the map is empty, always add landmarks (initial mapping)
+    // Otherwise, only add new landmarks if:
+    // 1. We have at least 2 known landmarks for heading constraint
+    // 2. Heading uncertainty is below a threshold (prevent adding during high uncertainty)
+    let heading_variance = state.sigma[(2, 2)];
+    let heading_uncertainty_ok = heading_variance < 0.05; // ~12 deg std dev threshold
+    let enough_known_landmarks = known_obs.len() >= 2;
+    let map_is_empty = state.n_landmarks == 0;
+
+    if map_is_empty || (heading_uncertainty_ok && enough_known_landmarks) {
+        for obs in new_obs {
+            add_landmark(state, obs, config);
+        }
     }
+    // When conditions aren't met, we skip adding new landmarks
+    // They'll be added later when conditions improve (after revisiting known landmarks)
 }
 
 /// Batch update using multiple landmark observations simultaneously
@@ -613,6 +626,36 @@ fn batch_update_landmarks(
     // Innovation covariance: S = H Σ Hᵀ + Q
     let S = &H * &state.sigma * H.transpose() + Q;
 
+    // Innovation gating for batch update BEFORE inverting S
+    // Check if any individual observation has abnormally large innovation
+    let mut any_outlier = false;
+    for i in 0..observations.len() {
+        // Check each observation's innovation using its 2x2 sub-block of S
+        let dz_i = nalgebra::Vector2::new(dz[2 * i], dz[2 * i + 1]);
+        let s_i = Matrix2::new(
+            S[(2 * i, 2 * i)], S[(2 * i, 2 * i + 1)],
+            S[(2 * i + 1, 2 * i)], S[(2 * i + 1, 2 * i + 1)],
+        );
+        if let Some(s_i_inv) = s_i.try_inverse() {
+            let mahal_sq = (dz_i.transpose() * s_i_inv * dz_i)[(0, 0)];
+            // Chi-squared with 2 DOF at 99.5% ≈ 10.6
+            if mahal_sq > 10.0 {
+                any_outlier = true;
+                break;
+            }
+        }
+    }
+
+    // If any observation is an outlier, fall back to sequential update
+    // (which has individual gating for each observation)
+    if any_outlier {
+        // Fall back to sequential updates with individual gating
+        for (idx, obs) in observations {
+            update_landmark(state, config, *idx, obs);
+        }
+        return;
+    }
+
     // Kalman gain: K = Σ Hᵀ S⁻¹
     if let Some(s_inv) = S.try_inverse() {
         let K = &state.sigma * H.transpose() * s_inv;
@@ -630,6 +673,9 @@ fn batch_update_landmarks(
 
         // Ensure symmetry
         state.sigma = (&state.sigma + state.sigma.transpose()) * 0.5;
+
+        // Minimum covariance to prevent over-confidence
+        enforce_min_covariance(state);
     }
 }
 
@@ -672,11 +718,23 @@ fn update_landmark(
 
     // Kalman gain: K = Σ Hᵀ S⁻¹
     if let Some(s_inv) = S.try_inverse() {
+        // Innovation gating: reject outlier observations
+        // Compute Mahalanobis distance of innovation
+        let dz_vec = DVector::from_column_slice(&[dz[0], dz[1]]);
+        let mahal_sq = (dz.transpose() * &s_inv * dz)[(0, 0)];
+
+        // Gate threshold: chi-squared with 2 DOF at 99.5% confidence ≈ 10.6
+        // Using a stricter gate to prevent bad observations from corrupting state
+        const INNOVATION_GATE: f32 = 10.0;
+        if mahal_sq > INNOVATION_GATE {
+            // Innovation too large - this observation is an outlier, skip it
+            return;
+        }
+
         let K = &state.sigma * H.transpose() * s_inv;
 
         // State update: μ' = μ + K z
-        let dz_vec = DVector::from_column_slice(&[dz[0], dz[1]]);
-        let update = &K * dz_vec;
+        let update = &K * &dz_vec;
         state.mu += update;
 
         // Normalize heading
@@ -688,6 +746,44 @@ fn update_landmark(
 
         // Ensure symmetry
         state.sigma = (&state.sigma + state.sigma.transpose()) * 0.5;
+
+        // Minimum covariance to prevent over-confidence
+        // This helps prevent map rotation by keeping some uncertainty in landmark positions
+        enforce_min_covariance(state);
+    }
+}
+
+/// Enforce minimum covariance on robot pose and landmarks
+/// This prevents the filter from becoming over-confident, which can cause
+/// map rotation when heading has systematic errors
+fn enforce_min_covariance(state: &mut EkfSlamState) {
+    // Minimum robot pose covariance
+    const MIN_POS_VAR: f32 = 0.001;   // 3cm std dev
+    const MIN_THETA_VAR: f32 = 0.0001; // 0.6 deg std dev
+
+    // Minimum landmark covariance
+    const MIN_LANDMARK_VAR: f32 = 0.01; // 10cm std dev
+
+    // Apply minimum to robot pose
+    if state.sigma[(0, 0)] < MIN_POS_VAR {
+        state.sigma[(0, 0)] = MIN_POS_VAR;
+    }
+    if state.sigma[(1, 1)] < MIN_POS_VAR {
+        state.sigma[(1, 1)] = MIN_POS_VAR;
+    }
+    if state.sigma[(2, 2)] < MIN_THETA_VAR {
+        state.sigma[(2, 2)] = MIN_THETA_VAR;
+    }
+
+    // Apply minimum to landmark positions
+    for i in 0..state.n_landmarks {
+        let base = 3 + 2 * i;
+        if state.sigma[(base, base)] < MIN_LANDMARK_VAR {
+            state.sigma[(base, base)] = MIN_LANDMARK_VAR;
+        }
+        if state.sigma[(base + 1, base + 1)] < MIN_LANDMARK_VAR {
+            state.sigma[(base + 1, base + 1)] = MIN_LANDMARK_VAR;
+        }
     }
 }
 
