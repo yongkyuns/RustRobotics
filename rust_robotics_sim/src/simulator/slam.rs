@@ -13,6 +13,35 @@ use rb::slam::{
     generate_observations, motion_model, predict, update, EkfSlamConfig, EkfSlamState, Observation,
 };
 use rust_robotics_algo as rb;
+use std::fs::File;
+use std::io::Write;
+
+/// Log entry for a single simulation step
+#[derive(Clone)]
+struct StepLog {
+    step: usize,
+    // True state
+    true_x: f32,
+    true_y: f32,
+    true_theta: f32,
+    // Estimated state
+    est_x: f32,
+    est_y: f32,
+    est_theta: f32,
+    // Position error
+    pos_error: f32,
+    heading_error: f32,
+    // Observations
+    n_observations: usize,
+    observed_landmark_indices: Vec<usize>,
+    // State info
+    n_landmarks_in_state: usize,
+    // Data association info (which estimated landmark each observation matched to)
+    associations: Vec<Option<usize>>,
+}
+
+/// Maximum number of log entries to keep
+const MAX_LOG_ENTRIES: usize = 5000;
 
 /// Maximum history length for trajectory visualization
 const HISTORY_LEN: usize = 1000;
@@ -70,6 +99,13 @@ pub struct SlamDemo {
 
     /// Vehicle parameters for visualization
     vehicle_params: VehicleParams,
+
+    /// Step counter for logging
+    step_count: usize,
+    /// Log buffer for debugging
+    logs: Vec<StepLog>,
+    /// Enable logging
+    logging_enabled: bool,
 }
 
 impl SlamDemo {
@@ -96,7 +132,71 @@ impl SlamDemo {
             show_dr: true,
             show_true_landmarks: true,
             vehicle_params: VehicleParams::default(),
+            step_count: 0,
+            logs: Vec::new(),
+            logging_enabled: true,
         }
+    }
+
+    /// Save logs to a file
+    fn save_logs(&self) -> Result<String, std::io::Error> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let filename = format!("slam_log_{}.csv", timestamp);
+
+        let mut file = File::create(&filename)?;
+
+        // Write header
+        writeln!(file, "step,true_x,true_y,true_theta,est_x,est_y,est_theta,pos_error,heading_error,n_obs,n_landmarks,observed_indices,associations")?;
+
+        // Write data
+        for log in &self.logs {
+            let obs_indices: String = log.observed_landmark_indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(";");
+            let assoc_str: String = log.associations
+                .iter()
+                .map(|a| match a {
+                    Some(i) => i.to_string(),
+                    None => "new".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+
+            writeln!(
+                file,
+                "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{}",
+                log.step,
+                log.true_x, log.true_y, log.true_theta,
+                log.est_x, log.est_y, log.est_theta,
+                log.pos_error, log.heading_error,
+                log.n_observations, log.n_landmarks_in_state,
+                obs_indices, assoc_str
+            )?;
+        }
+
+        // Also save landmark positions
+        let lm_filename = format!("slam_landmarks_{}.csv", timestamp);
+        let mut lm_file = File::create(&lm_filename)?;
+        writeln!(lm_file, "type,index,x,y")?;
+
+        // True landmarks
+        for (i, lm) in self.landmarks_true.iter().enumerate() {
+            writeln!(lm_file, "true,{},{:.4},{:.4}", i, lm[0], lm[1])?;
+        }
+
+        // Estimated landmarks
+        for i in 0..self.slam_state.n_landmarks {
+            if let Some(lm) = self.slam_state.landmark(i) {
+                writeln!(lm_file, "estimated,{},{:.4},{:.4}", i, lm[0], lm[1])?;
+            }
+        }
+
+        Ok(filename)
     }
 
     fn update_history(&mut self) {
@@ -152,10 +252,64 @@ impl Simulate for SlamDemo {
         self.current_observations =
             generate_observations(&self.x_true, &self.landmarks_true, &self.config, true);
 
+        // Record state before update for logging
+        let n_landmarks_before = self.slam_state.n_landmarks;
+
         // 5. EKF-SLAM update step
         update(&mut self.slam_state, &self.config, &self.current_observations);
 
-        // 6. Update history
+        // 6. Log this step
+        if self.logging_enabled {
+            let est_pose = self.slam_state.robot_pose();
+            let pos_error = ((self.x_true[0] - est_pose[0]).powi(2)
+                + (self.x_true[1] - est_pose[1]).powi(2)).sqrt();
+            let heading_error = (self.x_true[2] - est_pose[2]).abs();
+
+            // Determine associations (simplified: compare n_landmarks before/after)
+            let observed_indices: Vec<usize> = self.current_observations
+                .iter()
+                .map(|(idx, _)| *idx)
+                .collect();
+
+            // For associations, we track how many were new vs matched
+            let n_new = self.slam_state.n_landmarks - n_landmarks_before;
+            let n_matched = self.current_observations.len() - n_new;
+            let mut associations: Vec<Option<usize>> = Vec::new();
+            for i in 0..self.current_observations.len() {
+                if i < n_matched {
+                    // Matched to existing (we don't have exact index, mark as Some(0) placeholder)
+                    associations.push(Some(i));
+                } else {
+                    // New landmark
+                    associations.push(None);
+                }
+            }
+
+            let log_entry = StepLog {
+                step: self.step_count,
+                true_x: self.x_true[0],
+                true_y: self.x_true[1],
+                true_theta: self.x_true[2],
+                est_x: est_pose[0],
+                est_y: est_pose[1],
+                est_theta: est_pose[2],
+                pos_error,
+                heading_error,
+                n_observations: self.current_observations.len(),
+                observed_landmark_indices: observed_indices,
+                n_landmarks_in_state: self.slam_state.n_landmarks,
+                associations,
+            };
+
+            self.logs.push(log_entry);
+            if self.logs.len() > MAX_LOG_ENTRIES {
+                self.logs.remove(0);
+            }
+        }
+
+        self.step_count += 1;
+
+        // 7. Update history
         self.update_history();
     }
 
@@ -167,6 +321,8 @@ impl Simulate for SlamDemo {
         self.h_est = vec![rb::Vector3::zeros()];
         self.h_dr = vec![rb::Vector3::zeros()];
         self.current_observations.clear();
+        self.step_count = 0;
+        self.logs.clear();
         // Regenerate landmarks
         self.landmarks_true = generate_landmarks(self.n_landmarks);
     }
@@ -426,6 +582,27 @@ impl Draw for SlamDemo {
                 .sqrt();
                 ui.label(format!("EKF err: {:.2} m", pos_err));
                 ui.label(format!("DR err: {:.2} m", dr_err));
+
+                // Logging controls
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.logging_enabled, "Log");
+                    ui.label(format!("({} entries)", self.logs.len()));
+                });
+                if ui.button("Save Logs").clicked() {
+                    match self.save_logs() {
+                        Ok(filename) => {
+                            println!("Saved logs to: {}", filename);
+                        }
+                        Err(e) => {
+                            println!("Failed to save logs: {}", e);
+                        }
+                    }
+                }
+                if ui.button("Clear Logs").clicked() {
+                    self.logs.clear();
+                    self.step_count = 0;
+                }
             });
         });
         keep
