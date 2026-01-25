@@ -14,6 +14,7 @@ use rb::slam::{
     GraphSlam, Pose2D, Landmark2D,
 };
 use rust_robotics_algo as rb;
+use std::time::Instant;
 
 /// Maximum history length for trajectory visualization
 const HISTORY_LEN: usize = 1000;
@@ -33,6 +34,10 @@ struct EkfSlamInstance {
     enabled: bool,
     state: EkfSlamState,
     h_est: Vec<rb::Vector3>,
+    /// Last update time in microseconds
+    last_update_us: f64,
+    /// Exponential moving average of update time
+    avg_update_us: f64,
 }
 
 impl EkfSlamInstance {
@@ -41,20 +46,31 @@ impl EkfSlamInstance {
             enabled: true,
             state: EkfSlamState::new(),
             h_est: vec![rb::Vector3::zeros()],
+            last_update_us: 0.0,
+            avg_update_us: 0.0,
         }
     }
 
     fn reset(&mut self) {
         self.state = EkfSlamState::new();
         self.h_est = vec![rb::Vector3::zeros()];
+        self.last_update_us = 0.0;
+        self.avg_update_us = 0.0;
     }
 
     fn step(&mut self, config: &EkfSlamConfig, v: f32, w: f32, dt: f32, observations: &[(usize, Observation)]) {
         if !self.enabled {
             return;
         }
+
+        let start = Instant::now();
         predict(&mut self.state, config, v, w, dt);
         update(&mut self.state, config, observations);
+        let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0; // microseconds
+
+        self.last_update_us = elapsed;
+        // Exponential moving average (alpha = 0.1)
+        self.avg_update_us = 0.9 * self.avg_update_us + 0.1 * elapsed;
 
         self.h_est.push(self.state.robot_pose());
         if self.h_est.len() > HISTORY_LEN {
@@ -77,6 +93,10 @@ struct GraphSlamInstance {
     keyframe_trans_threshold: f32,
     keyframe_rot_threshold: f32,
     h_est: Vec<rb::Vector3>,
+    /// Last update time in microseconds (only when keyframe added)
+    last_update_us: f64,
+    /// Exponential moving average of update time
+    avg_update_us: f64,
 }
 
 impl GraphSlamInstance {
@@ -92,6 +112,8 @@ impl GraphSlamInstance {
             keyframe_trans_threshold: 1.0,
             keyframe_rot_threshold: 0.3,
             h_est: vec![rb::Vector3::zeros()],
+            last_update_us: 0.0,
+            avg_update_us: 0.0,
         }
     }
 
@@ -102,12 +124,16 @@ impl GraphSlamInstance {
         self.prev_keyframe_idx = 0;
         self.accumulated_motion = (0.0, 0.0, 0.0);
         self.h_est = vec![rb::Vector3::zeros()];
+        self.last_update_us = 0.0;
+        self.avg_update_us = 0.0;
     }
 
     fn step(&mut self, v: f32, w: f32, dt: f32, observations: &[(usize, Observation)]) {
         if !self.enabled {
             return;
         }
+
+        let start = Instant::now();
 
         // Accumulate motion since last keyframe
         let dx = v * dt;
@@ -138,6 +164,10 @@ impl GraphSlamInstance {
         let rot = new_acc_theta.abs();
 
         if trans < self.keyframe_trans_threshold && rot < self.keyframe_rot_threshold {
+            // No keyframe - just measure the small overhead
+            let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
+            self.last_update_us = elapsed;
+            self.avg_update_us = 0.9 * self.avg_update_us + 0.1 * elapsed;
             return;
         }
 
@@ -189,6 +219,11 @@ impl GraphSlamInstance {
 
         // Optimize after adding keyframe
         self.graph.optimize();
+
+        // Measure time including optimization
+        let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
+        self.last_update_us = elapsed;
+        self.avg_update_us = 0.9 * self.avg_update_us + 0.1 * elapsed;
     }
 
     fn get_pose(&self) -> rb::Vector3 {
@@ -528,9 +563,9 @@ impl Draw for SlamDemo {
                 });
             });
 
-            // Stats
+            // Error stats
             ui.group(|ui| {
-                ui.set_min_width(90.0);
+                ui.set_min_width(80.0);
                 ui.vertical(|ui| {
                     ui.label("Error");
                     if self.ekf.enabled {
@@ -548,6 +583,20 @@ impl Draw for SlamDemo {
                     let dr_err = ((self.x_true[0] - self.x_dr[0]).powi(2)
                         + (self.x_true[1] - self.x_dr[1]).powi(2)).sqrt();
                     ui.label(format!("DR {:.2}m", dr_err));
+                });
+            });
+
+            // Timing stats
+            ui.group(|ui| {
+                ui.set_min_width(80.0);
+                ui.vertical(|ui| {
+                    ui.label("Time (μs)");
+                    if self.ekf.enabled {
+                        ui.colored_label(EKF_COLOR, format!("{:.0}", self.ekf.avg_update_us));
+                    }
+                    if self.graph.enabled {
+                        ui.colored_label(GRAPH_COLOR, format!("{:.0}", self.graph.avg_update_us));
+                    }
                 });
             });
         });
