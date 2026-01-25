@@ -92,9 +92,9 @@ impl SimMode {
     fn label(&self) -> &'static str {
         match self {
             SimMode::InvertedPendulum => "Inverted Pendulum",
-            SimMode::Localization => "Localization (Particle Filter)",
-            SimMode::PathPlanning => "Path Planning (A*)",
-            SimMode::Slam => "SLAM (EKF)",
+            SimMode::Localization => "Localization",
+            SimMode::PathPlanning => "Path Planning",
+            SimMode::Slam => "SLAM",
         }
     }
 }
