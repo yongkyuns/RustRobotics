@@ -29,6 +29,66 @@ const MIN_LANDMARK_SPACING: f32 = 5.0;
 const EKF_COLOR: Color32 = Color32::from_rgb(66, 135, 245);   // Blue
 const GRAPH_COLOR: Color32 = Color32::from_rgb(156, 39, 176); // Purple
 
+/// Drive mode for the SLAM vehicle
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriveMode {
+    /// Automatic circular motion with fixed velocity and yaw rate
+    Auto,
+    /// Manual keyboard control
+    Manual,
+}
+
+impl DriveMode {
+    fn label(&self) -> &'static str {
+        match self {
+            DriveMode::Auto => "Auto",
+            DriveMode::Manual => "Manual",
+        }
+    }
+}
+
+/// Keyboard input state for manual control
+#[derive(Debug, Clone, Default)]
+struct KeyboardInput {
+    velocity: f32,
+    yaw_rate: f32,
+}
+
+impl KeyboardInput {
+    const MAX_VELOCITY: f32 = 5.0;
+    const MAX_YAW_RATE: f32 = 0.5;
+    const VELOCITY_STEP: f32 = 0.5;
+    const YAW_RATE_STEP: f32 = 0.05;
+
+    fn update(&mut self, left: bool, right: bool, up: bool, down: bool) {
+        // Velocity: up/down arrows
+        if up {
+            self.velocity = (self.velocity + Self::VELOCITY_STEP).min(Self::MAX_VELOCITY);
+        } else if down {
+            self.velocity = (self.velocity - Self::VELOCITY_STEP).max(-Self::MAX_VELOCITY);
+        } else {
+            // Decay velocity toward zero
+            self.velocity *= 0.95;
+            if self.velocity.abs() < 0.1 {
+                self.velocity = 0.0;
+            }
+        }
+
+        // Yaw rate: left/right arrows
+        if left {
+            self.yaw_rate = (self.yaw_rate + Self::YAW_RATE_STEP).min(Self::MAX_YAW_RATE);
+        } else if right {
+            self.yaw_rate = (self.yaw_rate - Self::YAW_RATE_STEP).max(-Self::MAX_YAW_RATE);
+        } else {
+            // Decay yaw rate toward zero
+            self.yaw_rate *= 0.9;
+            if self.yaw_rate.abs() < 0.01 {
+                self.yaw_rate = 0.0;
+            }
+        }
+    }
+}
+
 /// EKF-SLAM algorithm instance
 struct EkfSlamInstance {
     enabled: bool,
@@ -291,10 +351,14 @@ pub struct SlamDemo {
 
     /// Shared sensor configuration
     config: EkfSlamConfig,
-    /// Forward velocity (m/s)
+    /// Drive mode (Auto or Manual)
+    drive_mode: DriveMode,
+    /// Forward velocity (m/s) - used in Auto mode
     velocity: f32,
-    /// Angular velocity (rad/s)
+    /// Angular velocity (rad/s) - used in Auto mode
     yaw_rate: f32,
+    /// Keyboard input state - used in Manual mode
+    keyboard: KeyboardInput,
     /// Number of landmarks
     pub n_landmarks: usize,
 
@@ -325,8 +389,10 @@ impl SlamDemo {
             ekf: EkfSlamInstance::new(),
             graph: GraphSlamInstance::new(n_landmarks),
             config: EkfSlamConfig::default(),
+            drive_mode: DriveMode::Auto,
             velocity: 1.5,
             yaw_rate: 0.15,
+            keyboard: KeyboardInput::default(),
             n_landmarks,
             show_covariance: true,
             show_observations: true,
@@ -335,6 +401,24 @@ impl SlamDemo {
             vehicle_params: VehicleParams::default(),
             step_count: 0,
         }
+    }
+
+    /// Handle keyboard input for manual mode
+    pub fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        if self.drive_mode == DriveMode::Manual {
+            ctx.input(|i| {
+                let left = i.key_down(egui::Key::ArrowLeft);
+                let right = i.key_down(egui::Key::ArrowRight);
+                let up = i.key_down(egui::Key::ArrowUp);
+                let down = i.key_down(egui::Key::ArrowDown);
+                self.keyboard.update(left, right, up, down);
+            });
+        }
+    }
+
+    /// Check if this demo is in manual drive mode
+    pub fn is_manual_mode(&self) -> bool {
+        self.drive_mode == DriveMode::Manual
     }
 
     fn update_history(&mut self) {
@@ -384,8 +468,11 @@ impl Simulate for SlamDemo {
     }
 
     fn step(&mut self, dt: f32) {
-        let v = self.velocity;
-        let w = self.yaw_rate;
+        // Get velocity and yaw rate based on drive mode
+        let (v, w) = match self.drive_mode {
+            DriveMode::Auto => (self.velocity, self.yaw_rate),
+            DriveMode::Manual => (self.keyboard.velocity, self.keyboard.yaw_rate),
+        };
 
         // Update true robot pose
         self.x_true = motion_model(&self.x_true, v, w, dt);
@@ -426,8 +513,10 @@ impl Simulate for SlamDemo {
 
     fn reset_all(&mut self) {
         self.reset_state();
+        self.drive_mode = DriveMode::Auto;
         self.velocity = 1.5;
         self.yaw_rate = 0.15;
+        self.keyboard = KeyboardInput::default();
         self.n_landmarks = 8;
         self.config = EkfSlamConfig::default();
         self.show_covariance = true;
@@ -607,9 +696,24 @@ impl Draw for SlamDemo {
             ui.group(|ui| {
                 ui.set_min_width(100.0);
                 ui.vertical(|ui| {
-                    ui.label("Motion");
-                    ui.add(DragValue::new(&mut self.velocity).speed(0.05).range(0.1_f32..=3.0).prefix("v: "));
-                    ui.add(DragValue::new(&mut self.yaw_rate).speed(0.01).range(-0.5_f32..=0.5).prefix("ω: "));
+                    ui.horizontal(|ui| {
+                        ui.label("Motion:");
+                        for mode in [DriveMode::Auto, DriveMode::Manual] {
+                            if ui.selectable_label(self.drive_mode == mode, mode.label()).clicked() {
+                                self.drive_mode = mode;
+                            }
+                        }
+                    });
+                    match self.drive_mode {
+                        DriveMode::Auto => {
+                            ui.add(DragValue::new(&mut self.velocity).speed(0.05).range(0.1_f32..=3.0).prefix("v: "));
+                            ui.add(DragValue::new(&mut self.yaw_rate).speed(0.01).range(-0.5_f32..=0.5).prefix("ω: "));
+                        }
+                        DriveMode::Manual => {
+                            ui.label(format!("v: {:.1} m/s", self.keyboard.velocity));
+                            ui.label(format!("ω: {:.2} rad/s", self.keyboard.yaw_rate));
+                        }
+                    }
                 });
             });
 

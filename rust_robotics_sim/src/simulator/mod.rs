@@ -280,6 +280,14 @@ impl Simulator {
             }
         }
 
+        // Handle keyboard input for SLAM simulations
+        if self.mode == SimMode::Slam {
+            let ctx = ui.ctx().clone();
+            for slam in &mut self.slam_demos {
+                slam.handle_keyboard(&ctx);
+            }
+        }
+
         // Mode selector at the top
         ui.horizontal(|ui| {
             ui.label("Simulation:");
@@ -410,6 +418,18 @@ impl Simulator {
                 ui.horizontal(|ui| {
                     ui.label("← → : Steering");
                     ui.label("   ↑ ↓ : Accelerate/Brake");
+                    ui.label("   Space : Pause");
+                    ui.label("   Enter : Restart");
+                });
+            });
+        }
+
+        // Show keyboard controls hint for SLAM manual mode
+        if self.mode == SimMode::Slam && self.slam_demos.iter().any(|s| s.is_manual_mode()) {
+            ui.collapsing("Keyboard Controls", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("← → : Turn Left/Right");
+                    ui.label("   ↑ ↓ : Speed Up/Slow Down");
                     ui.label("   Space : Pause");
                     ui.label("   Enter : Restart");
                 });
