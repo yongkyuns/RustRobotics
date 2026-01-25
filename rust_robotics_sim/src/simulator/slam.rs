@@ -680,6 +680,7 @@ impl Draw for SlamDemo {
     fn options(&mut self, ui: &mut Ui) -> bool {
         let mut keep = true;
         ui.group(|ui| {
+            ui.set_width(200.0); // Fixed width for panel
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!("SLAM {}", self.id));
