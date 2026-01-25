@@ -548,14 +548,6 @@ impl Draw for SlamDemo {
                     ui.label("Motion");
                     ui.add(DragValue::new(&mut self.velocity).speed(0.05).range(0.1_f32..=3.0).prefix("v: "));
                     ui.add(DragValue::new(&mut self.yaw_rate).speed(0.01).range(-0.5_f32..=0.5).prefix("ω: "));
-                    let old_n = self.n_landmarks;
-                    ui.add(DragValue::new(&mut self.n_landmarks).speed(0.5).range(2_usize..=20).prefix("n: "));
-                    if self.n_landmarks != old_n {
-                        self.landmarks_true = generate_landmarks(self.n_landmarks);
-                        self.ekf.reset();
-                        self.graph.reset(self.n_landmarks);
-                        self.current_observations.clear();
-                    }
                 });
             });
 
