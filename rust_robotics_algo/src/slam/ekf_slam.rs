@@ -1193,4 +1193,441 @@ mod tests {
 
         println!("\nTest PASSED: max_landmark_drift={:.3}m, robot_err={:.3}m", max_landmark_drift, robot_err_after);
     }
+
+    /// Helper to generate random landmarks in a ring around origin
+    fn generate_random_landmarks_ring(n: usize, min_dist: f32, max_dist: f32) -> Vec<Vector2<f32>> {
+        let mut landmarks = Vec::with_capacity(n);
+        for _ in 0..n {
+            let angle = rand::random::<f32>() * 2.0 * PI;
+            let dist = min_dist + rand::random::<f32>() * (max_dist - min_dist);
+            landmarks.push(Vector2::new(dist * angle.cos(), dist * angle.sin()));
+        }
+        landmarks
+    }
+
+    /// Randomized test: check if new landmarks corrupt existing estimates with 8+ landmarks
+    #[test]
+    fn test_randomized_new_landmark_with_many_existing() {
+        const N_TRIALS: usize = 10;
+        const N_INITIAL_LANDMARKS: usize = 10;
+        const N_NEW_LANDMARKS: usize = 4;
+
+        println!("\n=== Randomized New Landmark Test ({} trials) ===", N_TRIALS);
+        println!("Initial landmarks: {}, New landmarks to add: {}", N_INITIAL_LANDMARKS, N_NEW_LANDMARKS);
+
+        let mut failures = Vec::new();
+        let mut max_drift_seen = 0.0f32;
+        let mut max_robot_err_seen = 0.0f32;
+
+        for trial in 0..N_TRIALS {
+            let mut state = EkfSlamState::new();
+            let mut config = EkfSlamConfig::default();
+            config.max_range = 25.0;
+
+            // Generate initial landmarks in a ring close to origin
+            let initial_landmarks = generate_random_landmarks_ring(N_INITIAL_LANDMARKS, 5.0, 15.0);
+
+            // Generate new landmarks that will be discovered later (further out)
+            let new_landmarks = generate_random_landmarks_ring(N_NEW_LANDMARKS, 30.0, 45.0);
+
+            let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
+            let v = 1.5;
+            let w = 0.2;
+            let dt = 0.02; // Larger dt for faster simulation
+
+            // Phase 1: Establish estimates with initial landmarks (circle around origin)
+            for _ in 0..400 {
+                true_pose = motion_model(&true_pose, v, w, dt);
+                predict(&mut state, &config, v, w, dt);
+                let observations = generate_observations(&true_pose, &initial_landmarks, &config, true);
+                update(&mut state, &config, &observations);
+            }
+
+            // Verify we discovered all initial landmarks
+            if state.n_landmarks < N_INITIAL_LANDMARKS {
+                // Skip trial if we didn't discover enough landmarks
+                continue;
+            }
+
+            // Record estimates before adding new landmarks
+            let mut lm_estimates_before: Vec<Vector2<f32>> = Vec::new();
+            for i in 0..state.n_landmarks {
+                if let Some(lm) = state.landmark(i) {
+                    lm_estimates_before.push(lm);
+                }
+            }
+            let n_before = state.n_landmarks;
+            let robot_err_before = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+
+            // Phase 2: Move outward to discover new landmarks
+            let mut all_landmarks = initial_landmarks.clone();
+            all_landmarks.extend(new_landmarks.iter().cloned());
+
+            // Move in a spiral outward
+            let v_out = 3.0;
+            let w_out = 0.15;
+
+            for _ in 0..500 {
+                true_pose = motion_model(&true_pose, v_out, w_out, dt);
+                predict(&mut state, &config, v_out, w_out, dt);
+                let observations = generate_observations(&true_pose, &all_landmarks, &config, true);
+                update(&mut state, &config, &observations);
+            }
+
+            // Check if new landmarks were discovered
+            let n_after = state.n_landmarks;
+            let discovered_new = n_after > n_before;
+
+            if !discovered_new {
+                // Skip trial if no new landmarks were discovered
+                continue;
+            }
+
+            // Check for corruption: compare current estimates of original landmarks
+            let mut max_drift = 0.0f32;
+            let mut max_err_increase = 0.0f32;
+
+            for i in 0..n_before {
+                if let Some(lm) = state.landmark(i) {
+                    let drift = ((lm[0] - lm_estimates_before[i][0]).powi(2)
+                        + (lm[1] - lm_estimates_before[i][1]).powi(2)).sqrt();
+                    max_drift = max_drift.max(drift);
+
+                    // Also check error relative to true landmark
+                    let true_lm = &initial_landmarks[i];
+                    let err_before = ((true_lm[0] - lm_estimates_before[i][0]).powi(2)
+                        + (true_lm[1] - lm_estimates_before[i][1]).powi(2)).sqrt();
+                    let err_after = ((true_lm[0] - lm[0]).powi(2)
+                        + (true_lm[1] - lm[1]).powi(2)).sqrt();
+                    let err_increase = err_after - err_before;
+                    max_err_increase = max_err_increase.max(err_increase);
+                }
+            }
+
+            let robot_err_after = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+
+            max_drift_seen = max_drift_seen.max(max_drift);
+            max_robot_err_seen = max_robot_err_seen.max(robot_err_after);
+
+            // Check for failure conditions
+            let drift_threshold = 3.0; // Allow up to 3m drift due to EKF updates
+            let robot_err_threshold = 5.0; // Allow up to 5m robot error
+
+            if max_drift > drift_threshold {
+                failures.push(format!(
+                    "Trial {}: Landmark drift too large: {:.3}m (threshold: {}m), discovered {} new landmarks",
+                    trial, max_drift, drift_threshold, n_after - n_before
+                ));
+            }
+
+            if robot_err_after > robot_err_threshold {
+                failures.push(format!(
+                    "Trial {}: Robot error too large: {:.3}m (threshold: {}m)",
+                    trial, robot_err_after, robot_err_threshold
+                ));
+            }
+
+            if trial % 5 == 0 {
+                println!("Trial {}: n_lm: {} -> {}, max_drift={:.3}m, robot_err: {:.3} -> {:.3}m",
+                    trial, n_before, n_after, max_drift, robot_err_before, robot_err_after);
+            }
+        }
+
+        println!("\n=== Summary ===");
+        println!("Max landmark drift seen: {:.3}m", max_drift_seen);
+        println!("Max robot error seen: {:.3}m", max_robot_err_seen);
+        println!("Failures: {}/{}", failures.len(), N_TRIALS);
+
+        for failure in &failures {
+            println!("  FAILURE: {}", failure);
+        }
+
+        assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+    }
+
+    /// Stress test: rapidly add many landmarks and check stability
+    #[test]
+    fn test_stress_rapid_landmark_addition() {
+        const N_TRIALS: usize = 5;
+
+        println!("\n=== Stress Test: Rapid Landmark Addition ===");
+
+        let mut failures = Vec::new();
+
+        for trial in 0..N_TRIALS {
+            let mut state = EkfSlamState::new();
+            let mut config = EkfSlamConfig::default();
+            config.max_range = 50.0; // Large range to see many landmarks
+
+            // Generate 15 landmarks at various distances
+            let mut landmarks: Vec<Vector2<f32>> = Vec::new();
+            for i in 0..15 {
+                let angle = (i as f32 / 15.0) * 2.0 * PI + rand::random::<f32>() * 0.3;
+                let dist = 8.0 + (i as f32) * 2.0 + rand::random::<f32>() * 3.0;
+                landmarks.push(Vector2::new(dist * angle.cos(), dist * angle.sin()));
+            }
+
+            let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
+            let v = 2.0;
+            let w = 0.25;
+            let dt = 0.02; // Larger dt for faster simulation
+
+            let mut landmark_discovery_steps: Vec<(usize, usize)> = Vec::new(); // (step, n_landmarks)
+            let mut robot_errors: Vec<f32> = Vec::new();
+
+            // Run simulation
+            for step in 0..1000 {
+                true_pose = motion_model(&true_pose, v, w, dt);
+                predict(&mut state, &config, v, w, dt);
+                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+
+                let n_before = state.n_landmarks;
+                update(&mut state, &config, &observations);
+                let n_after = state.n_landmarks;
+
+                if n_after > n_before {
+                    landmark_discovery_steps.push((step, n_after));
+                }
+
+                if step % 100 == 0 {
+                    let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+                    robot_errors.push(err);
+                }
+            }
+
+            // Check for error spikes after landmark discovery
+            let final_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+
+            // Check if covariance matrix is still positive semi-definite
+            let sigma = &state.sigma;
+            let is_symmetric = {
+                let mut symmetric = true;
+                for i in 0..sigma.nrows() {
+                    for j in 0..sigma.ncols() {
+                        if (sigma[(i, j)] - sigma[(j, i)]).abs() > 1e-6 {
+                            symmetric = false;
+                            break;
+                        }
+                    }
+                    if !symmetric { break; }
+                }
+                symmetric
+            };
+
+            // Check for NaN or Inf in state
+            let has_nan = state.mu.iter().any(|x| x.is_nan() || x.is_infinite())
+                || sigma.iter().any(|x| x.is_nan() || x.is_infinite());
+
+            // Check diagonal elements are positive (necessary for PSD)
+            let diag_positive = (0..sigma.nrows()).all(|i| sigma[(i, i)] >= 0.0);
+
+            if has_nan {
+                failures.push(format!("Trial {}: NaN or Inf in state/covariance", trial));
+            }
+
+            if !is_symmetric {
+                failures.push(format!("Trial {}: Covariance matrix not symmetric", trial));
+            }
+
+            if !diag_positive {
+                failures.push(format!("Trial {}: Negative diagonal in covariance", trial));
+            }
+
+            if final_err > 5.0 {
+                failures.push(format!("Trial {}: Final robot error too large: {:.3}m", trial, final_err));
+            }
+
+            println!("Trial {}: discovered {} landmarks, final_err={:.3}m, symmetric={}, diag_pos={}",
+                trial, state.n_landmarks, final_err, is_symmetric, diag_positive);
+        }
+
+        println!("\nFailures: {}/{}", failures.len(), N_TRIALS);
+        for failure in &failures {
+            println!("  FAILURE: {}", failure);
+        }
+
+        assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+    }
+
+    /// Test: check specific edge case where landmark is added at boundary of sensor range
+    #[test]
+    fn test_landmark_at_sensor_boundary() {
+        const N_TRIALS: usize = 8;
+
+        println!("\n=== Edge Case: Landmark at Sensor Boundary ===");
+
+        let mut failures = Vec::new();
+
+        for trial in 0..N_TRIALS {
+            let mut state = EkfSlamState::new();
+            let mut config = EkfSlamConfig::default();
+            config.max_range = 20.0;
+
+            // 8 initial landmarks in a circle
+            let mut landmarks: Vec<Vector2<f32>> = Vec::new();
+            for i in 0..8 {
+                let angle = (i as f32 / 8.0) * 2.0 * PI;
+                let dist = 10.0 + rand::random::<f32>() * 2.0;
+                landmarks.push(Vector2::new(dist * angle.cos(), dist * angle.sin()));
+            }
+
+            // Add landmarks right at the sensor boundary (will flicker in/out)
+            for i in 0..4 {
+                let angle = (i as f32 / 4.0) * 2.0 * PI + rand::random::<f32>() * 0.5;
+                let dist = config.max_range - 1.0 + rand::random::<f32>() * 2.0; // Right at boundary
+                landmarks.push(Vector2::new(dist * angle.cos(), dist * angle.sin()));
+            }
+
+            let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
+            let v = 1.5;
+            let w = 0.2;
+            let dt = 0.02; // Larger dt for faster simulation
+
+            // Run and track error
+            let mut max_robot_err = 0.0f32;
+            let mut prev_n_landmarks = 0;
+            let mut visibility_changes = 0;
+
+            for step in 0..750 {
+                true_pose = motion_model(&true_pose, v, w, dt);
+                predict(&mut state, &config, v, w, dt);
+                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+
+                // Track visibility changes (landmarks going in/out of view)
+                if observations.len() != prev_n_landmarks {
+                    visibility_changes += 1;
+                    prev_n_landmarks = observations.len();
+                }
+
+                update(&mut state, &config, &observations);
+
+                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+                max_robot_err = max_robot_err.max(err);
+
+                // Check for immediate corruption (error spike)
+                if err > 10.0 {
+                    failures.push(format!(
+                        "Trial {}, Step {}: Error spike to {:.3}m after {} visibility changes",
+                        trial, step, err, visibility_changes
+                    ));
+                    break;
+                }
+            }
+
+            let final_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+
+            if final_err > 5.0 {
+                failures.push(format!(
+                    "Trial {}: Final error too large: {:.3}m, {} visibility changes",
+                    trial, final_err, visibility_changes
+                ));
+            }
+
+            println!("Trial {}: n_lm={}, max_err={:.3}m, final_err={:.3}m, visibility_changes={}",
+                trial, state.n_landmarks, max_robot_err, final_err, visibility_changes);
+        }
+
+        println!("\nFailures: {}/{}", failures.len(), N_TRIALS);
+        for failure in &failures {
+            println!("  FAILURE: {}", failure);
+        }
+
+        assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+    }
+
+    /// Test: check for numerical stability with large state vectors
+    #[test]
+    fn test_numerical_stability_large_state() {
+        const N_TRIALS: usize = 3;
+        const N_LANDMARKS: usize = 20;
+
+        println!("\n=== Numerical Stability with Large State ({} landmarks) ===", N_LANDMARKS);
+
+        let mut failures = Vec::new();
+
+        for trial in 0..N_TRIALS {
+            let mut state = EkfSlamState::new();
+            let mut config = EkfSlamConfig::default();
+            config.max_range = 60.0;
+
+            // Generate many landmarks
+            let landmarks = generate_random_landmarks_ring(N_LANDMARKS, 10.0, 40.0);
+
+            let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
+            let v = 2.0;
+            let w = 0.15;
+            let dt = 0.02; // Larger dt for faster simulation
+
+            // Run for a long time
+            for step in 0..1500 {
+                true_pose = motion_model(&true_pose, v, w, dt);
+                predict(&mut state, &config, v, w, dt);
+                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+                update(&mut state, &config, &observations);
+
+                // Periodic stability checks
+                if step % 300 == 0 && step > 0 {
+                    // Check for NaN/Inf
+                    let has_nan = state.mu.iter().any(|x| x.is_nan() || x.is_infinite())
+                        || state.sigma.iter().any(|x| x.is_nan() || x.is_infinite());
+
+                    if has_nan {
+                        failures.push(format!("Trial {}, Step {}: NaN/Inf detected", trial, step));
+                        break;
+                    }
+
+                    // Check covariance diagonal
+                    let min_diag = (0..state.sigma.nrows())
+                        .map(|i| state.sigma[(i, i)])
+                        .fold(f32::INFINITY, f32::min);
+
+                    if min_diag < 0.0 {
+                        failures.push(format!(
+                            "Trial {}, Step {}: Negative covariance diagonal: {:.6}",
+                            trial, step, min_diag
+                        ));
+                        break;
+                    }
+
+                    // Check for unreasonably large covariance
+                    let max_diag = (0..state.sigma.nrows())
+                        .map(|i| state.sigma[(i, i)])
+                        .fold(0.0f32, f32::max);
+
+                    if max_diag > 1000.0 {
+                        failures.push(format!(
+                            "Trial {}, Step {}: Covariance exploded: max_diag={:.3}",
+                            trial, step, max_diag
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            let final_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+
+            // Final stability check
+            let sigma = &state.sigma;
+            let condition_number_proxy = {
+                let diags: Vec<f32> = (0..sigma.nrows()).map(|i| sigma[(i, i)]).collect();
+                let max_d = diags.iter().cloned().fold(0.0f32, f32::max);
+                let min_d = diags.iter().cloned().filter(|&x| x > 1e-10).fold(f32::INFINITY, f32::min);
+                if min_d > 0.0 { max_d / min_d } else { f32::INFINITY }
+            };
+
+            println!("Trial {}: n_lm={}, final_err={:.3}m, cond_proxy={:.1}",
+                trial, state.n_landmarks, final_err, condition_number_proxy);
+
+            if final_err > 5.0 && failures.is_empty() {
+                failures.push(format!("Trial {}: Final error too large: {:.3}m", trial, final_err));
+            }
+        }
+
+        println!("\nFailures: {}/{}", failures.len(), N_TRIALS);
+        for failure in &failures {
+            println!("  FAILURE: {}", failure);
+        }
+
+        assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+    }
 }
