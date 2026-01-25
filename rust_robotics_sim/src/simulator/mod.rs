@@ -1,8 +1,13 @@
+pub mod common;
 pub mod localization;
+pub mod path_planning;
 pub mod pendulum;
+pub mod slam;
 
 use localization::ParticleFilter;
+use path_planning::PathPlanning;
 use pendulum::InvertedPendulum;
+use slam::SlamDemo;
 
 use egui::*;
 use egui_plot::{Corner, Legend, Plot, PlotUi};
@@ -79,6 +84,8 @@ where
 pub enum SimMode {
     InvertedPendulum,
     Localization,
+    PathPlanning,
+    Slam,
 }
 
 impl SimMode {
@@ -86,6 +93,8 @@ impl SimMode {
         match self {
             SimMode::InvertedPendulum => "Inverted Pendulum",
             SimMode::Localization => "Localization (Particle Filter)",
+            SimMode::PathPlanning => "Path Planning (A*)",
+            SimMode::Slam => "SLAM (EKF)",
         }
     }
 }
@@ -98,6 +107,10 @@ pub struct Simulator {
     pendulums: Vec<InvertedPendulum>,
     /// Simulations for localization mode
     vehicles: Vec<ParticleFilter>,
+    /// Simulations for path planning mode
+    planners: Vec<PathPlanning>,
+    /// Simulations for SLAM mode
+    slam_demos: Vec<SlamDemo>,
     /// Current simulation time in seconds.
     time: f32,
     /// The speed with which to execute the simulation. This is actually a
@@ -107,6 +120,12 @@ pub struct Simulator {
     /// Settings to indicate whether to show the graph of simulation signals
     show_graph: bool,
     paused: bool,
+    /// Shared grid width for path planning (in cells)
+    grid_width: usize,
+    /// Shared grid height for path planning (in cells)
+    grid_height: usize,
+    /// Shared grid resolution for path planning (meters per cell)
+    grid_resolution: f32,
 }
 
 impl Default for Simulator {
@@ -115,10 +134,15 @@ impl Default for Simulator {
             mode: SimMode::InvertedPendulum,
             pendulums: vec![InvertedPendulum::default()],
             vehicles: vec![ParticleFilter::new(1, 0.0)],
+            planners: vec![PathPlanning::new(1, 0.0)],
+            slam_demos: vec![SlamDemo::new(1, 0.0)],
             time: 0.0,
             sim_speed: 2,
             show_graph: false,
             paused: false,
+            grid_width: 40,
+            grid_height: 40,
+            grid_resolution: 1.0,
         }
     }
 }
@@ -141,6 +165,16 @@ impl Simulator {
                         .iter_mut()
                         .for_each(|sim| (0..self.sim_speed).for_each(|_| sim.step(dt)));
                 }
+                SimMode::PathPlanning => {
+                    self.planners
+                        .iter_mut()
+                        .for_each(|sim| (0..self.sim_speed).for_each(|_| sim.step(dt)));
+                }
+                SimMode::Slam => {
+                    self.slam_demos
+                        .iter_mut()
+                        .for_each(|sim| (0..self.sim_speed).for_each(|_| sim.step(dt)));
+                }
             }
         }
     }
@@ -159,6 +193,12 @@ impl Simulator {
             SimMode::Localization => {
                 self.vehicles.iter_mut().for_each(|sim| sim.reset_state());
             }
+            SimMode::PathPlanning => {
+                self.planners.iter_mut().for_each(|sim| sim.reset_state());
+            }
+            SimMode::Slam => {
+                self.slam_demos.iter_mut().for_each(|sim| sim.reset_state());
+            }
         }
     }
 
@@ -170,6 +210,12 @@ impl Simulator {
             }
             SimMode::Localization => {
                 self.vehicles.iter_mut().for_each(|sim| sim.reset_all());
+            }
+            SimMode::PathPlanning => {
+                self.planners.iter_mut().for_each(|sim| sim.reset_all());
+            }
+            SimMode::Slam => {
+                self.slam_demos.iter_mut().for_each(|sim| sim.reset_all());
             }
         }
     }
@@ -184,6 +230,25 @@ impl Simulator {
             SimMode::Localization => {
                 let id = self.vehicles.len() + 1;
                 self.vehicles.push(ParticleFilter::new(id, self.time));
+            }
+            SimMode::PathPlanning => {
+                let id = self.planners.len() + 1;
+                let mut new_planner = PathPlanning::new(id, self.time);
+                // Apply shared grid settings
+                new_planner.update_grid_settings(
+                    self.grid_width,
+                    self.grid_height,
+                    self.grid_resolution,
+                );
+                // Copy state from first existing planner if available
+                if let Some(first) = self.planners.first() {
+                    new_planner.copy_state_from(first);
+                }
+                self.planners.push(new_planner);
+            }
+            SimMode::Slam => {
+                let id = self.slam_demos.len() + 1;
+                self.slam_demos.push(SlamDemo::new(id, self.time));
             }
         }
     }
@@ -212,7 +277,7 @@ impl Simulator {
         // Mode selector at the top
         ui.horizontal(|ui| {
             ui.label("Simulation:");
-            for mode in [SimMode::InvertedPendulum, SimMode::Localization] {
+            for mode in [SimMode::InvertedPendulum, SimMode::Localization, SimMode::PathPlanning, SimMode::Slam] {
                 if ui.selectable_label(self.mode == mode, mode.label()).clicked() {
                     self.mode = mode;
                     self.time = 0.0;
@@ -240,6 +305,8 @@ impl Simulator {
             let add_label = match self.mode {
                 SimMode::InvertedPendulum => "Add Pendulum",
                 SimMode::Localization => "Add Vehicle",
+                SimMode::PathPlanning => "Add Planner",
+                SimMode::Slam => "Add SLAM",
             };
             if ui.button(add_label).clicked() {
                 self.add_simulation();
@@ -255,16 +322,63 @@ impl Simulator {
         ui.separator();
 
         // Options panel for current simulations
-        ui.horizontal(|ui| {
-            match self.mode {
-                SimMode::InvertedPendulum => {
+        match self.mode {
+            SimMode::InvertedPendulum => {
+                ui.horizontal(|ui| {
                     self.pendulums.retain_mut(|sim| sim.options(ui));
-                }
-                SimMode::Localization => {
-                    self.vehicles.retain_mut(|sim| sim.options(ui));
-                }
+                });
             }
-        });
+            SimMode::Localization => {
+                ui.horizontal(|ui| {
+                    self.vehicles.retain_mut(|sim| sim.options(ui));
+                });
+            }
+            SimMode::PathPlanning => {
+                // Common grid settings
+                ui.horizontal(|ui| {
+                    ui.label("Grid:");
+                    ui.label("Width:");
+                    let width_changed = ui
+                        .add(DragValue::new(&mut self.grid_width).range(10..=100))
+                        .changed();
+                    ui.label("Height:");
+                    let height_changed = ui
+                        .add(DragValue::new(&mut self.grid_height).range(10..=100))
+                        .changed();
+                    ui.label("Resolution:");
+                    let res_changed = ui
+                        .add(
+                            DragValue::new(&mut self.grid_resolution)
+                                .range(0.1..=5.0)
+                                .speed(0.1),
+                        )
+                        .changed();
+
+                    // Update all planners if any setting changed
+                    if width_changed || height_changed || res_changed {
+                        for planner in &mut self.planners {
+                            planner.update_grid_settings(
+                                self.grid_width,
+                                self.grid_height,
+                                self.grid_resolution,
+                            );
+                        }
+                    }
+                });
+
+                ui.separator();
+
+                // Planners side by side, but each planner's UI is vertical
+                ui.horizontal(|ui| {
+                    self.planners.retain_mut(|sim| sim.options(ui));
+                });
+            }
+            SimMode::Slam => {
+                ui.horizontal(|ui| {
+                    self.slam_demos.retain_mut(|sim| sim.options(ui));
+                });
+            }
+        }
 
         // Show keyboard controls hint if any vehicle is in dynamic mode
         if self.mode == SimMode::Localization && self.vehicles.iter().any(|v| v.is_dynamic_mode()) {
@@ -295,13 +409,23 @@ impl Simulator {
         });
 
         // Main scene plot
-        let plot = Plot::new("Scene")
+        let mut plot = Plot::new("Scene")
             .legend(Legend::default().position(Corner::RightTop))
             .show_x(false)
             .show_y(false)
-            .data_aspect(1.0);
+            .data_aspect(1.0)
+            .allow_boxed_zoom(self.mode != SimMode::PathPlanning); // Disable box zoom for path planning to allow right-click
 
-        plot.show(ui, |plot_ui| {
+        // For path planning: hide default grid and lock pan/zoom
+        if self.mode == SimMode::PathPlanning {
+            plot = plot
+                .show_grid(false)
+                .allow_drag(false)
+                .allow_scroll(false)
+                .allow_zoom(false);
+        }
+
+        let plot_response = plot.show(ui, |plot_ui| {
             match self.mode {
                 SimMode::InvertedPendulum => {
                     self.pendulums.iter().for_each(|sim| sim.scene(plot_ui));
@@ -309,8 +433,21 @@ impl Simulator {
                 SimMode::Localization => {
                     self.vehicles.iter().for_each(|sim| sim.scene(plot_ui));
                 }
+                SimMode::Slam => {
+                    self.slam_demos.iter().for_each(|sim| sim.scene(plot_ui));
+                }
+                SimMode::PathPlanning => {
+                    self.planners.iter().for_each(|sim| sim.scene(plot_ui));
+                }
             }
         });
+
+        // Handle mouse interactions for path planning
+        if self.mode == SimMode::PathPlanning {
+            for planner in &mut self.planners {
+                planner.handle_mouse(&plot_response);
+            }
+        }
 
         // Optional graph window
         if self.show_graph {
@@ -326,6 +463,12 @@ impl Simulator {
                                 }
                                 SimMode::Localization => {
                                     self.vehicles.iter().for_each(|sim| sim.plot(plot_ui));
+                                }
+                                SimMode::PathPlanning => {
+                                    self.planners.iter().for_each(|sim| sim.plot(plot_ui));
+                                }
+                                SimMode::Slam => {
+                                    self.slam_demos.iter().for_each(|sim| sim.plot(plot_ui));
                                 }
                             }
                         });

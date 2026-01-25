@@ -1,10 +1,11 @@
 use super::*;
-
-use crate::data::VehiclePlot;
-use crate::item::draw_vehicle;
+use super::common::{
+    ErrorTracker, HistoryManager,
+    draw_labeled_vehicle_state4, draw_trajectory,
+};
 
 use egui::{DragValue, Ui};
-use egui_plot::{Line, LineStyle, PlotPoint, PlotPoints, PlotUi, Points, Text};
+use egui_plot::{Line, LineStyle, PlotPoints, PlotUi, Points};
 use rb::control::vehicle::{BicycleModel, TireModel, TireParams, VehicleParams, VehicleState};
 use rb::localization::{particle_filter::*, StateVector};
 use rb::prelude::*;
@@ -142,18 +143,10 @@ pub struct ParticleFilter {
     pw: PW,
     /// Particle states
     px: PX,
-    /// History of estimated states
-    h_x_est: Vec<State>,
-    /// History of true states
-    h_x_true: Vec<State>,
-    /// History of dead reckoning states
-    h_x_dr: Vec<State>,
-    /// History of estimation errors
-    h_err_est: Vec<f32>,
-    /// History of dead reckoning errors
-    h_err_dr: Vec<f32>,
-    /// Simulation time step counter
-    step_count: usize,
+    /// History manager for trajectories
+    history: HistoryManager<State>,
+    /// Error tracker for estimation accuracy
+    errors: ErrorTracker,
     /// Unique ID for this simulation instance
     id: usize,
     /// Configuration parameters
@@ -182,6 +175,9 @@ impl ParticleFilter {
         let mut vehicle_state = VehicleState::new();
         vehicle_state.vx = 5.0; // Start with 5 m/s
 
+        let mut history = HistoryManager::new(HISTORY_LEN);
+        history.init_with(zeros!(4, 1));
+
         Self {
             x_est: zeros!(4, 1),
             x_true: zeros!(4, 1),
@@ -189,12 +185,8 @@ impl ParticleFilter {
             p_est: zeros!(3, 3),
             pw: ones!(1, NP) * (1. / NP as f32),
             px: zeros!(4, NP),
-            h_x_est: vec![zeros!(4, 1)],
-            h_x_true: vec![zeros!(4, 1)],
-            h_x_dr: vec![zeros!(4, 1)],
-            h_err_est: vec![0.0],
-            h_err_dr: vec![0.0],
-            step_count: 0,
+            history,
+            errors: ErrorTracker::default(),
             id,
             config: PFConfig::default(),
             keyboard: KeyboardInput::default(),
@@ -208,29 +200,14 @@ impl ParticleFilter {
     }
 
     fn update_history(&mut self) {
-        self.h_x_est.push(self.x_est);
-        self.h_x_true.push(self.x_true);
-        self.h_x_dr.push(self.x_dr);
+        self.history.push(self.x_true, self.x_est, self.x_dr);
 
         // Calculate and store errors
-        let err_est = ((self.x_true.x() - self.x_est.x()).powi(2)
-            + (self.x_true.y() - self.x_est.y()).powi(2))
-        .sqrt();
-        let err_dr = ((self.x_true.x() - self.x_dr.x()).powi(2)
-            + (self.x_true.y() - self.x_dr.y()).powi(2))
-        .sqrt();
-        self.h_err_est.push(err_est);
-        self.h_err_dr.push(err_dr);
-
-        self.step_count += 1;
-
-        if self.h_x_est.len() > HISTORY_LEN {
-            self.h_x_est.remove(0);
-            self.h_x_true.remove(0);
-            self.h_x_dr.remove(0);
-            self.h_err_est.remove(0);
-            self.h_err_dr.remove(0);
-        }
+        self.errors.track_positions(
+            self.x_true.x(), self.x_true.y(),
+            self.x_est.x(), self.x_est.y(),
+            self.x_dr.x(), self.x_dr.y(),
+        );
     }
 
     fn calc_input(&self) -> rb::Vector2 {
@@ -334,12 +311,10 @@ impl Simulate for ParticleFilter {
         self.pw = ones!(1, NP) * (1. / NP as f32);
         self.px = zeros!(4, NP);
         // Clear history
-        self.h_x_est = vec![zeros!(4, 1)];
-        self.h_x_true = vec![zeros!(4, 1)];
-        self.h_x_dr = vec![zeros!(4, 1)];
-        self.h_err_est = vec![0.0];
-        self.h_err_dr = vec![0.0];
-        self.step_count = 0;
+        self.history.clear();
+        self.history.init_with(zeros!(4, 1));
+        self.errors.clear();
+        self.errors.init_with_zero();
         // Reset vehicle state
         self.vehicle_state = VehicleState::new();
         self.vehicle_state.vx = 5.0;
@@ -361,25 +336,22 @@ impl Simulate for ParticleFilter {
 impl Draw for ParticleFilter {
     fn plot(&self, plot_ui: &mut PlotUi<'_>) {
         // Calculate time offset for x-axis (based on step count and history length)
-        let start_step = if self.step_count > HISTORY_LEN {
-            self.step_count - HISTORY_LEN
-        } else {
-            0
-        };
+        let start_step = self.history.start_step();
+        let dt = 0.01;
 
         // Create error plot data with time on x-axis
         let est_error_points: PlotPoints<'_> = self
-            .h_err_est
-            .iter()
+            .errors
+            .get_est_errors()
             .enumerate()
-            .map(|(i, &err)| [(start_step + i) as f64 * 0.01, err as f64])
+            .map(|(i, &err)| [(start_step + i) as f64 * dt, err as f64])
             .collect();
 
         let dr_error_points: PlotPoints<'_> = self
-            .h_err_dr
-            .iter()
+            .errors
+            .get_dr_errors()
             .enumerate()
-            .map(|(i, &err)| [(start_step + i) as f64 * 0.01, err as f64])
+            .map(|(i, &err)| [(start_step + i) as f64 * dt, err as f64])
             .collect();
 
         plot_ui.line(
@@ -421,57 +393,46 @@ impl Draw for ParticleFilter {
         // Label offset above vehicle (in plot coordinates)
         let label_offset = 3.0;
 
-        // Draw trajectories (hidden from legend) and vehicles with labels
-        plot_ui.line(Line::new(
-            "",
-            self.h_x_true.positions(),
-        ));
-        draw_vehicle(
+        // Draw trajectories using shared helper
+        let true_points: Vec<_> = self.history.get_true().collect();
+        draw_trajectory(plot_ui, true_points.into_iter(), egui::Color32::LIGHT_GREEN, 2.0, None);
+
+        let dr_points: Vec<_> = self.history.get_dr().collect();
+        draw_trajectory(plot_ui, dr_points.into_iter(), egui::Color32::GRAY, 2.0, None);
+
+        let est_points: Vec<_> = self.history.get_estimated().collect();
+        draw_trajectory(plot_ui, est_points.into_iter(), egui::Color32::LIGHT_BLUE, 2.0, None);
+
+        // Draw vehicles with labels using shared helper
+        draw_labeled_vehicle_state4(
             plot_ui,
-            self.x_true,
-            &format!("Vehicle {} (True)", self.id),
-            self.keyboard.steering,
-            &self.vehicle_params,
-        );
-        plot_ui.text(Text::new(
-            "",
-            PlotPoint::new(self.x_true.x() as f64, self.x_true.y() as f64 + label_offset),
+            &self.x_true,
             "GT",
-        ));
-
-        plot_ui.line(Line::new(
-            "",
-            self.h_x_dr.positions(),
-        ));
-        draw_vehicle(
-            plot_ui,
-            self.x_dr,
-            &format!("Vehicle {} (Dead Reckoning)", self.id),
+            label_offset,
             self.keyboard.steering,
             &self.vehicle_params,
+            &format!("Vehicle {} (True)", self.id),
         );
-        plot_ui.text(Text::new(
-            "",
-            PlotPoint::new(self.x_dr.x() as f64, self.x_dr.y() as f64 + label_offset),
+
+        draw_labeled_vehicle_state4(
+            plot_ui,
+            &self.x_dr,
             "DR",
-        ));
-
-        plot_ui.line(Line::new(
-            "",
-            self.h_x_est.positions(),
-        ));
-        draw_vehicle(
-            plot_ui,
-            self.x_est,
-            &format!("Vehicle {} (Estimate)", self.id),
+            label_offset,
             self.keyboard.steering,
             &self.vehicle_params,
+            &format!("Vehicle {} (Dead Reckoning)", self.id),
         );
-        plot_ui.text(Text::new(
-            "",
-            PlotPoint::new(self.x_est.x() as f64, self.x_est.y() as f64 + label_offset),
+
+        draw_labeled_vehicle_state4(
+            plot_ui,
+            &self.x_est,
             "PF",
-        ));
+            label_offset,
+            self.keyboard.steering,
+            &self.vehicle_params,
+            &format!("Vehicle {} (Estimate)", self.id),
+        );
     }
 
     fn options(&mut self, ui: &mut Ui) -> bool {
@@ -480,7 +441,7 @@ impl Draw for ParticleFilter {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(format!("Vehicle {}", self.id));
-                    if ui.small_button("🗙").clicked() {
+                    if ui.small_button("x").clicked() {
                         keep = false;
                     }
                 });
@@ -518,7 +479,7 @@ impl Draw for ParticleFilter {
                                 DragValue::new(&mut self.config.yaw_rate)
                                     .speed(0.01)
                                     .range(-1.0_f32..=1.0)
-                                    .prefix("ω: ")
+                                    .prefix("w: ")
                                     .suffix(" rad/s"),
                             );
                         });
@@ -526,7 +487,7 @@ impl Draw for ParticleFilter {
                     DriveMode::Dynamic => {
                         // Compact state display
                         ui.horizontal(|ui| {
-                            ui.label(format!("δ:{:.0}°", self.keyboard.steering.to_degrees()));
+                            ui.label(format!("d:{:.0}deg", self.keyboard.steering.to_degrees()));
                             ui.label(format!("v:{:.1} m/s", self.vehicle_state.vx));
                             ui.label(format!("vy:{:.1}", self.vehicle_state.vy));
                         });
@@ -638,7 +599,7 @@ impl Draw for ParticleFilter {
                             .speed(1.0)
                             .range(1.0_f32..=90.0)
                             .prefix("yaw: ")
-                            .suffix("°"),
+                            .suffix("deg"),
                     );
                 });
             });
