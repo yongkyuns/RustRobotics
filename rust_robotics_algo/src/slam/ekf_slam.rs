@@ -769,7 +769,7 @@ fn enforce_min_covariance(state: &mut EkfSlamState) {
     const MIN_THETA_VAR: f32 = 0.0001; // 0.6 deg std dev
 
     // Minimum landmark covariance
-    const MIN_LANDMARK_VAR: f32 = 0.01; // 10cm std dev
+    const MIN_LANDMARK_VAR: f32 = 0.0001; // 1cm std dev
 
     // Apply minimum to robot pose
     if state.sigma[(0, 0)] < MIN_POS_VAR {
