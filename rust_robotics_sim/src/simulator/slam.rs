@@ -34,6 +34,8 @@ struct EkfSlamInstance {
     enabled: bool,
     state: EkfSlamState,
     h_est: Vec<rb::Vector3>,
+    /// History of update times in microseconds
+    h_update_us: Vec<f64>,
     /// Last update time in microseconds
     last_update_us: f64,
     /// Exponential moving average of update time
@@ -46,6 +48,7 @@ impl EkfSlamInstance {
             enabled: true,
             state: EkfSlamState::new(),
             h_est: vec![rb::Vector3::zeros()],
+            h_update_us: Vec::new(),
             last_update_us: 0.0,
             avg_update_us: 0.0,
         }
@@ -58,6 +61,7 @@ impl EkfSlamInstance {
     fn reset_with_pose(&mut self, initial_pose: rb::Vector3) {
         self.state = EkfSlamState::with_pose(initial_pose[0], initial_pose[1], initial_pose[2]);
         self.h_est = vec![initial_pose];
+        self.h_update_us.clear();
         self.last_update_us = 0.0;
         self.avg_update_us = 0.0;
     }
@@ -80,6 +84,11 @@ impl EkfSlamInstance {
         if self.h_est.len() > HISTORY_LEN {
             self.h_est.remove(0);
         }
+
+        self.h_update_us.push(elapsed);
+        if self.h_update_us.len() > HISTORY_LEN {
+            self.h_update_us.remove(0);
+        }
     }
 
     fn get_pose(&self) -> rb::Vector3 {
@@ -97,6 +106,8 @@ struct GraphSlamInstance {
     keyframe_trans_threshold: f32,
     keyframe_rot_threshold: f32,
     h_est: Vec<rb::Vector3>,
+    /// History of update times in microseconds
+    h_update_us: Vec<f64>,
     /// Last update time in microseconds (only when keyframe added)
     last_update_us: f64,
     /// Exponential moving average of update time
@@ -116,6 +127,7 @@ impl GraphSlamInstance {
             keyframe_trans_threshold: 1.0,
             keyframe_rot_threshold: 0.3,
             h_est: vec![rb::Vector3::zeros()],
+            h_update_us: Vec::new(),
             last_update_us: 0.0,
             avg_update_us: 0.0,
         }
@@ -132,6 +144,7 @@ impl GraphSlamInstance {
         self.prev_keyframe_idx = 0;
         self.accumulated_motion = (0.0, 0.0, 0.0);
         self.h_est = vec![initial_pose];
+        self.h_update_us.clear();
         self.last_update_us = 0.0;
         self.avg_update_us = 0.0;
     }
@@ -176,6 +189,10 @@ impl GraphSlamInstance {
             let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
             self.last_update_us = elapsed;
             self.avg_update_us = 0.9 * self.avg_update_us + 0.1 * elapsed;
+            self.h_update_us.push(elapsed);
+            if self.h_update_us.len() > HISTORY_LEN {
+                self.h_update_us.remove(0);
+            }
             return;
         }
 
@@ -232,6 +249,10 @@ impl GraphSlamInstance {
         let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
         self.last_update_us = elapsed;
         self.avg_update_us = 0.9 * self.avg_update_us + 0.1 * elapsed;
+        self.h_update_us.push(elapsed);
+        if self.h_update_us.len() > HISTORY_LEN {
+            self.h_update_us.remove(0);
+        }
     }
 
     fn get_pose(&self) -> rb::Vector3 {
@@ -686,6 +707,34 @@ impl Draw for SlamDemo {
                 .name("DR Error (m)")
                 .color(colors::DR),
         );
+
+        // EKF timing (scaled to ms, dashed line)
+        if self.ekf.enabled && !self.ekf.h_update_us.is_empty() {
+            let ekf_timing: PlotPoints<'_> = self.ekf.h_update_us.iter()
+                .enumerate()
+                .map(|(i, &t)| [i as f64 * 0.01, t / 1000.0]) // Convert μs to ms
+                .collect();
+            plot_ui.line(
+                Line::new("EKF Time", ekf_timing)
+                    .name("EKF Time (ms)")
+                    .color(EKF_COLOR)
+                    .style(LineStyle::dashed_dense()),
+            );
+        }
+
+        // Graph timing (scaled to ms, dashed line)
+        if self.graph.enabled && !self.graph.h_update_us.is_empty() {
+            let graph_timing: PlotPoints<'_> = self.graph.h_update_us.iter()
+                .enumerate()
+                .map(|(i, &t)| [i as f64 * 0.01, t / 1000.0]) // Convert μs to ms
+                .collect();
+            plot_ui.line(
+                Line::new("Graph Time", graph_timing)
+                    .name("Graph Time (ms)")
+                    .color(GRAPH_COLOR)
+                    .style(LineStyle::dashed_dense()),
+            );
+        }
     }
 }
 
