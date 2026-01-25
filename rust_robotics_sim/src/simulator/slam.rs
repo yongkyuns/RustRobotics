@@ -14,7 +14,7 @@ use rb::slam::{
     GraphSlam, Pose2D, Landmark2D,
 };
 use rust_robotics_algo as rb;
-use std::time::Instant;
+use web_time::Instant;
 
 /// Maximum history length for trajectory visualization
 const HISTORY_LEN: usize = 1000;
