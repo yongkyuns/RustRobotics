@@ -302,14 +302,17 @@ impl Simulator {
                 self.reset_all();
             }
 
-            let add_label = match self.mode {
-                SimMode::InvertedPendulum => "Add Pendulum",
-                SimMode::Localization => "Add Vehicle",
-                SimMode::PathPlanning => "Add Planner",
-                SimMode::Slam => "Add SLAM",
-            };
-            if ui.button(add_label).clicked() {
-                self.add_simulation();
+            // SLAM has single vehicle with multiple algorithms - no "Add" button
+            if self.mode != SimMode::Slam {
+                let add_label = match self.mode {
+                    SimMode::InvertedPendulum => "Add Pendulum",
+                    SimMode::Localization => "Add Vehicle",
+                    SimMode::PathPlanning => "Add Planner",
+                    SimMode::Slam => unreachable!(),
+                };
+                if ui.button(add_label).clicked() {
+                    self.add_simulation();
+                }
             }
 
             ui.checkbox(&mut self.show_graph, "Show Graph");
