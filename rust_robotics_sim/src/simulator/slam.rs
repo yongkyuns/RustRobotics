@@ -544,13 +544,13 @@ impl Draw for SlamDemo {
                 ui.set_min_width(100.0);
                 ui.vertical(|ui| {
                     ui.label("Algorithms");
+                    let mut needs_reset = false;
                     ui.horizontal(|ui| {
                         let was_enabled = self.ekf.enabled;
                         ui.checkbox(&mut self.ekf.enabled, "EKF");
                         ui.colored_label(EKF_COLOR, "●");
                         if self.ekf.enabled && !was_enabled {
-                            // Initialize with current dead-reckoning pose when enabled mid-simulation
-                            self.ekf.reset_with_pose(self.x_dr);
+                            needs_reset = true;
                         }
                     });
                     ui.horizontal(|ui| {
@@ -558,10 +558,20 @@ impl Draw for SlamDemo {
                         ui.checkbox(&mut self.graph.enabled, "Graph");
                         ui.colored_label(GRAPH_COLOR, "◆");
                         if self.graph.enabled && !was_enabled {
-                            // Initialize with current dead-reckoning pose when enabled mid-simulation
-                            self.graph.reset_with_pose(self.n_landmarks, self.x_dr);
+                            needs_reset = true;
                         }
                     });
+                    // Reset simulation when algorithm is enabled mid-run
+                    if needs_reset {
+                        self.x_true = rb::Vector3::zeros();
+                        self.x_dr = rb::Vector3::zeros();
+                        self.h_true = vec![rb::Vector3::zeros()];
+                        self.h_dr = vec![rb::Vector3::zeros()];
+                        self.current_observations.clear();
+                        self.step_count = 0;
+                        self.ekf.reset();
+                        self.graph.reset(self.n_landmarks);
+                    }
                 });
             });
 
