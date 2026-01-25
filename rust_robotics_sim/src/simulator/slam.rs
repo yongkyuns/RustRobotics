@@ -260,7 +260,7 @@ pub struct SlamDemo {
     /// Angular velocity (rad/s)
     yaw_rate: f32,
     /// Number of landmarks
-    n_landmarks: usize,
+    pub n_landmarks: usize,
 
     /// UI options
     show_covariance: bool,
@@ -309,6 +309,14 @@ impl SlamDemo {
             self.h_true.remove(0);
             self.h_dr.remove(0);
         }
+    }
+
+    /// Regenerate landmarks and reset algorithm states
+    pub fn regenerate_landmarks(&mut self) {
+        self.landmarks_true = generate_landmarks(self.n_landmarks);
+        self.ekf.reset();
+        self.graph.reset(self.n_landmarks);
+        self.current_observations.clear();
     }
 }
 

@@ -320,6 +320,19 @@ impl Simulator {
             ui.separator();
             ui.label("Speed:");
             ui.add(Slider::new(&mut self.sim_speed, 1..=20).show_value(true));
+
+            // Landmark count slider for SLAM mode
+            if self.mode == SimMode::Slam {
+                if let Some(slam) = self.slam_demos.first_mut() {
+                    ui.separator();
+                    ui.label("Landmarks:");
+                    let old_n = slam.n_landmarks;
+                    ui.add(Slider::new(&mut slam.n_landmarks, 1..=50).show_value(true));
+                    if slam.n_landmarks != old_n {
+                        slam.regenerate_landmarks();
+                    }
+                }
+            }
         });
 
         ui.separator();
