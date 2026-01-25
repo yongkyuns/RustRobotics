@@ -311,12 +311,22 @@ impl SlamDemo {
         }
     }
 
-    /// Regenerate landmarks and reset algorithm states
+    /// Regenerate landmarks and reset simulation state
     pub fn regenerate_landmarks(&mut self) {
+        // Reset vehicle state
+        self.x_true = rb::Vector3::zeros();
+        self.x_dr = rb::Vector3::zeros();
+        self.h_true = vec![rb::Vector3::zeros()];
+        self.h_dr = vec![rb::Vector3::zeros()];
+        self.current_observations.clear();
+        self.step_count = 0;
+
+        // Regenerate landmarks
         self.landmarks_true = generate_landmarks(self.n_landmarks);
+
+        // Reset algorithm states
         self.ekf.reset();
         self.graph.reset(self.n_landmarks);
-        self.current_observations.clear();
     }
 }
 
