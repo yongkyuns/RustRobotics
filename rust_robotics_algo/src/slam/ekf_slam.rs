@@ -379,7 +379,7 @@ fn associate_landmark(
     // the association is ambiguous
     // Ratio test: best must be significantly better than second-best
     let ratio = best.1 / second_best.1;
-    let ambiguity_threshold = 0.8; // Best must be < 80% of second-best
+    let ambiguity_threshold = 0.7; // Best must be < 70% of second-best (stricter)
 
     if ratio < ambiguity_threshold {
         // Clear winner - associate with best
@@ -387,15 +387,21 @@ fn associate_landmark(
     } else {
         // Mahalanobis is ambiguous - use Euclidean distance as tiebreaker
         let eucl_ratio = best.2 / (second_best.2 + 0.001); // Avoid division by zero
-        if eucl_ratio < 0.6 {
-            // Euclidean clearly favors best candidate
+
+        // Calculate separation between best and second-best candidates in Euclidean space
+        // If they are too close together, any association is risky
+        let separation = (second_best.2 - best.2).abs();
+
+        if eucl_ratio < 0.5 && separation > 2.0 {
+            // Euclidean clearly favors best candidate with good separation
             Some(best.0)
-        } else if best.2 < 3.0 {
-            // If best is close enough in Euclidean terms, still associate
-            // This prevents creating duplicate landmarks for known ones
+        } else if best.2 < 1.5 {
+            // Only associate if VERY close in Euclidean terms (was 3.0, now 1.5)
             Some(best.0)
         } else {
-            // Too far and ambiguous - treat as new landmark
+            // Ambiguous at longer range - skip this observation entirely
+            // Don't create new landmark (would be duplicate), don't update (might be wrong)
+            // Just ignore this observation for now
             None
         }
     }
