@@ -119,6 +119,8 @@ pub struct Simulator {
     sim_speed: usize,
     /// Settings to indicate whether to show the graph of simulation signals
     show_graph: bool,
+    /// Show egui inspection UI (memory, textures, etc.)
+    show_inspection: bool,
     paused: bool,
     /// Shared grid width for path planning (in cells)
     grid_width: usize,
@@ -139,6 +141,7 @@ impl Default for Simulator {
             time: 0.0,
             sim_speed: 2,
             show_graph: false,
+            show_inspection: false,
             paused: false,
             grid_width: 40,
             grid_height: 40,
@@ -316,6 +319,7 @@ impl Simulator {
             }
 
             ui.checkbox(&mut self.show_graph, "Show Graph");
+            ui.checkbox(&mut self.show_inspection, "Inspect");
 
             ui.separator();
             ui.label("Speed:");
@@ -488,6 +492,16 @@ impl Simulator {
                                 }
                             }
                         });
+                });
+        }
+
+        // Optional inspection window (egui internals)
+        if self.show_inspection {
+            let ctx = ui.ctx().clone();
+            egui::Window::new("Inspection")
+                .default_size(vec2(300.0, 400.0))
+                .show(&ctx, |ui| {
+                    ctx.inspection_ui(ui);
                 });
         }
     }
