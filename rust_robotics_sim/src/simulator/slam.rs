@@ -105,6 +105,8 @@ struct GraphSlamInstance {
     accumulated_motion: (f32, f32, f32),
     keyframe_trans_threshold: f32,
     keyframe_rot_threshold: f32,
+    /// Maximum number of keyframes before resetting graph (sliding window)
+    max_keyframes: usize,
     h_est: Vec<rb::Vector3>,
     /// History of update times in microseconds
     h_update_us: Vec<f64>,
@@ -126,6 +128,7 @@ impl GraphSlamInstance {
             accumulated_motion: (0.0, 0.0, 0.0),
             keyframe_trans_threshold: 1.0,
             keyframe_rot_threshold: 0.3,
+            max_keyframes: 50, // Limit graph size for bounded optimization time
             h_est: vec![rb::Vector3::zeros()],
             h_update_us: Vec::new(),
             last_update_us: 0.0,
@@ -244,6 +247,24 @@ impl GraphSlamInstance {
 
         // Optimize after adding keyframe
         self.graph.optimize();
+
+        // Sliding window: if graph is too large, reset while keeping landmark estimates
+        if self.graph.poses.len() > self.max_keyframes {
+            // Save current pose and landmark estimates
+            let current_pose = self.graph.poses[self.prev_keyframe_idx];
+            let landmark_estimates: Vec<_> = self.graph.landmarks.clone();
+
+            // Reset graph with current pose as new origin
+            self.graph = GraphSlam::new();
+            self.graph.add_pose(current_pose);
+            self.prev_keyframe_idx = 0;
+
+            // Re-add landmarks with their optimized positions
+            for lm in landmark_estimates {
+                self.graph.add_landmark(lm);
+            }
+            // landmark_to_graph_idx remains valid since landmark indices are preserved
+        }
 
         // Measure time including optimization
         let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
