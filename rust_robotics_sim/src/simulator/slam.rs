@@ -82,12 +82,16 @@ pub struct SlamDemo {
     graph_slam: GraphSlam,
     /// Mapping from true landmark index to graph landmark index
     landmark_to_graph_idx: Vec<Option<usize>>,
-    /// Previous pose for odometry constraints
-    prev_pose_idx: usize,
-    /// Steps since last optimization
-    steps_since_optimize: usize,
-    /// Optimization interval (steps between optimizations)
-    optimize_interval: usize,
+    /// Previous keyframe pose index in graph
+    prev_keyframe_idx: usize,
+    /// Accumulated motion since last keyframe (dx, dy, dtheta)
+    accumulated_motion: (f32, f32, f32),
+    /// Last keyframe pose (x, y, theta) for motion tracking
+    last_keyframe_pose: (f32, f32, f32),
+    /// Minimum translation for new keyframe (meters)
+    keyframe_trans_threshold: f32,
+    /// Minimum rotation for new keyframe (radians)
+    keyframe_rot_threshold: f32,
 
     /// Dead reckoning state (for comparison)
     x_dr: rb::Vector3,
@@ -148,9 +152,11 @@ impl SlamDemo {
             config: EkfSlamConfig::default(),
             graph_slam,
             landmark_to_graph_idx: vec![None; n_landmarks],
-            prev_pose_idx: 0,
-            steps_since_optimize: 0,
-            optimize_interval: 50, // Optimize every 50 steps
+            prev_keyframe_idx: 0,
+            accumulated_motion: (0.0, 0.0, 0.0),
+            last_keyframe_pose: (0.0, 0.0, 0.0),
+            keyframe_trans_threshold: 1.0,  // New keyframe every 1m
+            keyframe_rot_threshold: 0.3,    // Or every ~17 degrees
             x_dr: rb::Vector3::zeros(),
             h_true: vec![rb::Vector3::zeros()],
             h_est: vec![rb::Vector3::zeros()],
@@ -243,43 +249,66 @@ impl SlamDemo {
         }
     }
 
-    /// Graph SLAM step: add pose, constraints, and periodically optimize
+    /// Graph SLAM step: use keyframe approach - only add poses on significant motion
     fn step_graph_slam(&mut self, v: f32, w: f32, dt: f32) {
-        // Get previous pose
-        let prev_pose = &self.graph_slam.poses[self.prev_pose_idx];
-
-        // Calculate odometry measurement (relative motion in robot frame)
+        // Accumulate motion since last keyframe
         let dx = v * dt;
         let dtheta = w * dt;
-        let odom_measurement = Vector3::new(dx, 0.0, dtheta);
 
-        // Predict new pose from odometry
-        let new_theta = prev_pose.theta + dtheta;
-        let new_x = prev_pose.x + dx * prev_pose.theta.cos();
-        let new_y = prev_pose.y + dx * prev_pose.theta.sin();
+        // Get previous keyframe pose (copy to avoid borrow issues)
+        let prev_kf = self.graph_slam.poses[self.prev_keyframe_idx];
+        let prev_kf_theta = prev_kf.theta;
 
-        // Add new pose to graph
+        // Accumulate relative motion in the previous keyframe's frame
+        let (acc_x, acc_y, acc_theta) = self.accumulated_motion;
+        let new_acc_theta = acc_theta + dtheta;
+        let new_acc_x = acc_x + dx * (prev_kf_theta + acc_theta).cos();
+        let new_acc_y = acc_y + dx * (prev_kf_theta + acc_theta).sin();
+        self.accumulated_motion = (new_acc_x, new_acc_y, new_acc_theta);
+
+        // Check if we should create a new keyframe
+        let trans = (new_acc_x * new_acc_x + new_acc_y * new_acc_y).sqrt();
+        let rot = new_acc_theta.abs();
+
+        if trans < self.keyframe_trans_threshold && rot < self.keyframe_rot_threshold {
+            // Not enough motion - don't add keyframe yet
+            return;
+        }
+
+        // Create new keyframe
+        let new_x = prev_kf.x + new_acc_x;
+        let new_y = prev_kf.y + new_acc_y;
+        let new_theta = prev_kf_theta + new_acc_theta;
+
         let new_pose_idx = self.graph_slam.add_pose(Pose2D::new(new_x, new_y, new_theta));
 
-        // Add odometry constraint
+        // Odometry constraint (relative motion in robot frame)
+        let c = prev_kf_theta.cos();
+        let s = prev_kf_theta.sin();
+        let dx_local = c * new_acc_x + s * new_acc_y;
+        let dy_local = -s * new_acc_x + c * new_acc_y;
+        let odom_measurement = Vector3::new(dx_local, dy_local, new_acc_theta);
+
+        // Covariance scales with motion
         let odom_cov = Matrix3::from_diagonal(&Vector3::new(
-            0.1 * dt, 0.1 * dt, 0.05 * dt
+            0.1 * trans.max(0.1),
+            0.1 * trans.max(0.1),
+            0.05 * rot.max(0.01),
         ));
         self.graph_slam.add_odometry(
-            self.prev_pose_idx,
+            self.prev_keyframe_idx,
             new_pose_idx,
             odom_measurement,
             &odom_cov,
         );
 
-        // Add observation constraints
+        // Add observation constraints for current observations
         let obs_cov = Matrix2::from_diagonal(&nalgebra::Vector2::new(0.5, 0.05));
         for (true_lm_idx, obs) in &self.current_observations {
-            // Get or create graph landmark index
             let graph_lm_idx = if let Some(idx) = self.landmark_to_graph_idx[*true_lm_idx] {
                 idx
             } else {
-                // Initialize landmark position from observation
+                // Initialize landmark from current keyframe
                 let pose = &self.graph_slam.poses[new_pose_idx];
                 let lm_x = pose.x + obs.range * (pose.theta + obs.bearing).cos();
                 let lm_y = pose.y + obs.range * (pose.theta + obs.bearing).sin();
@@ -288,7 +317,6 @@ impl SlamDemo {
                 idx
             };
 
-            // Add observation constraint
             self.graph_slam.add_observation(
                 new_pose_idx,
                 graph_lm_idx,
@@ -298,14 +326,13 @@ impl SlamDemo {
             );
         }
 
-        self.prev_pose_idx = new_pose_idx;
-        self.steps_since_optimize += 1;
+        // Update state
+        self.prev_keyframe_idx = new_pose_idx;
+        self.accumulated_motion = (0.0, 0.0, 0.0);
+        self.last_keyframe_pose = (new_x, new_y, new_theta);
 
-        // Periodically optimize the graph
-        if self.steps_since_optimize >= self.optimize_interval {
-            self.graph_slam.optimize();
-            self.steps_since_optimize = 0;
-        }
+        // Optimize after adding keyframe
+        self.graph_slam.optimize();
     }
 
     /// Get estimated robot pose based on current algorithm
@@ -313,8 +340,14 @@ impl SlamDemo {
         match self.algorithm {
             SlamAlgorithm::Ekf => self.slam_state.robot_pose(),
             SlamAlgorithm::Graph => {
-                if let Some(pose) = self.graph_slam.poses.last() {
-                    rb::Vector3::new(pose.x, pose.y, pose.theta)
+                // Interpolate current pose from last keyframe + accumulated motion
+                if let Some(kf) = self.graph_slam.poses.get(self.prev_keyframe_idx) {
+                    let (acc_x, acc_y, acc_theta) = self.accumulated_motion;
+                    rb::Vector3::new(
+                        kf.x + acc_x,
+                        kf.y + acc_y,
+                        kf.theta + acc_theta,
+                    )
                 } else {
                     rb::Vector3::zeros()
                 }
@@ -439,8 +472,9 @@ impl Simulate for SlamDemo {
         // Reset Graph SLAM
         self.graph_slam = GraphSlam::new();
         self.graph_slam.add_pose(Pose2D::origin());
-        self.prev_pose_idx = 0;
-        self.steps_since_optimize = 0;
+        self.prev_keyframe_idx = 0;
+        self.accumulated_motion = (0.0, 0.0, 0.0);
+        self.last_keyframe_pose = (0.0, 0.0, 0.0);
 
         self.h_true = vec![rb::Vector3::zeros()];
         self.h_est = vec![rb::Vector3::zeros()];
@@ -460,7 +494,8 @@ impl Simulate for SlamDemo {
         self.yaw_rate = 0.15;
         self.n_landmarks = 8;
         self.algorithm = SlamAlgorithm::Ekf;
-        self.optimize_interval = 50;
+        self.keyframe_trans_threshold = 1.0;
+        self.keyframe_rot_threshold = 0.3;
         self.config = EkfSlamConfig::default();
         self.show_covariance = true;
         self.show_observations = true;
@@ -669,13 +704,13 @@ impl Draw for SlamDemo {
                     });
                     if self.algorithm == SlamAlgorithm::Graph {
                         ui.add(
-                            DragValue::new(&mut self.optimize_interval)
-                                .speed(1.0)
-                                .range(10_usize..=200)
-                                .prefix("Opt every: ")
-                                .suffix(" steps"),
+                            DragValue::new(&mut self.keyframe_trans_threshold)
+                                .speed(0.1)
+                                .range(0.2_f32..=5.0)
+                                .prefix("KF dist: ")
+                                .suffix(" m"),
                         );
-                        ui.label(format!("Poses: {}", self.graph_slam.poses.len()));
+                        ui.label(format!("Keyframes: {}", self.graph_slam.poses.len()));
                     }
                 });
 
@@ -721,7 +756,9 @@ impl Draw for SlamDemo {
                         // Reset graph SLAM too
                         self.graph_slam = GraphSlam::new();
                         self.graph_slam.add_pose(Pose2D::new(self.x_true[0], self.x_true[1], self.x_true[2]));
-                        self.prev_pose_idx = 0;
+                        self.prev_keyframe_idx = 0;
+                        self.accumulated_motion = (0.0, 0.0, 0.0);
+                        self.last_keyframe_pose = (self.x_true[0], self.x_true[1], self.x_true[2]);
                         self.current_observations.clear();
                     }
                     ui.label(format!("Discovered: {}", self.get_n_landmarks()));
