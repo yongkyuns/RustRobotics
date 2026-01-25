@@ -6,15 +6,23 @@ use super::common::{
 
 use egui::{DragValue, Ui};
 use egui_plot::{Line, LineStyle, PlotPoint, PlotPoints, PlotUi, Points, Polygon, Text};
-use nalgebra::Vector2;
+use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
 use rb::control::vehicle::VehicleParams;
 use rb::prelude::*;
 use rb::slam::{
     generate_observations, motion_model, predict, update, EkfSlamConfig, EkfSlamState, Observation,
+    GraphSlam, Pose2D, Landmark2D,
 };
 use rust_robotics_algo as rb;
 use std::fs::File;
 use std::io::Write;
+
+/// SLAM algorithm selection
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SlamAlgorithm {
+    Ekf,
+    Graph,
+}
 
 /// Log entry for a single simulation step
 #[derive(Clone)]
@@ -52,7 +60,7 @@ const WORLD_SIZE: f32 = 40.0;
 /// Minimum spacing between landmarks
 const MIN_LANDMARK_SPACING: f32 = 5.0;
 
-/// EKF-SLAM demonstration simulation
+/// SLAM demonstration simulation (supports EKF-SLAM and Graph SLAM)
 pub struct SlamDemo {
     /// Unique identifier for this simulation instance
     id: usize,
@@ -62,10 +70,24 @@ pub struct SlamDemo {
     /// True landmark positions
     landmarks_true: Vec<Vector2<f32>>,
 
+    /// Selected SLAM algorithm
+    algorithm: SlamAlgorithm,
+
     /// EKF-SLAM state estimate
     slam_state: EkfSlamState,
     /// EKF-SLAM configuration
     config: EkfSlamConfig,
+
+    /// Graph SLAM state
+    graph_slam: GraphSlam,
+    /// Mapping from true landmark index to graph landmark index
+    landmark_to_graph_idx: Vec<Option<usize>>,
+    /// Previous pose for odometry constraints
+    prev_pose_idx: usize,
+    /// Steps since last optimization
+    steps_since_optimize: usize,
+    /// Optimization interval (steps between optimizations)
+    optimize_interval: usize,
 
     /// Dead reckoning state (for comparison)
     x_dr: rb::Vector3,
@@ -113,12 +135,22 @@ impl SlamDemo {
         let n_landmarks = 8;
         let landmarks_true = generate_landmarks(n_landmarks);
 
+        // Initialize Graph SLAM with first pose at origin
+        let mut graph_slam = GraphSlam::new();
+        graph_slam.add_pose(Pose2D::origin());
+
         Self {
             id,
             x_true: rb::Vector3::zeros(),
-            landmarks_true,
+            landmarks_true: landmarks_true.clone(),
+            algorithm: SlamAlgorithm::Ekf,
             slam_state: EkfSlamState::new(),
             config: EkfSlamConfig::default(),
+            graph_slam,
+            landmark_to_graph_idx: vec![None; n_landmarks],
+            prev_pose_idx: 0,
+            steps_since_optimize: 0,
+            optimize_interval: 50, // Optimize every 50 steps
             x_dr: rb::Vector3::zeros(),
             h_true: vec![rb::Vector3::zeros()],
             h_est: vec![rb::Vector3::zeros()],
@@ -201,13 +233,100 @@ impl SlamDemo {
 
     fn update_history(&mut self) {
         self.h_true.push(self.x_true);
-        self.h_est.push(self.slam_state.robot_pose());
+        self.h_est.push(self.get_estimated_pose());
         self.h_dr.push(self.x_dr);
 
         if self.h_true.len() > HISTORY_LEN {
             self.h_true.remove(0);
             self.h_est.remove(0);
             self.h_dr.remove(0);
+        }
+    }
+
+    /// Graph SLAM step: add pose, constraints, and periodically optimize
+    fn step_graph_slam(&mut self, v: f32, w: f32, dt: f32) {
+        // Get previous pose
+        let prev_pose = &self.graph_slam.poses[self.prev_pose_idx];
+
+        // Calculate odometry measurement (relative motion in robot frame)
+        let dx = v * dt;
+        let dtheta = w * dt;
+        let odom_measurement = Vector3::new(dx, 0.0, dtheta);
+
+        // Predict new pose from odometry
+        let new_theta = prev_pose.theta + dtheta;
+        let new_x = prev_pose.x + dx * prev_pose.theta.cos();
+        let new_y = prev_pose.y + dx * prev_pose.theta.sin();
+
+        // Add new pose to graph
+        let new_pose_idx = self.graph_slam.add_pose(Pose2D::new(new_x, new_y, new_theta));
+
+        // Add odometry constraint
+        let odom_cov = Matrix3::from_diagonal(&Vector3::new(
+            0.1 * dt, 0.1 * dt, 0.05 * dt
+        ));
+        self.graph_slam.add_odometry(
+            self.prev_pose_idx,
+            new_pose_idx,
+            odom_measurement,
+            &odom_cov,
+        );
+
+        // Add observation constraints
+        let obs_cov = Matrix2::from_diagonal(&nalgebra::Vector2::new(0.5, 0.05));
+        for (true_lm_idx, obs) in &self.current_observations {
+            // Get or create graph landmark index
+            let graph_lm_idx = if let Some(idx) = self.landmark_to_graph_idx[*true_lm_idx] {
+                idx
+            } else {
+                // Initialize landmark position from observation
+                let pose = &self.graph_slam.poses[new_pose_idx];
+                let lm_x = pose.x + obs.range * (pose.theta + obs.bearing).cos();
+                let lm_y = pose.y + obs.range * (pose.theta + obs.bearing).sin();
+                let idx = self.graph_slam.add_landmark(Landmark2D::new(lm_x, lm_y));
+                self.landmark_to_graph_idx[*true_lm_idx] = Some(idx);
+                idx
+            };
+
+            // Add observation constraint
+            self.graph_slam.add_observation(
+                new_pose_idx,
+                graph_lm_idx,
+                obs.range,
+                obs.bearing,
+                &obs_cov,
+            );
+        }
+
+        self.prev_pose_idx = new_pose_idx;
+        self.steps_since_optimize += 1;
+
+        // Periodically optimize the graph
+        if self.steps_since_optimize >= self.optimize_interval {
+            self.graph_slam.optimize();
+            self.steps_since_optimize = 0;
+        }
+    }
+
+    /// Get estimated robot pose based on current algorithm
+    fn get_estimated_pose(&self) -> rb::Vector3 {
+        match self.algorithm {
+            SlamAlgorithm::Ekf => self.slam_state.robot_pose(),
+            SlamAlgorithm::Graph => {
+                if let Some(pose) = self.graph_slam.poses.last() {
+                    rb::Vector3::new(pose.x, pose.y, pose.theta)
+                } else {
+                    rb::Vector3::zeros()
+                }
+            }
+        }
+    }
+
+    /// Get number of discovered landmarks
+    fn get_n_landmarks(&self) -> usize {
+        match self.algorithm {
+            SlamAlgorithm::Ekf => self.slam_state.n_landmarks,
+            SlamAlgorithm::Graph => self.graph_slam.landmarks.len(),
         }
     }
 }
@@ -237,50 +356,51 @@ impl Simulate for SlamDemo {
         self.x_true = motion_model(&self.x_true, v, w, dt);
 
         // 2. Update dead reckoning (with biased noise to show SLAM benefit)
-        // Simulates systematic odometry errors (wheel diameter, encoder resolution)
-        // Bias causes consistent drift that doesn't cancel out
-        let v_bias = 1.05;  // 5% consistent velocity overestimate
-        let w_bias = 0.02;  // Consistent angular bias (robot turns slightly more)
+        let v_bias = 1.05;
+        let w_bias = 0.02;
         let v_noisy = v * v_bias + rand_noise() * 0.1;
         let w_noisy = w + w_bias + rand_noise() * 0.02;
         self.x_dr = motion_model(&self.x_dr, v_noisy, w_noisy, dt);
 
-        // 3. EKF-SLAM prediction step
-        predict(&mut self.slam_state, &self.config, v, w, dt);
-
-        // 4. Generate observations from true pose
+        // 3. Generate observations from true pose
         self.current_observations =
             generate_observations(&self.x_true, &self.landmarks_true, &self.config, true);
 
         // Record state before update for logging
         let n_landmarks_before = self.slam_state.n_landmarks;
 
-        // 5. EKF-SLAM update step
-        update(&mut self.slam_state, &self.config, &self.current_observations);
+        // 4. Run SLAM based on selected algorithm
+        match self.algorithm {
+            SlamAlgorithm::Ekf => {
+                // EKF-SLAM prediction step
+                predict(&mut self.slam_state, &self.config, v, w, dt);
+                // EKF-SLAM update step
+                update(&mut self.slam_state, &self.config, &self.current_observations);
+            }
+            SlamAlgorithm::Graph => {
+                self.step_graph_slam(v, w, dt);
+            }
+        }
 
-        // 6. Log this step
+        // 5. Log this step
         if self.logging_enabled {
-            let est_pose = self.slam_state.robot_pose();
+            let est_pose = self.get_estimated_pose();
             let pos_error = ((self.x_true[0] - est_pose[0]).powi(2)
                 + (self.x_true[1] - est_pose[1]).powi(2)).sqrt();
             let heading_error = (self.x_true[2] - est_pose[2]).abs();
 
-            // Determine associations (simplified: compare n_landmarks before/after)
             let observed_indices: Vec<usize> = self.current_observations
                 .iter()
                 .map(|(idx, _)| *idx)
                 .collect();
 
-            // For associations, we track how many were new vs matched
-            let n_new = self.slam_state.n_landmarks - n_landmarks_before;
-            let n_matched = self.current_observations.len() - n_new;
+            let n_new = self.slam_state.n_landmarks.saturating_sub(n_landmarks_before);
+            let n_matched = self.current_observations.len().saturating_sub(n_new);
             let mut associations: Vec<Option<usize>> = Vec::new();
             for i in 0..self.current_observations.len() {
                 if i < n_matched {
-                    // Matched to existing (we don't have exact index, mark as Some(0) placeholder)
                     associations.push(Some(i));
                 } else {
-                    // New landmark
                     associations.push(None);
                 }
             }
@@ -297,7 +417,7 @@ impl Simulate for SlamDemo {
                 heading_error,
                 n_observations: self.current_observations.len(),
                 observed_landmark_indices: observed_indices,
-                n_landmarks_in_state: self.slam_state.n_landmarks,
+                n_landmarks_in_state: self.get_n_landmarks(),
                 associations,
             };
 
@@ -308,8 +428,6 @@ impl Simulate for SlamDemo {
         }
 
         self.step_count += 1;
-
-        // 7. Update history
         self.update_history();
     }
 
@@ -317,14 +435,23 @@ impl Simulate for SlamDemo {
         self.x_true = rb::Vector3::zeros();
         self.x_dr = rb::Vector3::zeros();
         self.slam_state = EkfSlamState::new();
+
+        // Reset Graph SLAM
+        self.graph_slam = GraphSlam::new();
+        self.graph_slam.add_pose(Pose2D::origin());
+        self.prev_pose_idx = 0;
+        self.steps_since_optimize = 0;
+
         self.h_true = vec![rb::Vector3::zeros()];
         self.h_est = vec![rb::Vector3::zeros()];
         self.h_dr = vec![rb::Vector3::zeros()];
         self.current_observations.clear();
         self.step_count = 0;
         self.logs.clear();
+
         // Regenerate landmarks
         self.landmarks_true = generate_landmarks(self.n_landmarks);
+        self.landmark_to_graph_idx = vec![None; self.n_landmarks];
     }
 
     fn reset_all(&mut self) {
@@ -332,6 +459,8 @@ impl Simulate for SlamDemo {
         self.velocity = 1.5;
         self.yaw_rate = 0.15;
         self.n_landmarks = 8;
+        self.algorithm = SlamAlgorithm::Ekf;
+        self.optimize_interval = 50;
         self.config = EkfSlamConfig::default();
         self.show_covariance = true;
         self.show_observations = true;
@@ -361,38 +490,60 @@ impl Draw for SlamDemo {
             );
         }
 
-        // Draw estimated landmarks with covariance ellipses
-        for i in 0..self.slam_state.n_landmarks {
-            if let Some(lm) = self.slam_state.landmark(i) {
-                // Draw landmark point
-                plot_ui.points(
-                    Points::new(
-                        "",
-                        PlotPoints::new(vec![[lm[0] as f64, lm[1] as f64]]),
-                    )
-                    .shape(egui_plot::MarkerShape::Circle)
-                    .radius(5.0)
-                    .color(landmark_est_color),
-                );
-
-                // Draw covariance ellipse
-                if self.show_covariance {
-                    if let Some(cov) = self.slam_state.landmark_covariance(i) {
-                        let ellipse = covariance_ellipse_points(lm[0], lm[1], &cov, 2.0);
-                        plot_ui.polygon(
-                            Polygon::new("", PlotPoints::new(ellipse))
-                                .stroke(egui::Stroke::new(1.5, landmark_est_color.gamma_multiply(0.7)))
-                                .fill_color(landmark_est_color.gamma_multiply(0.15)),
+        // Draw estimated landmarks based on algorithm
+        match self.algorithm {
+            SlamAlgorithm::Ekf => {
+                // EKF-SLAM: draw landmarks with covariance ellipses
+                for i in 0..self.slam_state.n_landmarks {
+                    if let Some(lm) = self.slam_state.landmark(i) {
+                        plot_ui.points(
+                            Points::new(
+                                "",
+                                PlotPoints::new(vec![[lm[0] as f64, lm[1] as f64]]),
+                            )
+                            .shape(egui_plot::MarkerShape::Circle)
+                            .radius(5.0)
+                            .color(landmark_est_color),
                         );
+
+                        if self.show_covariance {
+                            if let Some(cov) = self.slam_state.landmark_covariance(i) {
+                                let ellipse = covariance_ellipse_points(lm[0], lm[1], &cov, 2.0);
+                                plot_ui.polygon(
+                                    Polygon::new("", PlotPoints::new(ellipse))
+                                        .stroke(egui::Stroke::new(1.5, landmark_est_color.gamma_multiply(0.7)))
+                                        .fill_color(landmark_est_color.gamma_multiply(0.15)),
+                                );
+                            }
+                        }
+
+                        plot_ui.text(Text::new(
+                            "",
+                            PlotPoint::new(lm[0] as f64 + 1.0, lm[1] as f64 + 1.0),
+                            format!("{}", i),
+                        ));
                     }
                 }
+            }
+            SlamAlgorithm::Graph => {
+                // Graph SLAM: draw landmarks (no covariance - batch method)
+                for (i, lm) in self.graph_slam.landmarks.iter().enumerate() {
+                    plot_ui.points(
+                        Points::new(
+                            "",
+                            PlotPoints::new(vec![[lm.x as f64, lm.y as f64]]),
+                        )
+                        .shape(egui_plot::MarkerShape::Circle)
+                        .radius(5.0)
+                        .color(landmark_est_color),
+                    );
 
-                // Draw landmark index label
-                plot_ui.text(Text::new(
-                    "",
-                    PlotPoint::new(lm[0] as f64 + 1.0, lm[1] as f64 + 1.0),
-                    format!("{}", i),
-                ));
+                    plot_ui.text(Text::new(
+                        "",
+                        PlotPoint::new(lm.x as f64 + 1.0, lm.y as f64 + 1.0),
+                        format!("{}", i),
+                    ));
+                }
             }
         }
 
@@ -448,22 +599,25 @@ impl Draw for SlamDemo {
         );
 
         // Estimated vehicle with covariance
-        let est_pose = self.slam_state.robot_pose();
+        let est_pose = self.get_estimated_pose();
+        let est_label = match self.algorithm {
+            SlamAlgorithm::Ekf => "EKF",
+            SlamAlgorithm::Graph => "Graph",
+        };
         draw_labeled_vehicle(
             plot_ui,
             &est_pose,
             self.velocity,
-            "EKF",
+            est_label,
             label_offset,
             0.0,
             &self.vehicle_params,
             &format!("Vehicle {} (Estimate)", self.id),
         );
 
-        // Robot pose covariance ellipse
-        if self.show_covariance {
+        // Robot pose covariance ellipse (EKF only)
+        if self.show_covariance && self.algorithm == SlamAlgorithm::Ekf {
             let cov = self.slam_state.robot_covariance();
-            // Extract 2x2 position covariance
             let pos_cov = nalgebra::Matrix2::new(cov[(0, 0)], cov[(0, 1)], cov[(1, 0)], cov[(1, 1)]);
             let ellipse = covariance_ellipse_points(est_pose[0], est_pose[1], &pos_cov, 2.0);
             plot_ui.polygon(
@@ -501,6 +655,30 @@ impl Draw for SlamDemo {
 
                 ui.separator();
 
+                // Algorithm selection
+                ui.group(|ui| {
+                    ui.label("Algorithm:");
+                    ui.horizontal(|ui| {
+                        let old_algo = self.algorithm;
+                        ui.selectable_value(&mut self.algorithm, SlamAlgorithm::Ekf, "EKF");
+                        ui.selectable_value(&mut self.algorithm, SlamAlgorithm::Graph, "Graph");
+                        if self.algorithm != old_algo {
+                            // Reset when switching algorithms
+                            self.reset_state();
+                        }
+                    });
+                    if self.algorithm == SlamAlgorithm::Graph {
+                        ui.add(
+                            DragValue::new(&mut self.optimize_interval)
+                                .speed(1.0)
+                                .range(10_usize..=200)
+                                .prefix("Opt every: ")
+                                .suffix(" steps"),
+                        );
+                        ui.label(format!("Poses: {}", self.graph_slam.poses.len()));
+                    }
+                });
+
                 // Motion controls
                 ui.group(|ui| {
                     ui.label("Motion:");
@@ -533,15 +711,20 @@ impl Draw for SlamDemo {
                     if self.n_landmarks != old_n {
                         // Regenerate landmarks and reset SLAM state
                         self.landmarks_true = generate_landmarks(self.n_landmarks);
+                        self.landmark_to_graph_idx = vec![None; self.n_landmarks];
                         // Reset SLAM but keep current robot pose estimate
                         let mut new_state = EkfSlamState::new();
                         new_state.mu[0] = self.x_true[0];
                         new_state.mu[1] = self.x_true[1];
                         new_state.mu[2] = self.x_true[2];
                         self.slam_state = new_state;
+                        // Reset graph SLAM too
+                        self.graph_slam = GraphSlam::new();
+                        self.graph_slam.add_pose(Pose2D::new(self.x_true[0], self.x_true[1], self.x_true[2]));
+                        self.prev_pose_idx = 0;
                         self.current_observations.clear();
                     }
-                    ui.label(format!("Discovered: {}", self.slam_state.n_landmarks));
+                    ui.label(format!("Discovered: {}", self.get_n_landmarks()));
                 });
 
                 // Sensor config
@@ -573,14 +756,18 @@ impl Draw for SlamDemo {
 
                 // Stats
                 ui.separator();
-                let est_pose = self.slam_state.robot_pose();
+                let est_pose = self.get_estimated_pose();
                 let pos_err = ((self.x_true[0] - est_pose[0]).powi(2)
                     + (self.x_true[1] - est_pose[1]).powi(2))
                 .sqrt();
                 let dr_err = ((self.x_true[0] - self.x_dr[0]).powi(2)
                     + (self.x_true[1] - self.x_dr[1]).powi(2))
                 .sqrt();
-                ui.label(format!("EKF err: {:.2} m", pos_err));
+                let algo_name = match self.algorithm {
+                    SlamAlgorithm::Ekf => "EKF",
+                    SlamAlgorithm::Graph => "Graph",
+                };
+                ui.label(format!("{} err: {:.2} m", algo_name, pos_err));
                 ui.label(format!("DR err: {:.2} m", dr_err));
 
                 // Logging controls
@@ -632,9 +819,14 @@ impl Draw for SlamDemo {
             })
             .collect();
 
+        let algo_name = match self.algorithm {
+            SlamAlgorithm::Ekf => "EKF",
+            SlamAlgorithm::Graph => "Graph",
+        };
+
         plot_ui.line(
-            Line::new(format!("EKF Error {}", self.id), est_errors)
-                .name(format!("EKF Error {} (m)", self.id))
+            Line::new(format!("{} Error {}", algo_name, self.id), est_errors)
+                .name(format!("{} Error {} (m)", algo_name, self.id))
                 .color(colors::ESTIMATED),
         );
 
