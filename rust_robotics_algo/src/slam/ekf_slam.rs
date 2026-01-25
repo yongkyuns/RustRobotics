@@ -63,8 +63,15 @@ impl Default for EkfSlamState {
 impl EkfSlamState {
     /// Create a new EKF-SLAM state with initial robot pose at origin
     pub fn new() -> Self {
-        // Initial state: robot at origin with zero heading
-        let mu = DVector::zeros(3);
+        Self::with_pose(0.0, 0.0, 0.0)
+    }
+
+    /// Create a new EKF-SLAM state with specified initial robot pose
+    pub fn with_pose(x: f32, y: f32, theta: f32) -> Self {
+        let mut mu = DVector::zeros(3);
+        mu[0] = x;
+        mu[1] = y;
+        mu[2] = theta;
         // Initial covariance: small uncertainty for robot pose
         let sigma = DMatrix::from_diagonal(&DVector::from_vec(vec![0.01, 0.01, 0.001]));
         Self {

@@ -52,8 +52,12 @@ impl EkfSlamInstance {
     }
 
     fn reset(&mut self) {
-        self.state = EkfSlamState::new();
-        self.h_est = vec![rb::Vector3::zeros()];
+        self.reset_with_pose(rb::Vector3::zeros());
+    }
+
+    fn reset_with_pose(&mut self, initial_pose: rb::Vector3) {
+        self.state = EkfSlamState::with_pose(initial_pose[0], initial_pose[1], initial_pose[2]);
+        self.h_est = vec![initial_pose];
         self.last_update_us = 0.0;
         self.avg_update_us = 0.0;
     }
@@ -118,12 +122,16 @@ impl GraphSlamInstance {
     }
 
     fn reset(&mut self, n_landmarks: usize) {
+        self.reset_with_pose(n_landmarks, rb::Vector3::zeros());
+    }
+
+    fn reset_with_pose(&mut self, n_landmarks: usize, initial_pose: rb::Vector3) {
         self.graph = GraphSlam::new();
-        self.graph.add_pose(Pose2D::origin());
+        self.graph.add_pose(Pose2D::new(initial_pose[0], initial_pose[1], initial_pose[2]));
         self.landmark_to_graph_idx = vec![None; n_landmarks];
         self.prev_keyframe_idx = 0;
         self.accumulated_motion = (0.0, 0.0, 0.0);
-        self.h_est = vec![rb::Vector3::zeros()];
+        self.h_est = vec![initial_pose];
         self.last_update_us = 0.0;
         self.avg_update_us = 0.0;
     }
@@ -537,15 +545,21 @@ impl Draw for SlamDemo {
                 ui.vertical(|ui| {
                     ui.label("Algorithms");
                     ui.horizontal(|ui| {
+                        let was_enabled = self.ekf.enabled;
                         ui.checkbox(&mut self.ekf.enabled, "EKF");
                         ui.colored_label(EKF_COLOR, "●");
+                        if self.ekf.enabled && !was_enabled {
+                            // Initialize with current dead-reckoning pose when enabled mid-simulation
+                            self.ekf.reset_with_pose(self.x_dr);
+                        }
                     });
                     ui.horizontal(|ui| {
                         let was_enabled = self.graph.enabled;
                         ui.checkbox(&mut self.graph.enabled, "Graph");
                         ui.colored_label(GRAPH_COLOR, "◆");
                         if self.graph.enabled && !was_enabled {
-                            self.graph.reset(self.n_landmarks);
+                            // Initialize with current dead-reckoning pose when enabled mid-simulation
+                            self.graph.reset_with_pose(self.n_landmarks, self.x_dr);
                         }
                     });
                 });
