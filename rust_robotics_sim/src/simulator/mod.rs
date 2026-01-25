@@ -121,6 +121,8 @@ pub struct Simulator {
     show_graph: bool,
     /// Show egui inspection UI (memory, textures, etc.)
     show_inspection: bool,
+    /// Show egui memory panel
+    show_memory: bool,
     paused: bool,
     /// Shared grid width for path planning (in cells)
     grid_width: usize,
@@ -142,6 +144,7 @@ impl Default for Simulator {
             sim_speed: 2,
             show_graph: false,
             show_inspection: false,
+            show_memory: false,
             paused: false,
             grid_width: 40,
             grid_height: 40,
@@ -320,6 +323,7 @@ impl Simulator {
 
             ui.checkbox(&mut self.show_graph, "Show Graph");
             ui.checkbox(&mut self.show_inspection, "Inspect");
+            ui.checkbox(&mut self.show_memory, "Memory");
 
             ui.separator();
             ui.label("Speed:");
@@ -502,6 +506,16 @@ impl Simulator {
                 .default_size(vec2(300.0, 400.0))
                 .show(&ctx, |ui| {
                     ctx.inspection_ui(ui);
+                });
+        }
+
+        // Optional memory window
+        if self.show_memory {
+            let ctx = ui.ctx().clone();
+            egui::Window::new("Memory")
+                .default_size(vec2(300.0, 400.0))
+                .show(&ctx, |ui| {
+                    ctx.memory_ui(ui);
                 });
         }
     }
