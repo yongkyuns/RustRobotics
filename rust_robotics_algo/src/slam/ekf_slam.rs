@@ -137,17 +137,19 @@ impl Default for EkfSlamConfig {
     fn default() -> Self {
         Self {
             // Process noise (motion uncertainty)
-            // Larger values = trust motion model less, rely more on observations
+            // These are base values that get SCALED by actual motion in predict()
+            // - Position noise scaled by distance traveled (v * dt)
+            // - Heading noise scaled by angle change (w * dt)
             motion_noise: Matrix3::new(
-                0.001, 0.0, 0.0,     // x variance per step
-                0.0, 0.001, 0.0,     // y variance per step
-                0.0, 0.0, 0.0001,    // theta variance per step
+                0.02, 0.0, 0.0,    // x variance per meter traveled
+                0.0, 0.02, 0.0,    // y variance per meter traveled
+                0.0, 0.0, 0.2,     // theta variance per radian turned (higher for better correction)
             ),
             // Observation noise (range, bearing variances)
-            // Should match actual sensor noise
+            // Lower bearing noise helps constrain heading better
             observation_noise: Matrix2::new(
-                0.1, 0.0,    // range variance (0.32m std dev)
-                0.0, 0.01,   // bearing variance (~6 deg std dev)
+                0.1, 0.0,     // range variance (0.32m std dev)
+                0.0, 0.005,   // bearing variance (~4 deg std dev) - lower to better constrain heading
             ),
             // Mahalanobis distance gate for data association
             association_gate: 5.0,
@@ -280,13 +282,19 @@ pub fn predict(state: &mut EkfSlamState, config: &EkfSlamConfig, v: f32, w: f32,
     }
 
     // Build process noise matrix R (n x n)
-    // Only affects robot pose (top-left 3x3 block)
+    // Scale noise by actual motion to properly reflect uncertainty
+    // - Position noise scales with distance traveled (v * dt)
+    // - Heading noise scales with angular change (w * dt)
+    let dist = (v * dt).abs();
+    let angle_change = (w * dt).abs();
+
     let mut R = DMatrix::<f32>::zeros(n, n);
-    for i in 0..3 {
-        for j in 0..3 {
-            R[(i, j)] = config.motion_noise[(i, j)];
-        }
-    }
+    // Position uncertainty proportional to distance traveled
+    R[(0, 0)] = config.motion_noise[(0, 0)] * dist;
+    R[(1, 1)] = config.motion_noise[(1, 1)] * dist;
+    // Heading uncertainty proportional to angle change + base uncertainty
+    // Add minimum heading noise to prevent overconfidence when w is small
+    R[(2, 2)] = config.motion_noise[(2, 2)] * (angle_change + 0.01);
 
     // Update covariance: Σ' = G Σ Gᵀ + R
     state.sigma = &G * &state.sigma * G.transpose() + R;
@@ -474,6 +482,9 @@ fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamCon
 
 /// EKF-SLAM update step: correct state estimate using observations
 ///
+/// Uses batch update when multiple known landmarks are visible simultaneously.
+/// This better constrains heading by using geometric relationships between landmarks.
+///
 /// # Arguments
 /// * `state` - The current EKF-SLAM state (will be modified)
 /// * `config` - Configuration parameters
@@ -486,20 +497,111 @@ pub fn update(
     config: &EkfSlamConfig,
     observations: &[(usize, Observation)],
 ) {
-    for (_true_idx, obs) in observations {
-        // Always use data association to find matching landmark
-        let associated = associate_landmark(state, obs, config);
+    // First pass: separate known landmarks from new ones
+    let mut known_obs: Vec<(usize, &Observation)> = Vec::new();
+    let mut new_obs: Vec<&Observation> = Vec::new();
 
+    for (_true_idx, obs) in observations {
+        let associated = associate_landmark(state, obs, config);
         match associated {
-            Some(idx) => {
-                // Update existing landmark
-                update_landmark(state, config, idx, obs);
-            }
-            None => {
-                // Add new landmark
-                add_landmark(state, obs, config);
-            }
+            Some(idx) => known_obs.push((idx, obs)),
+            None => new_obs.push(obs),
         }
+    }
+
+    // Batch update for known landmarks (if multiple are visible)
+    if known_obs.len() >= 2 {
+        batch_update_landmarks(state, config, &known_obs);
+    } else {
+        // Sequential update for single landmark
+        for (idx, obs) in &known_obs {
+            update_landmark(state, config, *idx, obs);
+        }
+    }
+
+    // Add new landmarks after updating with known ones
+    for obs in new_obs {
+        add_landmark(state, obs, config);
+    }
+}
+
+/// Batch update using multiple landmark observations simultaneously
+/// This provides better heading constraints through geometric relationships
+fn batch_update_landmarks(
+    state: &mut EkfSlamState,
+    config: &EkfSlamConfig,
+    observations: &[(usize, &Observation)],
+) {
+    let n = state.mu.len();
+    let m = observations.len() * 2; // 2 measurements per observation (range, bearing)
+
+    // Build stacked measurement vector and Jacobian
+    let mut z = DVector::<f32>::zeros(m);
+    let mut z_pred = DVector::<f32>::zeros(m);
+    let mut H = DMatrix::<f32>::zeros(m, n);
+
+    for (i, (landmark_idx, obs)) in observations.iter().enumerate() {
+        let robot_pose = state.robot_pose();
+        let landmark = state.landmark(*landmark_idx).unwrap();
+
+        // Predicted observation
+        let pred = observation_model(&robot_pose, &landmark);
+
+        // Fill measurement vectors
+        z[2 * i] = obs.range;
+        z[2 * i + 1] = obs.bearing;
+        z_pred[2 * i] = pred.range;
+        z_pred[2 * i + 1] = pred.bearing;
+
+        // Compute observation Jacobian
+        let (h_robot, h_landmark) = observation_jacobian(&robot_pose, &landmark);
+
+        // Fill Jacobian matrix
+        for row in 0..2 {
+            for col in 0..3 {
+                H[(2 * i + row, col)] = h_robot[(row, col)];
+            }
+            let base = 3 + 2 * landmark_idx;
+            H[(2 * i + row, base)] = h_landmark[(row, 0)];
+            H[(2 * i + row, base + 1)] = h_landmark[(row, 1)];
+        }
+    }
+
+    // Innovation with angle normalization
+    let mut dz = z - z_pred;
+    for i in 0..observations.len() {
+        dz[2 * i + 1] = normalize_angle(dz[2 * i + 1]);
+    }
+
+    // Build block-diagonal observation noise matrix
+    let mut Q = DMatrix::<f32>::zeros(m, m);
+    for i in 0..observations.len() {
+        Q[(2 * i, 2 * i)] = config.observation_noise[(0, 0)];
+        Q[(2 * i, 2 * i + 1)] = config.observation_noise[(0, 1)];
+        Q[(2 * i + 1, 2 * i)] = config.observation_noise[(1, 0)];
+        Q[(2 * i + 1, 2 * i + 1)] = config.observation_noise[(1, 1)];
+    }
+
+    // Innovation covariance: S = H Σ Hᵀ + Q
+    let S = &H * &state.sigma * H.transpose() + Q;
+
+    // Kalman gain: K = Σ Hᵀ S⁻¹
+    if let Some(s_inv) = S.try_inverse() {
+        let K = &state.sigma * H.transpose() * s_inv;
+
+        // State update: μ' = μ + K z
+        let update = &K * dz;
+        state.mu += update;
+
+        // Normalize heading
+        state.mu[2] = normalize_angle(state.mu[2]);
+
+        // Covariance update: Σ' = (I - K H) Σ
+        let I = DMatrix::<f32>::identity(n, n);
+        state.sigma = (&I - &K * &H) * &state.sigma;
+
+        // Ensure symmetry
+        state.sigma = (&state.sigma + state.sigma.transpose()) * 0.5;
     }
 }
 
@@ -1609,5 +1711,116 @@ mod tests {
         }
 
         assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+    }
+
+    /// Test to reproduce the landmark rotation issue with 20 landmarks
+    /// Runs multiple simulations and checks if landmarks appear rotated
+    #[test]
+    fn test_landmark_rotation_issue() {
+        const N_TRIALS: usize = 10;
+        const N_LANDMARKS: usize = 20;
+        const N_STEPS: usize = 500;
+
+        println!("\n=== Reproducing Landmark Rotation Issue ===");
+
+        let mut high_error_count = 0;
+        let mut rotation_detected_count = 0;
+
+        for trial in 0..N_TRIALS {
+            let mut state = EkfSlamState::new();
+            let mut config = EkfSlamConfig::default();
+            config.max_range = 50.0;
+
+            // Generate 20 landmarks in a ring
+            let landmarks = generate_random_landmarks_ring(N_LANDMARKS, 8.0, 30.0);
+
+            let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
+            let v = 2.0;
+            let w = 0.15; // Circular motion
+            let dt = 0.02;
+
+            // Run simulation
+            for _ in 0..N_STEPS {
+                true_pose = motion_model(&true_pose, v, w, dt);
+                predict(&mut state, &config, v, w, dt);
+                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+                update(&mut state, &config, &observations);
+            }
+
+            // Calculate robot position error
+            let pos_err = ((true_pose[0] - state.x()).powi(2)
+                + (true_pose[1] - state.y()).powi(2)).sqrt();
+
+            // Calculate landmark errors and check for rotation pattern
+            let mut landmark_errors: Vec<f32> = Vec::new();
+            let mut angular_diffs: Vec<f32> = Vec::new();
+
+            for i in 0..state.n_landmarks.min(landmarks.len()) {
+                if let Some(est_lm) = state.landmark(i) {
+                    // Find closest true landmark (data association may differ)
+                    let mut min_dist = f32::MAX;
+                    let mut matched_idx = 0;
+                    for (j, true_lm) in landmarks.iter().enumerate() {
+                        let dist = ((est_lm[0] - true_lm[0]).powi(2)
+                            + (est_lm[1] - true_lm[1]).powi(2)).sqrt();
+                        if dist < min_dist {
+                            min_dist = dist;
+                            matched_idx = j;
+                        }
+                    }
+                    landmark_errors.push(min_dist);
+
+                    // Calculate angular difference from robot position
+                    let true_lm = &landmarks[matched_idx];
+                    let true_angle = (true_lm[1] - true_pose[1]).atan2(true_lm[0] - true_pose[0]);
+                    let est_angle = (est_lm[1] - state.y()).atan2(est_lm[0] - state.x());
+                    let angle_diff = (true_angle - est_angle).abs();
+                    let angle_diff = if angle_diff > PI { 2.0 * PI - angle_diff } else { angle_diff };
+                    angular_diffs.push(angle_diff);
+                }
+            }
+
+            let avg_landmark_err = if landmark_errors.is_empty() { 0.0 }
+                else { landmark_errors.iter().sum::<f32>() / landmark_errors.len() as f32 };
+            let max_landmark_err = landmark_errors.iter().cloned().fold(0.0f32, f32::max);
+            let avg_angular_diff = if angular_diffs.is_empty() { 0.0 }
+                else { angular_diffs.iter().sum::<f32>() / angular_diffs.len() as f32 };
+
+            // Check for high error
+            if pos_err > 1.0 {
+                high_error_count += 1;
+            }
+
+            // Check for rotation pattern (consistent angular offset across landmarks)
+            let angular_std = if angular_diffs.len() > 1 {
+                let mean = avg_angular_diff;
+                let variance = angular_diffs.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
+                    / angular_diffs.len() as f32;
+                variance.sqrt()
+            } else { 0.0 };
+
+            // Low std with non-zero mean suggests rotation
+            let rotation_detected = avg_angular_diff > 0.05 && angular_std < 0.1;
+            if rotation_detected {
+                rotation_detected_count += 1;
+            }
+
+            println!("Trial {:2}: pos_err={:.3}m, avg_lm_err={:.3}m, max_lm_err={:.3}m, \
+                      avg_angle={:.3}rad, angle_std={:.3}, rotation={}",
+                trial, pos_err, avg_landmark_err, max_landmark_err,
+                avg_angular_diff, angular_std, if rotation_detected { "YES" } else { "no" });
+        }
+
+        println!("\nSummary:");
+        println!("  High error (>1m): {}/{} trials ({:.0}%)",
+            high_error_count, N_TRIALS, 100.0 * high_error_count as f32 / N_TRIALS as f32);
+        println!("  Rotation detected: {}/{} trials ({:.0}%)",
+            rotation_detected_count, N_TRIALS, 100.0 * rotation_detected_count as f32 / N_TRIALS as f32);
+
+        // This test is for reproduction - we expect some failures
+        // If > 30% have high error, that confirms the user's observation
+        if high_error_count as f32 / N_TRIALS as f32 > 0.3 {
+            println!("\n  CONFIRMED: >30% of runs have error > 1m");
+        }
     }
 }
