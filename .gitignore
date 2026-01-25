@@ -4,3 +4,4 @@
 /python_interface/target
 Cargo.lock
 .DS_Store
+slam_*.csv
