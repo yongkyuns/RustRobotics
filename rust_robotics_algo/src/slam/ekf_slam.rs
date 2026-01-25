@@ -153,10 +153,10 @@ impl Default for EkfSlamConfig {
                 0.0, 0.0, 0.05,    // theta variance per radian turned (lower to reduce heading drift)
             ),
             // Observation noise (range, bearing variances)
-            // Lower bearing noise helps constrain heading better
+            // Lower values = filter trusts observations more = faster covariance reduction
             observation_noise: Matrix2::new(
-                0.1, 0.0,     // range variance (0.32m std dev)
-                0.0, 0.002,   // bearing variance (~2.5 deg std dev) - tighter to better constrain heading
+                0.01, 0.0,    // range variance (0.1m std dev)
+                0.0, 0.0002,  // bearing variance (~0.8 deg std dev)
             ),
             // Mahalanobis distance gate for data association
             association_gate: 5.0,
@@ -370,48 +370,10 @@ fn associate_landmark(
         return None;
     }
 
-    // Single candidate - unambiguous match
-    if candidates.len() == 1 {
-        return Some(candidates[0].0);
-    }
-
-    // Multiple candidates - check for ambiguity
-    // Sort by Mahalanobis distance
+    // Use nearest-neighbor: pick the candidate with lowest Mahalanobis distance
+    // Sort by Mahalanobis distance and return the best match
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-    let best = &candidates[0];
-    let second_best = &candidates[1];
-
-    // Ambiguity check: if the best and second-best are too close in distance,
-    // the association is ambiguous
-    // Ratio test: best must be significantly better than second-best
-    let ratio = best.1 / second_best.1;
-    let ambiguity_threshold = 0.7; // Best must be < 70% of second-best (stricter)
-
-    if ratio < ambiguity_threshold {
-        // Clear winner - associate with best
-        Some(best.0)
-    } else {
-        // Mahalanobis is ambiguous - use Euclidean distance as tiebreaker
-        let eucl_ratio = best.2 / (second_best.2 + 0.001); // Avoid division by zero
-
-        // Calculate separation between best and second-best candidates in Euclidean space
-        // If they are too close together, any association is risky
-        let separation = (second_best.2 - best.2).abs();
-
-        if eucl_ratio < 0.5 && separation > 2.0 {
-            // Euclidean clearly favors best candidate with good separation
-            Some(best.0)
-        } else if best.2 < 1.5 {
-            // Only associate if VERY close in Euclidean terms (was 3.0, now 1.5)
-            Some(best.0)
-        } else {
-            // Ambiguous at longer range - skip this observation entirely
-            // Don't create new landmark (would be duplicate), don't update (might be wrong)
-            // Just ignore this observation for now
-            None
-        }
-    }
+    Some(candidates[0].0)
 }
 
 /// Add a new landmark to the state based on an observation
