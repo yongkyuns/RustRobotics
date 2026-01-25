@@ -477,101 +477,78 @@ impl Draw for SlamDemo {
     }
 
     fn options(&mut self, ui: &mut Ui) -> bool {
-        ui.horizontal(|ui| {
+        ui.horizontal_top(|ui| {
             // Algorithm toggles
             ui.group(|ui| {
-                ui.set_width(140.0);
-                ui.label("Algorithms:");
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.ekf.enabled, "EKF");
-                    ui.colored_label(EKF_COLOR, "●");
+                ui.set_min_width(100.0);
+                ui.vertical(|ui| {
+                    ui.label("Algorithms");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.ekf.enabled, "EKF");
+                        ui.colored_label(EKF_COLOR, "●");
+                    });
+                    ui.horizontal(|ui| {
+                        let was_enabled = self.graph.enabled;
+                        ui.checkbox(&mut self.graph.enabled, "Graph");
+                        ui.colored_label(GRAPH_COLOR, "◆");
+                        if self.graph.enabled && !was_enabled {
+                            self.graph.reset(self.n_landmarks);
+                        }
+                    });
                 });
-                if self.ekf.enabled {
-                    ui.label(format!("  LM: {}", self.ekf.state.n_landmarks));
-                }
-
-                ui.horizontal(|ui| {
-                    let was_enabled = self.graph.enabled;
-                    ui.checkbox(&mut self.graph.enabled, "Graph");
-                    ui.colored_label(GRAPH_COLOR, "◆");
-                    if self.graph.enabled && !was_enabled {
-                        self.graph.reset(self.n_landmarks);
-                    }
-                });
-                if self.graph.enabled {
-                    ui.label(format!("  KF: {}", self.graph.graph.poses.len()));
-                }
             });
 
             // Motion & Landmarks
             ui.group(|ui| {
-                ui.set_width(120.0);
-                ui.label("Motion:");
-                ui.add(
-                    DragValue::new(&mut self.velocity)
-                        .speed(0.05)
-                        .range(0.1_f32..=3.0)
-                        .prefix("v: ")
-                        .suffix(" m/s"),
-                );
-                ui.add(
-                    DragValue::new(&mut self.yaw_rate)
-                        .speed(0.01)
-                        .range(-0.5_f32..=0.5)
-                        .prefix("w: ")
-                        .suffix(" rad/s"),
-                );
-                let old_n = self.n_landmarks;
-                ui.add(
-                    DragValue::new(&mut self.n_landmarks)
-                        .speed(0.5)
-                        .range(2_usize..=20)
-                        .prefix("LM: "),
-                );
-                if self.n_landmarks != old_n {
-                    self.landmarks_true = generate_landmarks(self.n_landmarks);
-                    self.ekf.reset();
-                    self.graph.reset(self.n_landmarks);
-                    self.current_observations.clear();
-                }
-                ui.add(
-                    DragValue::new(&mut self.config.max_range)
-                        .speed(1.0)
-                        .range(5.0_f32..=60.0)
-                        .prefix("Range: ")
-                        .suffix(" m"),
-                );
+                ui.set_min_width(100.0);
+                ui.vertical(|ui| {
+                    ui.label("Motion");
+                    ui.add(DragValue::new(&mut self.velocity).speed(0.05).range(0.1_f32..=3.0).prefix("v: "));
+                    ui.add(DragValue::new(&mut self.yaw_rate).speed(0.01).range(-0.5_f32..=0.5).prefix("ω: "));
+                    let old_n = self.n_landmarks;
+                    ui.add(DragValue::new(&mut self.n_landmarks).speed(0.5).range(2_usize..=20).prefix("n: "));
+                    if self.n_landmarks != old_n {
+                        self.landmarks_true = generate_landmarks(self.n_landmarks);
+                        self.ekf.reset();
+                        self.graph.reset(self.n_landmarks);
+                        self.current_observations.clear();
+                    }
+                });
             });
 
             // Display options
             ui.group(|ui| {
-                ui.set_width(110.0);
-                ui.label("Display:");
-                ui.checkbox(&mut self.show_covariance, "Covariance");
-                ui.checkbox(&mut self.show_observations, "Observations");
-                ui.checkbox(&mut self.show_dr, "Dead Reckoning");
-                ui.checkbox(&mut self.show_true_landmarks, "Landmarks");
+                ui.set_min_width(90.0);
+                ui.vertical(|ui| {
+                    ui.label("Display");
+                    ui.checkbox(&mut self.show_covariance, "Cov");
+                    ui.checkbox(&mut self.show_observations, "Obs");
+                    ui.checkbox(&mut self.show_dr, "DR");
+                    ui.checkbox(&mut self.show_true_landmarks, "LM");
+                });
             });
 
             // Stats
             ui.group(|ui| {
-                ui.set_width(110.0);
-                ui.label("Error:");
-                if self.ekf.enabled {
-                    let ekf_pose = self.ekf.get_pose();
-                    let ekf_err = ((self.x_true[0] - ekf_pose[0]).powi(2)
-                        + (self.x_true[1] - ekf_pose[1]).powi(2)).sqrt();
-                    ui.colored_label(EKF_COLOR, format!("EKF: {:.2} m", ekf_err));
-                }
-                if self.graph.enabled {
-                    let graph_pose = self.graph.get_pose();
-                    let graph_err = ((self.x_true[0] - graph_pose[0]).powi(2)
-                        + (self.x_true[1] - graph_pose[1]).powi(2)).sqrt();
-                    ui.colored_label(GRAPH_COLOR, format!("Graph: {:.2} m", graph_err));
-                }
-                let dr_err = ((self.x_true[0] - self.x_dr[0]).powi(2)
-                    + (self.x_true[1] - self.x_dr[1]).powi(2)).sqrt();
-                ui.label(format!("DR: {:.2} m", dr_err));
+                ui.set_min_width(90.0);
+                ui.vertical(|ui| {
+                    ui.label("Error");
+                    if self.ekf.enabled {
+                        let ekf_pose = self.ekf.get_pose();
+                        let ekf_err = ((self.x_true[0] - ekf_pose[0]).powi(2)
+                            + (self.x_true[1] - ekf_pose[1]).powi(2)).sqrt();
+                        ui.colored_label(EKF_COLOR, format!("{:.2}m", ekf_err));
+                    }
+                    if self.graph.enabled {
+                        let graph_pose = self.graph.get_pose();
+                        let graph_err = ((self.x_true[0] - graph_pose[0]).powi(2)
+                            + (self.x_true[1] - graph_pose[1]).powi(2)).sqrt();
+                        ui.colored_label(GRAPH_COLOR, format!("{:.2}m", graph_err));
+                    }
+                    let dr_err = ((self.x_true[0] - self.x_dr[0]).powi(2)
+                        + (self.x_true[1] - self.x_dr[1]).powi(2)).sqrt();
+                    ui.label(format!("DR {:.2}m", dr_err));
+                });
             });
         });
         true // Always keep - single instance
