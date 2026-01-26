@@ -11,7 +11,7 @@ use rb::control::vehicle::VehicleParams;
 use rb::prelude::*;
 use rb::slam::{
     generate_observations, motion_model, predict, update, EkfSlamConfig, EkfSlamState, Observation,
-    GraphSlam, Pose2D, Landmark2D,
+    GraphSlam, Pose2D, Landmark2D, RobustKernelType,
 };
 use rust_robotics_algo as rb;
 use web_time::Instant;
@@ -172,12 +172,25 @@ struct GraphSlamInstance {
     last_update_us: f64,
     /// Exponential moving average of update time
     avg_update_us: f64,
+    /// Number of outliers detected in last optimization
+    last_outliers: (usize, usize),
+    /// Number of loop closures added
+    loop_closures_added: usize,
+    /// Total loop closures ever detected
+    total_loop_closures: usize,
 }
 
 impl GraphSlamInstance {
     fn new(n_landmarks: usize) -> Self {
         let mut graph = GraphSlam::new();
         graph.add_pose(Pose2D::origin());
+        // Enable new features by default
+        graph.config.enable_robust_kernel = true;
+        graph.config.robust_kernel_type = RobustKernelType::Huber;
+        graph.config.use_sparse_solver = true;
+        graph.config.enable_loop_closure = true;
+        graph.config.loop_closure_proximity = 3.0;
+        graph.config.loop_closure_min_separation = 5;
         Self {
             enabled: false, // Disabled by default
             graph,
@@ -190,6 +203,9 @@ impl GraphSlamInstance {
             h_update_us: Vec::new(),
             last_update_us: 0.0,
             avg_update_us: 0.0,
+            last_outliers: (0, 0),
+            loop_closures_added: 0,
+            total_loop_closures: 0,
         }
     }
 
@@ -198,7 +214,10 @@ impl GraphSlamInstance {
     }
 
     fn reset_with_pose(&mut self, n_landmarks: usize, initial_pose: rb::Vector3) {
+        // Preserve config settings
+        let config = self.graph.config.clone();
         self.graph = GraphSlam::new();
+        self.graph.config = config;
         self.graph.add_pose(Pose2D::new(initial_pose[0], initial_pose[1], initial_pose[2]));
         self.landmark_to_graph_idx = vec![None; n_landmarks];
         self.prev_keyframe_idx = 0;
@@ -207,6 +226,9 @@ impl GraphSlamInstance {
         self.h_update_us.clear();
         self.last_update_us = 0.0;
         self.avg_update_us = 0.0;
+        self.last_outliers = (0, 0);
+        self.loop_closures_added = 0;
+        self.total_loop_closures = 0;
     }
 
     fn step(&mut self, v: f32, w: f32, dt: f32, observations: &[(usize, Observation)]) {
@@ -270,15 +292,17 @@ impl GraphSlamInstance {
         let dy_local = -s * new_acc_x + c * new_acc_y;
         let odom_measurement = Vector3::new(dx_local, dy_local, new_acc_theta);
 
+        // Odometry covariance - must be large enough to allow observation-based correction
+        // With noisy control (5% velocity bias + noise), accumulated drift can be significant
         let odom_cov = Matrix3::from_diagonal(&Vector3::new(
-            0.1 * trans.max(0.1),
-            0.1 * trans.max(0.1),
-            0.05 * rot.max(0.01),
+            0.5 * trans.max(0.1),
+            0.5 * trans.max(0.1),
+            0.2 * rot.max(0.05),
         ));
         self.graph.add_odometry(self.prev_keyframe_idx, new_pose_idx, odom_measurement, &odom_cov);
 
-        // Observation constraints
-        let obs_cov = Matrix2::from_diagonal(&nalgebra::Vector2::new(0.5, 0.05));
+        // Observation constraints - tighter than odometry to give observations more weight
+        let obs_cov = Matrix2::from_diagonal(&nalgebra::Vector2::new(0.1, 0.02));
         for (true_lm_idx, obs) in observations {
             // Ensure landmark_to_graph_idx is large enough
             while self.landmark_to_graph_idx.len() <= *true_lm_idx {
@@ -302,8 +326,19 @@ impl GraphSlamInstance {
         self.prev_keyframe_idx = new_pose_idx;
         self.accumulated_motion = (0.0, 0.0, 0.0);
 
-        // Optimize after adding keyframe
-        self.graph.optimize();
+        // Detect and add loop closures
+        if self.graph.config.enable_loop_closure {
+            let closures = self.graph.detect_loop_closures();
+            self.loop_closures_added = closures.len();
+            self.total_loop_closures += closures.len();
+            for closure in &closures {
+                self.graph.add_loop_closure(closure);
+            }
+        }
+
+        // Optimize after adding keyframe and loop closures
+        let result = self.graph.optimize();
+        self.last_outliers = result.outliers_detected;
 
         // Apply sliding window - algorithm handles pruning old poses
         let n_removed = self.graph.prune_old_poses();
@@ -448,6 +483,213 @@ impl SlamDemo {
         self.ekf.reset();
         self.graph.reset(self.n_landmarks);
     }
+
+    /// Save debug data to file for troubleshooting
+    pub fn save_debug_data(&self) {
+        use std::io::Write;
+
+        let filename = format!("slam_debug_{}.txt", self.step_count);
+        let mut output = String::new();
+
+        // Header
+        output.push_str(&format!("=== SLAM Debug Dump (step {}) ===\n\n", self.step_count));
+
+        // True state
+        output.push_str("--- True State ---\n");
+        output.push_str(&format!("Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
+            self.x_true[0], self.x_true[1],
+            self.x_true[2].to_degrees(), self.x_true[2]));
+        output.push_str(&format!("Landmarks ({}):\n", self.landmarks_true.len()));
+        for (i, lm) in self.landmarks_true.iter().enumerate() {
+            output.push_str(&format!("  LM{}: ({:.3}, {:.3})\n", i, lm[0], lm[1]));
+        }
+
+        // Dead reckoning
+        output.push_str("\n--- Dead Reckoning ---\n");
+        output.push_str(&format!("Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
+            self.x_dr[0], self.x_dr[1],
+            self.x_dr[2].to_degrees(), self.x_dr[2]));
+        let dr_err = ((self.x_true[0] - self.x_dr[0]).powi(2)
+            + (self.x_true[1] - self.x_dr[1]).powi(2)).sqrt();
+        output.push_str(&format!("Position error: {:.3}m\n", dr_err));
+
+        // EKF state
+        if self.ekf.enabled {
+            output.push_str("\n--- EKF-SLAM State ---\n");
+            let ekf_pose = self.ekf.get_pose();
+            output.push_str(&format!("Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
+                ekf_pose[0], ekf_pose[1],
+                ekf_pose[2].to_degrees(), ekf_pose[2]));
+            let ekf_err = ((self.x_true[0] - ekf_pose[0]).powi(2)
+                + (self.x_true[1] - ekf_pose[1]).powi(2)).sqrt();
+            output.push_str(&format!("Position error: {:.3}m\n", ekf_err));
+            output.push_str(&format!("Heading error: {:.3}°\n",
+                (self.x_true[2] - ekf_pose[2]).to_degrees()));
+
+            // Robot covariance
+            let cov = self.ekf.state.robot_covariance();
+            output.push_str(&format!("Robot covariance (diag): σx²={:.4}, σy²={:.4}, σθ²={:.4}\n",
+                cov[(0,0)], cov[(1,1)], cov[(2,2)]));
+            output.push_str(&format!("Position variance: {:.4}\n", cov[(0,0)] + cov[(1,1)]));
+
+            // EKF landmarks
+            output.push_str(&format!("EKF Landmarks ({}):\n", self.ekf.state.n_landmarks));
+            for i in 0..self.ekf.state.n_landmarks {
+                if let Some(lm) = self.ekf.state.landmark(i) {
+                    let true_lm = if i < self.landmarks_true.len() {
+                        Some(&self.landmarks_true[i])
+                    } else {
+                        None
+                    };
+                    let drift = true_lm.map(|t| ((lm[0] - t[0]).powi(2) + (lm[1] - t[1]).powi(2)).sqrt());
+                    output.push_str(&format!("  LM{}: ({:.3}, {:.3})", i, lm[0], lm[1]));
+                    if let Some(d) = drift {
+                        output.push_str(&format!(" [drift: {:.3}m]", d));
+                    } else {
+                        output.push_str(" [EXTRA - no true landmark]");
+                    }
+                    output.push_str("\n");
+                }
+            }
+        }
+
+        // Current observations
+        output.push_str(&format!("\n--- Current Observations ({}) ---\n", self.current_observations.len()));
+        for (true_idx, obs) in &self.current_observations {
+            let true_lm = &self.landmarks_true[*true_idx];
+            output.push_str(&format!("  Obs to LM{}: range={:.3}m, bearing={:.3}° ({:.3} rad)\n",
+                true_idx, obs.range, obs.bearing.to_degrees(), obs.bearing));
+            output.push_str(&format!("    True LM position: ({:.3}, {:.3})\n", true_lm[0], true_lm[1]));
+
+            // Compute where EKF thinks this observation points
+            if self.ekf.enabled {
+                let ekf_pose = self.ekf.get_pose();
+                let obs_x = ekf_pose[0] + obs.range * (ekf_pose[2] + obs.bearing).cos();
+                let obs_y = ekf_pose[1] + obs.range * (ekf_pose[2] + obs.bearing).sin();
+                let obs_err = ((obs_x - true_lm[0]).powi(2) + (obs_y - true_lm[1]).powi(2)).sqrt();
+                output.push_str(&format!("    EKF-computed position: ({:.3}, {:.3}) [err: {:.3}m]\n",
+                    obs_x, obs_y, obs_err));
+            }
+        }
+
+        // History lengths
+        output.push_str(&format!("\n--- History ---\n"));
+        output.push_str(&format!("True history length: {}\n", self.h_true.len()));
+        output.push_str(&format!("DR history length: {}\n", self.h_dr.len()));
+        if self.ekf.enabled {
+            output.push_str(&format!("EKF history length: {}\n", self.ekf.h_est.len()));
+        }
+
+        // Write to file
+        match std::fs::File::create(&filename) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(output.as_bytes()) {
+                    eprintln!("Failed to write debug file: {}", e);
+                } else {
+                    println!("Saved debug data to: {}", filename);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to create debug file: {}", e);
+            }
+        }
+    }
+
+    /// Dump Graph SLAM diagnostics to file for debugging blind navigation issues
+    pub fn dump_graph_diagnostics(&mut self) {
+        use std::io::Write;
+
+        // Enable diagnostics and update
+        self.graph.graph.enable_diagnostics = true;
+        self.graph.graph.update_diagnostics();
+        self.graph.graph.diagnostics.loop_closures_detected = self.graph.loop_closures_added;
+
+        // For each SLAM landmark, find the closest true landmark
+        let mut slam_to_true_mapping: Vec<(usize, usize, f32)> = Vec::new(); // (slam_idx, true_idx, distance)
+        self.graph.graph.diagnostics.landmark_errors.clear();
+        for (slam_idx, lm) in self.graph.graph.landmarks.iter().enumerate() {
+            let mut min_dist = f32::MAX;
+            let mut closest_true_idx = 0;
+            for (true_idx, true_lm) in self.landmarks_true.iter().enumerate() {
+                let dist = ((lm.x - true_lm[0] as f32).powi(2) + (lm.y - true_lm[1] as f32).powi(2)).sqrt();
+                if dist < min_dist {
+                    min_dist = dist;
+                    closest_true_idx = true_idx;
+                }
+            }
+            slam_to_true_mapping.push((slam_idx, closest_true_idx, min_dist));
+            self.graph.graph.diagnostics.landmark_errors.push((slam_idx, min_dist));
+        }
+
+        let filename = format!("graph_slam_debug_{}.txt", std::process::id());
+        match std::fs::File::create(&filename) {
+            Ok(mut file) => {
+                // Write header with step info
+                let _ = writeln!(file, "=== GRAPH SLAM DEBUG DUMP ===");
+                let _ = writeln!(file, "Step: {}", self.step_count);
+                let _ = writeln!(file, "");
+
+                // True robot state
+                let _ = writeln!(file, "--- True Robot State ---");
+                let _ = writeln!(file, "Position: ({:.3}, {:.3})", self.x_true[0], self.x_true[1]);
+                let _ = writeln!(file, "Heading: {:.1}° ({:.3} rad)", self.x_true[2].to_degrees(), self.x_true[2]);
+                let _ = writeln!(file, "");
+
+                // Graph pose error
+                if !self.graph.graph.poses.is_empty() {
+                    let last_pose = &self.graph.graph.poses[self.graph.graph.poses.len() - 1];
+                    let pos_err = ((last_pose.x - self.x_true[0] as f32).powi(2)
+                        + (last_pose.y - self.x_true[1] as f32).powi(2)).sqrt();
+                    let _ = writeln!(file, "Graph SLAM position error: {:.3}m", pos_err);
+                    let _ = writeln!(file, "");
+                }
+
+                // Write graph slam diagnostics
+                if let Err(e) = self.graph.graph.write_diagnostics_to_file(&mut file) {
+                    eprintln!("Failed to write graph diagnostics: {}", e);
+                }
+
+                // SLAM to True landmark mapping
+                let _ = writeln!(file, "--- SLAM Landmark -> Closest True Landmark ---");
+                for (slam_idx, true_idx, dist) in &slam_to_true_mapping {
+                    let lm = &self.graph.graph.landmarks[*slam_idx];
+                    let true_lm = &self.landmarks_true[*true_idx];
+                    let _ = writeln!(file, "  SLAM LM {} ({:.2}, {:.2}) -> True LM {} ({:.2}, {:.2}), error={:.3}m",
+                        slam_idx, lm.x, lm.y, true_idx, true_lm[0], true_lm[1], dist);
+                }
+                let _ = writeln!(file, "");
+
+                // True landmark positions
+                let _ = writeln!(file, "--- True Landmark Positions ---");
+                for (i, lm) in self.landmarks_true.iter().enumerate() {
+                    let _ = writeln!(file, "  LM {}: ({:.3}, {:.3})", i, lm[0], lm[1]);
+                }
+                let _ = writeln!(file, "");
+
+                // True LM -> SLAM LM mapping (data association)
+                let _ = writeln!(file, "--- True LM -> SLAM LM Mapping (Data Association) ---");
+                for (true_idx, slam_idx) in self.graph.landmark_to_graph_idx.iter().enumerate() {
+                    if let Some(slam_idx) = slam_idx {
+                        let _ = writeln!(file, "  True LM {} -> SLAM LM {}", true_idx, slam_idx);
+                    }
+                }
+                let _ = writeln!(file, "");
+
+                // Current observations
+                let _ = writeln!(file, "--- Current Observations ({}) ---", self.current_observations.len());
+                for (true_idx, obs) in &self.current_observations {
+                    let slam_idx = self.graph.landmark_to_graph_idx.get(*true_idx).and_then(|x| *x);
+                    let _ = writeln!(file, "  True LM {} (SLAM LM {:?}): range={:.3}m, bearing={:.1}°",
+                        true_idx, slam_idx, obs.range, obs.bearing.to_degrees());
+                }
+
+                println!("Saved graph SLAM diagnostics to: {}", filename);
+            }
+            Err(e) => {
+                eprintln!("Failed to create debug file: {}", e);
+            }
+        }
+    }
 }
 
 impl Default for SlamDemo {
@@ -477,20 +719,24 @@ impl Simulate for SlamDemo {
         // Update true robot pose
         self.x_true = motion_model(&self.x_true, v, w, dt);
 
-        // Update dead reckoning
+        // Compute noisy control input (simulating odometry/encoder noise)
+        // In a real robot, the SLAM algorithm only has access to noisy odometry,
+        // not the true control values. This causes drift when no observations are available.
         let v_bias = 1.05;
         let w_bias = 0.02;
         let v_noisy = v * v_bias + rand_noise() * 0.1;
         let w_noisy = w + w_bias + rand_noise() * 0.02;
+
+        // Update dead reckoning with noisy control
         self.x_dr = motion_model(&self.x_dr, v_noisy, w_noisy, dt);
 
         // Generate observations from true pose
         self.current_observations =
             generate_observations(&self.x_true, &self.landmarks_true, &self.config, true);
 
-        // Run all enabled algorithms with the same observations
-        self.ekf.step(&self.config, v, w, dt, &self.current_observations);
-        self.graph.step(v, w, dt, &self.current_observations);
+        // Both algorithms use noisy control (simulating real odometry)
+        self.ekf.step(&self.config, v_noisy, w_noisy, dt, &self.current_observations);
+        self.graph.step(v_noisy, w_noisy, dt, &self.current_observations);
 
         self.step_count += 1;
         self.update_history();
@@ -603,6 +849,34 @@ impl Draw for SlamDemo {
                 );
             }
 
+            // Draw loop closure connections (non-adjacent odometry constraints)
+            for c in &self.graph.graph.odometry_constraints {
+                // A loop closure is an odometry constraint between non-adjacent poses
+                if c.to_idx.saturating_sub(c.from_idx) > 1 {
+                    let from = &self.graph.graph.poses[c.from_idx];
+                    let to = &self.graph.graph.poses[c.to_idx];
+                    plot_ui.line(
+                        Line::new("", PlotPoints::new(vec![
+                            [from.x as f64, from.y as f64],
+                            [to.x as f64, to.y as f64],
+                        ]))
+                        .style(LineStyle::Dashed { length: 4.0 })
+                        .color(Color32::from_rgb(255, 165, 0)) // Orange for loop closures
+                        .width(2.0),
+                    );
+                }
+            }
+
+            // Draw keyframe poses as small dots
+            for pose in &self.graph.graph.poses {
+                plot_ui.points(
+                    Points::new("", PlotPoints::new(vec![[pose.x as f64, pose.y as f64]]))
+                        .shape(egui_plot::MarkerShape::Circle)
+                        .radius(3.0)
+                        .color(GRAPH_COLOR.gamma_multiply(0.6)),
+                );
+            }
+
             // Graph trajectory
             draw_trajectory(plot_ui, self.graph.h_est.iter(), GRAPH_COLOR, 2.0, None);
 
@@ -692,6 +966,34 @@ impl Draw for SlamDemo {
                 });
             });
 
+            // Graph SLAM options (only shown when Graph is enabled)
+            if self.graph.enabled {
+                ui.group(|ui| {
+                    ui.set_min_width(120.0);
+                    ui.vertical(|ui| {
+                        ui.label("Graph Opts");
+                        ui.checkbox(&mut self.graph.graph.config.enable_robust_kernel, "Robust");
+                        ui.checkbox(&mut self.graph.graph.config.use_sparse_solver, "Sparse");
+                        ui.checkbox(&mut self.graph.graph.config.enable_loop_closure, "Loop");
+
+                        // Stats
+                        let (odom_out, obs_out) = self.graph.last_outliers;
+                        if odom_out > 0 || obs_out > 0 {
+                            ui.label(format!("Out: {}/{}", odom_out, obs_out));
+                        }
+                        if self.graph.total_loop_closures > 0 {
+                            ui.label(format!("LC: {}", self.graph.total_loop_closures));
+                        }
+
+                        // Debug dump button
+                        ui.label(format!("Blind: {}", self.graph.graph.get_blind_duration()));
+                        if ui.button("Dump Debug").clicked() {
+                            self.dump_graph_diagnostics();
+                        }
+                    });
+                });
+            }
+
             // Motion & Landmarks
             ui.group(|ui| {
                 ui.set_min_width(100.0);
@@ -762,6 +1064,17 @@ impl Draw for SlamDemo {
                     }
                     if self.graph.enabled {
                         ui.colored_label(GRAPH_COLOR, format!("{:.0}", self.graph.avg_update_us));
+                    }
+                });
+            });
+
+            // Debug save button
+            ui.group(|ui| {
+                ui.set_min_width(60.0);
+                ui.vertical(|ui| {
+                    ui.label("Debug");
+                    if ui.button("Save").clicked() {
+                        self.save_debug_data();
                     }
                 });
             });
