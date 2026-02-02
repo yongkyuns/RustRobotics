@@ -5,12 +5,13 @@ pub mod pendulum;
 pub mod slam;
 
 use localization::ParticleFilter;
-use path_planning::PathPlanning;
+use path_planning::{EnvironmentMode, PathPlanning};
 use pendulum::InvertedPendulum;
 use slam::SlamDemo;
 
 use egui::*;
 use egui_plot::{Corner, Legend, Plot, PlotUi};
+use std::collections::HashSet;
 
 /// Base trait to make simulation work within `rust robotics`.
 ///
@@ -80,7 +81,7 @@ where
 }
 
 /// Available simulation modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimMode {
     InvertedPendulum,
     Localization,
@@ -130,6 +131,14 @@ pub struct Simulator {
     grid_height: usize,
     /// Shared grid resolution for path planning (meters per cell)
     grid_resolution: f32,
+    /// Shared environment mode for path planning
+    env_mode: EnvironmentMode,
+    /// Shared obstacle radius for continuous path planning
+    continuous_obstacle_radius: f32,
+    /// Modes visited to track help popup
+    visited_modes: HashSet<SimMode>,
+    /// Whether to show the help popup
+    show_help_popup: bool,
 }
 
 impl Default for Simulator {
@@ -149,6 +158,10 @@ impl Default for Simulator {
             grid_width: 40,
             grid_height: 40,
             grid_resolution: 1.0,
+            env_mode: EnvironmentMode::Grid,
+            continuous_obstacle_radius: 1.0,
+            visited_modes: HashSet::new(),
+            show_help_popup: false,
         }
     }
 }
@@ -230,22 +243,25 @@ impl Simulator {
     fn add_simulation(&mut self) {
         match self.mode {
             SimMode::InvertedPendulum => {
-                let id = self.pendulums.len() + 1;
+                let id = self.pendulums.iter().map(|s| *s.get_state().downcast_ref::<usize>().unwrap()).max().unwrap_or(0) + 1;
                 self.pendulums.push(InvertedPendulum::new(id, self.time));
             }
             SimMode::Localization => {
-                let id = self.vehicles.len() + 1;
+                let id = self.vehicles.iter().map(|s| *s.get_state().downcast_ref::<usize>().unwrap()).max().unwrap_or(0) + 1;
                 self.vehicles.push(ParticleFilter::new(id, self.time));
             }
             SimMode::PathPlanning => {
-                let id = self.planners.len() + 1;
+                let id = self.planners.iter().map(|s| *s.get_state().downcast_ref::<usize>().unwrap()).max().unwrap_or(0) + 1;
                 let mut new_planner = PathPlanning::new(id, self.time);
-                // Apply shared grid settings
+                // Apply shared settings
                 new_planner.update_grid_settings(
                     self.grid_width,
                     self.grid_height,
                     self.grid_resolution,
                 );
+                new_planner.set_env_mode(self.env_mode);
+                new_planner.set_continuous_obstacle_radius(self.continuous_obstacle_radius);
+                
                 // Copy state from first existing planner if available
                 if let Some(first) = self.planners.first() {
                     new_planner.copy_state_from(first);
@@ -253,7 +269,7 @@ impl Simulator {
                 self.planners.push(new_planner);
             }
             SimMode::Slam => {
-                let id = self.slam_demos.len() + 1;
+                let id = self.slam_demos.iter().map(|s| *s.get_state().downcast_ref::<usize>().unwrap()).max().unwrap_or(0) + 1;
                 self.slam_demos.push(SlamDemo::new(id, self.time));
             }
         }
@@ -298,6 +314,12 @@ impl Simulator {
                 }
             }
         });
+        
+        // Check if we need to show help for current mode
+        if !self.visited_modes.contains(&self.mode) {
+            self.visited_modes.insert(self.mode);
+            self.show_help_popup = true;
+        }
 
         ui.separator();
 
@@ -366,37 +388,60 @@ impl Simulator {
                 });
             }
             SimMode::PathPlanning => {
-                // Common grid settings
+                // Common settings
                 ui.horizontal(|ui| {
-                    ui.label("Grid:");
-                    ui.label("Width:");
-                    let width_changed = ui
-                        .add(DragValue::new(&mut self.grid_width).range(10..=100))
-                        .changed();
-                    ui.label("Height:");
-                    let height_changed = ui
-                        .add(DragValue::new(&mut self.grid_height).range(10..=100))
-                        .changed();
-                    ui.label("Resolution:");
-                    let res_changed = ui
-                        .add(
-                            DragValue::new(&mut self.grid_resolution)
-                                .range(0.1..=5.0)
-                                .speed(0.1),
-                        )
-                        .changed();
-
-                    // Update all planners if any setting changed
-                    if width_changed || height_changed || res_changed {
-                        for planner in &mut self.planners {
-                            planner.update_grid_settings(
-                                self.grid_width,
-                                self.grid_height,
-                                self.grid_resolution,
-                            );
-                        }
+                    ui.label("Env:");
+                    if ui.selectable_label(self.env_mode == EnvironmentMode::Grid, "Grid").clicked() {
+                        self.env_mode = EnvironmentMode::Grid;
+                    }
+                    if ui.selectable_label(self.env_mode == EnvironmentMode::Continuous, "Continuous").clicked() {
+                        self.env_mode = EnvironmentMode::Continuous;
+                    }
+                    
+                    if self.env_mode == EnvironmentMode::Continuous {
+                         ui.label("Obs Radius:");
+                         ui.add(DragValue::new(&mut self.continuous_obstacle_radius).range(0.1..=5.0).speed(0.1));
                     }
                 });
+                
+                if self.env_mode == EnvironmentMode::Grid {
+                    ui.horizontal(|ui| {
+                        ui.label("Grid:");
+                        ui.label("Width:");
+                        let width_changed = ui
+                            .add(DragValue::new(&mut self.grid_width).range(10..=100))
+                            .changed();
+                        ui.label("Height:");
+                        let height_changed = ui
+                            .add(DragValue::new(&mut self.grid_height).range(10..=100))
+                            .changed();
+                        ui.label("Resolution:");
+                        let res_changed = ui
+                            .add(
+                                DragValue::new(&mut self.grid_resolution)
+                                    .range(0.1..=5.0)
+                                    .speed(0.1),
+                            )
+                            .changed();
+
+                        // Update all planners if any setting changed
+                        for planner in &mut self.planners {
+                            if width_changed || height_changed || res_changed {
+                                planner.update_grid_settings(
+                                    self.grid_width,
+                                    self.grid_height,
+                                    self.grid_resolution,
+                                );
+                            }
+                        }
+                    });
+                }
+
+                // Sync env mode and radius always
+                for planner in &mut self.planners {
+                     planner.set_env_mode(self.env_mode);
+                     planner.set_continuous_obstacle_radius(self.continuous_obstacle_radius);
+                }
 
                 ui.separator();
 
@@ -440,16 +485,48 @@ impl Simulator {
 
         // Instructions (collapsible)
         ui.collapsing("Instructions", |ui| {
-            ui.label("Pan by dragging, or scroll (+ shift = horizontal).");
-            ui.label("Box zooming: Right click to zoom in and zoom out using a selection.");
-            if cfg!(target_arch = "wasm32") {
-                ui.label("Zoom with ctrl / ⌘ + pointer wheel, or with pinch gesture.");
-            } else if cfg!(target_os = "macos") {
-                ui.label("Zoom with ctrl / ⌘ + scroll.");
-            } else {
-                ui.label("Zoom with ctrl + scroll.");
+            match self.mode {
+                SimMode::PathPlanning => {
+                    ui.label(RichText::new("1. Start & Goal").strong());
+                    ui.label("• Left-click on the map to set the Start point (Green).");
+                    ui.label("• Left-click again to set the Goal point (Red).");
+                    ui.label("• Once both are set, all active planners will run automatically.");
+                    
+                    ui.add_space(5.0);
+                    ui.label(RichText::new("2. Environment").strong());
+                    if self.env_mode == EnvironmentMode::Grid {
+                        ui.label("• Grid Mode: Discrete cells.");
+                        ui.label("• Right-click (or drag): Paint/Erase obstacle cells.");
+                    } else {
+                        ui.label("• Continuous Mode: Free space.");
+                        ui.label("• Right-click: Add a circular obstacle at cursor.");
+                        ui.label("• Right-click on existing obstacle: Remove it.");
+                    }
+                    
+                    ui.add_space(5.0);
+                    ui.label(RichText::new("3. Planners").strong());
+                    ui.label("• Click 'Add Planner' (top) to compare multiple algorithms.");
+                    ui.label("• Select different algorithms (A*, RRT, Theta*) for each planner.");
+                    ui.label("• Compare Path Length, Execution Time, and Optimality Ratio.");
+                }
+                SimMode::Localization | SimMode::Slam => {
+                     ui.label("• Use Keyboard arrows to drive.");
+                }
+                _ => {}
             }
-            ui.label("Reset view with double-click.");
+            
+            ui.add_space(5.0);
+            ui.label(RichText::new("Navigation").strong());
+            ui.label("• Pan by dragging, or scroll (+ shift = horizontal).");
+            ui.label("• Box zooming: Right click to zoom in and zoom out using a selection.");
+            if cfg!(target_arch = "wasm32") {
+                ui.label("• Zoom with ctrl / ⌘ + pointer wheel, or with pinch gesture.");
+            } else if cfg!(target_os = "macos") {
+                ui.label("• Zoom with ctrl / ⌘ + scroll.");
+            } else {
+                ui.label("• Zoom with ctrl + scroll.");
+            }
+            ui.label("• Reset view with double-click.");
         });
 
         // Main scene plot
@@ -491,6 +568,67 @@ impl Simulator {
             for planner in &mut self.planners {
                 planner.handle_mouse(&plot_response);
             }
+        }
+
+        // Help Popup
+        let mut close_popup = false;
+        if self.show_help_popup {
+            egui::Window::new("Simulation Help")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                .open(&mut self.show_help_popup)
+                .show(ui.ctx(), |ui| {
+                    ui.heading(format!("{} Instructions", self.mode.label()));
+                    ui.separator();
+                    
+                    match self.mode {
+                        SimMode::PathPlanning => {
+                            ui.label(RichText::new("How to Run").strong());
+                            ui.label("1. Left-click to set Start (Green).");
+                            ui.label("2. Left-click to set Goal (Red).");
+                            ui.label("3. Simulation runs automatically.");
+                            
+                            ui.add_space(5.0);
+                            ui.label(RichText::new("Environment").strong());
+                            ui.label("• Env: Switch between Grid (discrete) and Continuous (free space).");
+                            if self.env_mode == EnvironmentMode::Grid {
+                                ui.label("• Right-click Drag: Paint obstacles.");
+                                ui.label("• Settings: Adjust Grid Size and Resolution.");
+                            } else {
+                                ui.label("• Right-click: Place circular obstacles.");
+                                ui.label("• Obs Radius: Adjust size of new obstacles.");
+                            }
+                            
+                            ui.add_space(5.0);
+                            ui.label(RichText::new("Multi-Planner Comparison").strong());
+                            ui.label("• Click 'Add Planner' to run multiple algorithms side-by-side.");
+                            ui.label("• Each planner has its own Algorithm selection and Settings.");
+                            ui.label("• Results (Time, Length) are shown in each planner's panel.");
+                        }
+                        SimMode::Localization => {
+                            ui.label("• Arrow Keys: Drive the vehicle");
+                            ui.label("• Space: Pause/Resume");
+                            ui.label("• Enter: Restart");
+                        }
+                        SimMode::Slam => {
+                            ui.label("• Arrow Keys: Drive the vehicle");
+                            ui.label("• Space: Pause/Resume");
+                        }
+                        SimMode::InvertedPendulum => {
+                            ui.label("• Watch the controller balance the pendulum.");
+                            ui.label("• Use sliders to adjust parameters.");
+                        }
+                    }
+                    
+                    ui.separator();
+                    if ui.button("Got it!").clicked() {
+                        close_popup = true;
+                    }
+                });
+        }
+        if close_popup {
+            self.show_help_popup = false;
         }
 
         // Optional graph window

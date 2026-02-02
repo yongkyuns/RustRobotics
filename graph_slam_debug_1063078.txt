@@ -1,0 +1,231 @@
+=== GRAPH SLAM DEBUG DUMP ===
+Step: 11418
+
+--- True Robot State ---
+Position: (-18.950, 11.273)
+Heading: 150.3° (2.623 rad)
+
+Graph SLAM position error: 64.547m
+
+=== SLAM DIAGNOSTICS ===
+Pose: 49 / 50 poses
+Landmarks: 22
+Constraints: 49 odom, 455 obs
+Blind duration: 0 poses
+Outliers: 0 odom, 455 obs
+Loop closures: 0
+Optimization: 1 iters, error 5945213.2537 -> 5945213.1539
+
+--- Landmark Info ---
+  LM 0: last_obs=pose 49, total_obs=201
+  LM 1: last_obs=pose 47, total_obs=179
+  LM 2: last_obs=pose 7, total_obs=92
+  LM 3: last_obs=pose 38, total_obs=252
+  LM 4: last_obs=pose 49, total_obs=129
+  LM 5: last_obs=pose 49, total_obs=152
+  LM 6: last_obs=pose 49, total_obs=251
+  LM 7: last_obs=pose 13, total_obs=146
+  LM 8: last_obs=pose 46, total_obs=237
+  LM 9: last_obs=pose 49, total_obs=163
+  LM 10: last_obs=pose 42, total_obs=293
+  LM 11: last_obs=pose 38, total_obs=208
+  LM 12: last_obs=pose 13, total_obs=156
+  LM 13: last_obs=pose 15, total_obs=178
+  LM 14: last_obs=pose 25, total_obs=184
+  LM 15: last_obs=pose 35, total_obs=142
+  LM 16: last_obs=None, total_obs=84
+  LM 17: last_obs=None, total_obs=78
+  LM 18: last_obs=None, total_obs=73
+  LM 19: last_obs=None, total_obs=26
+  LM 20: last_obs=None, total_obs=44
+  LM 21: last_obs=pose 49, total_obs=58
+
+--- Current Observation Residuals ---
+  LM 0: range_res=-56.6598, bearing_res=0.2289, mahal_sq=32105.9414
+  LM 4: range_res=-16.0109, bearing_res=-2.8280, mahal_sq=2963.3667
+  LM 21: range_res=-50.7884, bearing_res=1.8913, mahal_sq=25973.4473
+  LM 5: range_res=-61.8048, bearing_res=1.5116, mahal_sq=38312.6172
+  LM 6: range_res=-51.4207, bearing_res=-0.6513, mahal_sq=26462.0742
+  LM 9: range_res=-34.6046, bearing_res=-2.9319, mahal_sq=12404.6230
+
+--- Landmark Position Errors ---
+  LM 0: error=1.0123m
+  LM 1: error=0.7489m
+  LM 2: error=1.0872m
+  LM 3: error=0.9261m
+  LM 4: error=1.2417m
+  LM 5: error=0.9988m
+  LM 6: error=0.5353m
+  LM 7: error=1.3824m
+  LM 8: error=0.9576m
+  LM 9: error=1.2090m
+  LM 10: error=0.4747m
+  LM 11: error=1.1928m
+  LM 12: error=1.5463m
+  LM 13: error=1.5189m
+  LM 14: error=1.4173m
+  LM 15: error=1.2764m
+  LM 16: error=1.2977m
+  LM 17: error=1.4376m
+  LM 18: error=1.1403m
+  LM 19: error=1.3215m
+  LM 20: error=1.5353m
+  LM 21: error=1.6273m
+
+--- Pose Positions ---
+  Pose 0: (24.44, -34.16, 162.7°)
+  Pose 1: (23.43, -33.85, 162.9°)
+  Pose 2: (22.43, -33.54, 163.1°)
+  Pose 3: (21.43, -33.23, 163.3°)
+  Pose 4: (20.42, -32.93, 163.5°)
+  Pose 5: (19.41, -32.64, 163.8°)
+  Pose 6: (18.41, -32.35, 164.0°)
+  Pose 7: (17.40, -32.06, 164.3°)
+  Pose 8: (16.39, -31.78, 164.5°)
+  Pose 9: (15.42, -31.51, 164.7°)
+  Pose 10: (14.41, -31.24, 165.0°)
+  Pose 11: (13.40, -30.97, 165.2°)
+  Pose 12: (12.43, -30.72, 165.7°)
+  Pose 13: (11.41, -30.47, 167.4°)
+  Pose 14: (10.43, -30.27, 169.9°)
+  Pose 15: (9.39, -30.12, 173.6°)
+  Pose 16: (8.35, -30.04, 178.3°)
+  Pose 17: (7.30, -30.06, -175.9°)
+  Pose 18: (6.30, -30.18, -170.2°)
+  Pose 19: (5.28, -30.41, -164.2°)
+  Pose 20: (4.29, -30.74, -158.3°)
+  Pose 21: (3.34, -31.17, -152.3°)
+  Pose 22: (2.44, -31.71, -146.3°)
+  Pose 23: (1.59, -32.33, -140.4°)
+  Pose 24: (0.82, -33.04, -134.5°)
+  Pose 25: (0.13, -33.82, -128.5°)
+  Pose 26: (-0.46, -34.63, -122.9°)
+  Pose 27: (-0.99, -35.54, -117.3°)
+  Pose 28: (-1.43, -36.49, -112.6°)
+  Pose 29: (-1.80, -37.47, -108.7°)
+  Pose 30: (-2.11, -38.47, -105.8°)
+  Pose 31: (-2.38, -39.48, -103.9°)
+  Pose 32: (-2.62, -40.50, -103.0°)
+  Pose 33: (-2.86, -41.52, -103.2°)
+  Pose 34: (-3.10, -42.54, -104.4°)
+  Pose 35: (-3.38, -43.56, -106.7°)
+  Pose 36: (-3.71, -44.56, -110.0°)
+  Pose 37: (-4.10, -45.53, -114.3°)
+  Pose 38: (-4.58, -46.47, -119.6°)
+  Pose 39: (-5.14, -47.36, -125.2°)
+  Pose 40: (-5.78, -48.19, -130.6°)
+  Pose 41: (-6.50, -48.95, -135.9°)
+  Pose 42: (-7.24, -49.62, -140.4°)
+  Pose 43: (-8.07, -50.25, -144.5°)
+  Pose 44: (-8.91, -50.82, -148.0°)
+  Pose 45: (-9.78, -51.33, -151.0°)
+  Pose 46: (-10.68, -51.80, -153.4°)
+  Pose 47: (-11.58, -52.24, -155.3°)
+  Pose 48: (-12.51, -52.65, -156.8°)
+  Pose 49: (-13.44, -53.04, -157.6°)
+
+--- Landmark Positions ---
+  LM 0: (-0.66, 28.06)
+  LM 1: (-4.06, -17.58)
+  LM 2: (14.54, -25.06)
+  LM 3: (20.82, 14.28)
+  LM 4: (-24.86, -13.85)
+  LM 5: (-23.93, 15.38)
+  LM 6: (-7.10, 9.52)
+  LM 7: (20.83, -19.34)
+  LM 8: (8.32, 26.58)
+  LM 9: (-24.86, -4.18)
+  LM 10: (16.42, -0.76)
+  LM 11: (13.31, 28.48)
+  LM 12: (32.29, -13.85)
+  LM 13: (35.72, -6.56)
+  LM 14: (32.10, 17.80)
+  LM 15: (11.62, 34.08)
+  LM 16: (-23.24, -23.29)
+  LM 17: (-30.79, -19.28)
+  LM 18: (-21.49, -29.34)
+  LM 19: (6.68, -34.74)
+  LM 20: (-21.72, -38.13)
+  LM 21: (-38.79, 13.55)
+========================
+
+--- SLAM Landmark -> Closest True Landmark ---
+  SLAM LM 0 (-0.66, 28.06) -> True LM 0 (0.34, 28.23), error=1.012m
+  SLAM LM 1 (-4.06, -17.58) -> True LM 2 (-4.79, -17.42), error=0.749m
+  SLAM LM 2 (14.54, -25.06) -> True LM 3 (13.60, -25.60), error=1.087m
+  SLAM LM 3 (20.82, 14.28) -> True LM 5 (21.05, 13.38), error=0.926m
+  SLAM LM 4 (-24.86, -13.85) -> True LM 7 (-25.54, -12.81), error=1.242m
+  SLAM LM 5 (-23.93, 15.38) -> True LM 10 (-23.48, 16.28), error=0.999m
+  SLAM LM 6 (-7.10, 9.52) -> True LM 11 (-6.87, 10.00), error=0.535m
+  SLAM LM 7 (20.83, -19.34) -> True LM 14 (19.68, -20.10), error=1.382m
+  SLAM LM 8 (8.32, 26.58) -> True LM 17 (9.17, 26.13), error=0.958m
+  SLAM LM 9 (-24.86, -4.18) -> True LM 19 (-25.18, -3.01), error=1.209m
+  SLAM LM 10 (16.42, -0.76) -> True LM 21 (16.19, -1.17), error=0.475m
+  SLAM LM 11 (13.31, 28.48) -> True LM 13 (14.44, 28.10), error=1.193m
+  SLAM LM 12 (32.29, -13.85) -> True LM 18 (31.39, -15.11), error=1.546m
+  SLAM LM 13 (35.72, -6.56) -> True LM 8 (35.15, -7.97), error=1.519m
+  SLAM LM 14 (32.10, 17.80) -> True LM 12 (32.65, 16.49), error=1.417m
+  SLAM LM 15 (11.62, 34.08) -> True LM 22 (12.79, 33.57), error=1.276m
+  SLAM LM 16 (-23.24, -23.29) -> True LM 6 (-24.11, -22.33), error=1.298m
+  SLAM LM 17 (-30.79, -19.28) -> True LM 1 (-31.59, -18.09), error=1.438m
+  SLAM LM 18 (-21.49, -29.34) -> True LM 16 (-22.34, -28.58), error=1.140m
+  SLAM LM 19 (6.68, -34.74) -> True LM 4 (5.39, -35.02), error=1.322m
+  SLAM LM 20 (-21.72, -38.13) -> True LM 20 (-23.00, -37.28), error=1.535m
+  SLAM LM 21 (-38.79, 13.55) -> True LM 9 (-38.34, 15.11), error=1.627m
+
+--- True Landmark Positions ---
+  LM 0: (0.340, 28.232)
+  LM 1: (-31.588, -18.085)
+  LM 2: (-4.791, -17.419)
+  LM 3: (13.598, -25.598)
+  LM 4: (5.392, -35.017)
+  LM 5: (21.047, 13.385)
+  LM 6: (-24.113, -22.329)
+  LM 7: (-25.537, -12.806)
+  LM 8: (35.148, -7.968)
+  LM 9: (-38.340, 15.112)
+  LM 10: (-23.482, 16.276)
+  LM 11: (-6.866, 10.005)
+  LM 12: (32.646, 16.491)
+  LM 13: (14.441, 28.095)
+  LM 14: (19.678, -20.104)
+  LM 15: (10.875, -39.384)
+  LM 16: (-22.343, -28.580)
+  LM 17: (9.169, 26.132)
+  LM 18: (31.390, -15.111)
+  LM 19: (-25.182, -3.010)
+  LM 20: (-22.998, -37.283)
+  LM 21: (16.190, -1.174)
+  LM 22: (12.791, 33.568)
+
+--- True LM -> SLAM LM Mapping (Data Association) ---
+  True LM 0 -> SLAM LM 0
+  True LM 1 -> SLAM LM 17
+  True LM 2 -> SLAM LM 1
+  True LM 3 -> SLAM LM 2
+  True LM 4 -> SLAM LM 19
+  True LM 5 -> SLAM LM 3
+  True LM 6 -> SLAM LM 16
+  True LM 7 -> SLAM LM 4
+  True LM 8 -> SLAM LM 13
+  True LM 9 -> SLAM LM 21
+  True LM 10 -> SLAM LM 5
+  True LM 11 -> SLAM LM 6
+  True LM 12 -> SLAM LM 14
+  True LM 13 -> SLAM LM 11
+  True LM 14 -> SLAM LM 7
+  True LM 16 -> SLAM LM 18
+  True LM 17 -> SLAM LM 8
+  True LM 18 -> SLAM LM 12
+  True LM 19 -> SLAM LM 9
+  True LM 20 -> SLAM LM 20
+  True LM 21 -> SLAM LM 10
+  True LM 22 -> SLAM LM 15
+
+--- Current Observations (6) ---
+  True LM 0 (SLAM LM Some(0)): range=25.701m, bearing=-109.1°
+  True LM 7 (SLAM LM Some(4)): range=24.987m, bearing=104.6°
+  True LM 9 (SLAM LM Some(21)): range=19.728m, bearing=18.9°
+  True LM 10 (SLAM LM Some(5)): range=6.706m, bearing=-18.2°
+  True LM 11 (SLAM LM Some(6)): range=12.179m, bearing=-156.6°
+  True LM 19 (SLAM LM Some(9)): range=15.568m, bearing=96.0°
