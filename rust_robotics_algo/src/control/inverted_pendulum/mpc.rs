@@ -55,8 +55,17 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let P_mat = block_diag!(kron!(eye!(N), Q), QN, kron!(eye!(N), R));
 
     // Linear cost vector q
-    let q_part1 = kron!(ones!(N, 1), -dot!(Q, vector![xr[0] as f32, xr[1] as f32, xr[2] as f32, xr[3] as f32]));
-    let q_part2 = -dot!(QN, vector![xr[0] as f32, xr[1] as f32, xr[2] as f32, xr[3] as f32]);
+    let q_part1 = kron!(
+        ones!(N, 1),
+        -dot!(
+            Q,
+            vector![xr[0] as f32, xr[1] as f32, xr[2] as f32, xr[3] as f32]
+        )
+    );
+    let q_part2 = -dot!(
+        QN,
+        vector![xr[0] as f32, xr[1] as f32, xr[2] as f32, xr[3] as f32]
+    );
     let q_part3 = zeros!({ N * NU }, 1);
     let q_mat = vstack!(q_part1, q_part2, q_part3);
 
@@ -75,7 +84,7 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     // Build inequality constraint matrix for controls only
     let zeros_xu = zeros!({ N * NU }, { (N + 1) * NX }); // Zero block for state part
     let eye_u = eye!(N * NU);
-    let Aineq_upper = hstack!(zeros_xu, eye_u);  // u <= umax
+    let Aineq_upper = hstack!(zeros_xu, eye_u); // u <= umax
     let Aineq_lower = hstack!(zeros_xu, -eye_u); // -u <= -umin
     let Aineq = vstack!(Aineq_upper, Aineq_lower);
 
@@ -99,13 +108,7 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
         P_col_ptrs.push(P_row_indices.len());
     }
 
-    let P_csc = CscMatrix::new(
-        N_VARS,
-        N_VARS,
-        P_col_ptrs,
-        P_row_indices,
-        P_values,
-    );
+    let P_csc = CscMatrix::new(N_VARS, N_VARS, P_col_ptrs, P_row_indices, P_values);
 
     // Convert A matrix to Clarabel format (CSC)
     let n_constraints = N_EQ + N_INEQ;
@@ -124,13 +127,7 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
         A_col_ptrs.push(A_row_indices.len());
     }
 
-    let A_csc = CscMatrix::new(
-        n_constraints,
-        N_VARS,
-        A_col_ptrs,
-        A_row_indices,
-        A_values,
-    );
+    let A_csc = CscMatrix::new(n_constraints, N_VARS, A_col_ptrs, A_row_indices, A_values);
 
     // Build q vector
     let mut q_vec: Vec<f64> = vec![0.0; N_VARS];
@@ -149,7 +146,7 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
 
     // Inequality constraints RHS: [umax, umax, ..., -umin, -umin, ...]
     for k in 0..N {
-        b_vec[N_EQ + k] = umax;           // u <= umax
+        b_vec[N_EQ + k] = umax; // u <= umax
         b_vec[N_EQ + N * NU + k] = -umin; // -u <= -umin
     }
 
@@ -172,9 +169,7 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let u_idx = (N + 1) * NX;
 
     match solver.solution.status {
-        SolverStatus::Solved | SolverStatus::AlmostSolved => {
-            solver.solution.x[u_idx] as f32
-        }
+        SolverStatus::Solved | SolverStatus::AlmostSolved => solver.solution.x[u_idx] as f32,
         _ => {
             // Solver failed - return 0 as safe fallback
             0.0
@@ -263,8 +258,10 @@ mod tests {
         let mut x = vector![0., 0., 0.2, 0.]; // 0.2 rad tilt (~11 degrees)
 
         println!("\n=== MPC Closed-Loop Simulation ===");
-        println!("Initial state: pos={:.3}, vel={:.3}, angle={:.3}, omega={:.3}",
-                 x[0], x[1], x[2], x[3]);
+        println!(
+            "Initial state: pos={:.3}, vel={:.3}, angle={:.3}, omega={:.3}",
+            x[0], x[1], x[2], x[3]
+        );
 
         let mut stable = true;
         for step in 0..100 {
@@ -276,8 +273,10 @@ mod tests {
 
             // Print every 10 steps
             if step % 10 == 0 {
-                println!("Step {:3}: pos={:7.3}, vel={:7.3}, angle={:7.4}, omega={:7.3}, u={:7.3}",
-                         step, x[0], x[1], x[2], x[3], u);
+                println!(
+                    "Step {:3}: pos={:7.3}, vel={:7.3}, angle={:7.4}, omega={:7.3}, u={:7.3}",
+                    step, x[0], x[1], x[2], x[3], u
+                );
             }
 
             // Check if unstable (angle > 1 rad or position > 10m)
@@ -288,12 +287,18 @@ mod tests {
             }
         }
 
-        println!("Final state: pos={:.3}, vel={:.3}, angle={:.4}, omega={:.3}",
-                 x[0], x[1], x[2], x[3]);
+        println!(
+            "Final state: pos={:.3}, vel={:.3}, angle={:.4}, omega={:.3}",
+            x[0], x[1], x[2], x[3]
+        );
 
         // Check that the angle has been stabilized (should be close to 0)
         assert!(stable, "MPC should stabilize the pendulum");
-        assert!(x[2].abs() < 0.1, "Angle should be stabilized near 0, got {}", x[2]);
+        assert!(
+            x[2].abs() < 0.1,
+            "Angle should be stabilized near 0, got {}",
+            x[2]
+        );
     }
 
     #[test]
@@ -307,8 +312,10 @@ mod tests {
         let mut x = vector![0., 0., 0.2, 0.];
 
         println!("\n=== LQR Closed-Loop Simulation (for comparison) ===");
-        println!("Initial state: pos={:.3}, vel={:.3}, angle={:.3}, omega={:.3}",
-                 x[0], x[1], x[2], x[3]);
+        println!(
+            "Initial state: pos={:.3}, vel={:.3}, angle={:.3}, omega={:.3}",
+            x[0], x[1], x[2], x[3]
+        );
 
         for step in 0..100 {
             let u_vec = model.control(x, dt);
@@ -316,12 +323,16 @@ mod tests {
             x = Ad * x + Bd * u;
 
             if step % 10 == 0 {
-                println!("Step {:3}: pos={:7.3}, vel={:7.3}, angle={:7.4}, omega={:7.3}, u={:7.3}",
-                         step, x[0], x[1], x[2], x[3], u);
+                println!(
+                    "Step {:3}: pos={:7.3}, vel={:7.3}, angle={:7.4}, omega={:7.3}, u={:7.3}",
+                    step, x[0], x[1], x[2], x[3], u
+                );
             }
         }
 
-        println!("Final state: pos={:.3}, vel={:.3}, angle={:.4}, omega={:.3}",
-                 x[0], x[1], x[2], x[3]);
+        println!(
+            "Final state: pos={:.3}, vel={:.3}, angle={:.4}, omega={:.3}",
+            x[0], x[1], x[2], x[3]
+        );
     }
 }

@@ -152,15 +152,15 @@ impl Default for EkfSlamConfig {
             // With biased odometry (5% velocity error, angular bias), uncertainty
             // grows quadratically due to heading drift affecting position.
             motion_noise: Matrix3::new(
-                0.1, 0.0, 0.0,     // x variance per meter traveled (larger to handle drift)
-                0.0, 0.1, 0.0,     // y variance per meter traveled
-                0.0, 0.0, 0.1,     // theta variance per radian turned + base uncertainty
+                0.1, 0.0, 0.0, // x variance per meter traveled (larger to handle drift)
+                0.0, 0.1, 0.0, // y variance per meter traveled
+                0.0, 0.0, 0.1, // theta variance per radian turned + base uncertainty
             ),
             // Observation noise (range, bearing variances)
             // Lower values = filter trusts observations more
             observation_noise: Matrix2::new(
-                0.01, 0.0,    // range variance (0.1m std dev)
-                0.0, 0.0002,  // bearing variance (~0.8 deg std dev)
+                0.01, 0.0, // range variance (0.1m std dev)
+                0.0, 0.0002, // bearing variance (~0.8 deg std dev)
             ),
             // Mahalanobis distance gate for data association
             // Larger gate allows recovery from larger drift
@@ -203,16 +203,28 @@ fn motion_jacobian(pose: &Vector3<f32>, v: f32, w: f32, dt: f32) -> Matrix3<f32>
     if w.abs() < 1e-6 {
         // Jacobian for straight line motion
         Matrix3::new(
-            1.0, 0.0, -v * dt * theta.sin(),
-            0.0, 1.0, v * dt * theta.cos(),
-            0.0, 0.0, 1.0,
+            1.0,
+            0.0,
+            -v * dt * theta.sin(),
+            0.0,
+            1.0,
+            v * dt * theta.cos(),
+            0.0,
+            0.0,
+            1.0,
         )
     } else {
         // Jacobian for arc motion
         Matrix3::new(
-            1.0, 0.0, v / w * (-(theta).cos() + (theta + w * dt).cos()),
-            0.0, 1.0, v / w * (-(theta).sin() + (theta + w * dt).sin()),
-            0.0, 0.0, 1.0,
+            1.0,
+            0.0,
+            v / w * (-(theta).cos() + (theta + w * dt).cos()),
+            0.0,
+            1.0,
+            v / w * (-(theta).sin() + (theta + w * dt).sin()),
+            0.0,
+            0.0,
+            1.0,
         )
     }
 }
@@ -241,16 +253,10 @@ fn observation_jacobian(
     let sqrt_q = q.sqrt();
 
     // Jacobian with respect to robot pose [x, y, θ]
-    let h_robot = nalgebra::Matrix2x3::new(
-        -dx / sqrt_q, -dy / sqrt_q, 0.0,
-        dy / q, -dx / q, -1.0,
-    );
+    let h_robot = nalgebra::Matrix2x3::new(-dx / sqrt_q, -dy / sqrt_q, 0.0, dy / q, -dx / q, -1.0);
 
     // Jacobian with respect to landmark position [mx, my]
-    let h_landmark = Matrix2::new(
-        dx / sqrt_q, dy / sqrt_q,
-        -dy / q, dx / q,
-    );
+    let h_landmark = Matrix2::new(dx / sqrt_q, dy / sqrt_q, -dy / q, dx / q);
 
     (h_robot, h_landmark)
 }
@@ -443,16 +449,10 @@ fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamCon
     let s = angle.sin();
 
     // Jacobian with respect to robot pose (2x3)
-    let g_robot = nalgebra::Matrix2x3::new(
-        1.0, 0.0, -obs.range * s,
-        0.0, 1.0, obs.range * c,
-    );
+    let g_robot = nalgebra::Matrix2x3::new(1.0, 0.0, -obs.range * s, 0.0, 1.0, obs.range * c);
 
     // Jacobian with respect to observation (2x2)
-    let g_obs = Matrix2::new(
-        c, -obs.range * s,
-        s, obs.range * c,
-    );
+    let g_obs = Matrix2::new(c, -obs.range * s, s, obs.range * c);
 
     // Augment covariance matrix
     let new_n = old_n + 2;
@@ -468,9 +468,15 @@ fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamCon
     // Compute cross-correlation between new landmark and robot pose
     // Σ_new,robot = G_robot * Σ_robot,robot
     let sigma_rr = Matrix3::new(
-        state.sigma[(0, 0)], state.sigma[(0, 1)], state.sigma[(0, 2)],
-        state.sigma[(1, 0)], state.sigma[(1, 1)], state.sigma[(1, 2)],
-        state.sigma[(2, 0)], state.sigma[(2, 1)], state.sigma[(2, 2)],
+        state.sigma[(0, 0)],
+        state.sigma[(0, 1)],
+        state.sigma[(0, 2)],
+        state.sigma[(1, 0)],
+        state.sigma[(1, 1)],
+        state.sigma[(1, 2)],
+        state.sigma[(2, 0)],
+        state.sigma[(2, 1)],
+        state.sigma[(2, 2)],
     );
     let cross_robot = &g_robot * &sigma_rr;
 
@@ -489,9 +495,12 @@ fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamCon
         let base_k = 3 + 2 * k;
         // Extract Σ_robot,existing_k (3x2 block)
         let sigma_r_k = nalgebra::Matrix3x2::new(
-            state.sigma[(0, base_k)], state.sigma[(0, base_k + 1)],
-            state.sigma[(1, base_k)], state.sigma[(1, base_k + 1)],
-            state.sigma[(2, base_k)], state.sigma[(2, base_k + 1)],
+            state.sigma[(0, base_k)],
+            state.sigma[(0, base_k + 1)],
+            state.sigma[(1, base_k)],
+            state.sigma[(1, base_k + 1)],
+            state.sigma[(2, base_k)],
+            state.sigma[(2, base_k + 1)],
         );
         // Σ_new,existing_k = G_robot * Σ_robot,existing_k (2x2)
         let cross_k = &g_robot * &sigma_r_k;
@@ -591,7 +600,12 @@ pub fn update(
     const MAX_LANDMARKS: usize = 50;
     let under_landmark_cap = state.n_landmarks < MAX_LANDMARKS;
 
-    if map_is_empty || (heading_uncertainty_ok && enough_known_landmarks && good_match_ratio && under_landmark_cap) {
+    if map_is_empty
+        || (heading_uncertainty_ok
+            && enough_known_landmarks
+            && good_match_ratio
+            && under_landmark_cap)
+    {
         for obs in new_obs {
             add_landmark(state, obs, config);
         }
@@ -677,8 +691,10 @@ fn batch_update_landmarks(
         // Check each observation's innovation using its 2x2 sub-block of S
         let dz_i = nalgebra::Vector2::new(dz[2 * i], dz[2 * i + 1]);
         let s_i = Matrix2::new(
-            S[(2 * i, 2 * i)], S[(2 * i, 2 * i + 1)],
-            S[(2 * i + 1, 2 * i)], S[(2 * i + 1, 2 * i + 1)],
+            S[(2 * i, 2 * i)],
+            S[(2 * i, 2 * i + 1)],
+            S[(2 * i + 1, 2 * i)],
+            S[(2 * i + 1, 2 * i + 1)],
         );
         if let Some(s_i_inv) = s_i.try_inverse() {
             let mahal_sq = (dz_i.transpose() * s_i_inv * dz_i)[(0, 0)];
@@ -813,7 +829,7 @@ fn update_landmark(
 /// map rotation when heading has systematic errors
 fn enforce_min_covariance(state: &mut EkfSlamState) {
     // Minimum robot pose covariance
-    const MIN_POS_VAR: f32 = 0.001;   // 3cm std dev
+    const MIN_POS_VAR: f32 = 0.001; // 3cm std dev
     const MIN_THETA_VAR: f32 = 0.0001; // 0.6 deg std dev
 
     // Minimum landmark covariance
@@ -927,11 +943,14 @@ mod tests {
         let dt = 0.01;
 
         // Biased DR errors (same as simulator)
-        let v_bias = 1.05;  // 5% velocity overestimate
-        let w_bias = 0.02;  // Angular bias
+        let v_bias = 1.05; // 5% velocity overestimate
+        let w_bias = 0.02; // Angular bias
 
         println!("\n=== EKF vs DR Comparison (with bias) ===");
-        println!("v={}, w={}, dt={}, v_bias={}, w_bias={}", v, w, dt, v_bias, w_bias);
+        println!(
+            "v={}, w={}, dt={}, v_bias={}, w_bias={}",
+            v, w, dt, v_bias, w_bias
+        );
 
         for step in 0..2000 {
             // True pose (no noise)
@@ -949,26 +968,45 @@ mod tests {
 
             if step % 400 == 0 {
                 let ekf_err = ((true_pose[0] - state.x()).powi(2)
-                             + (true_pose[1] - state.y()).powi(2)).sqrt();
+                    + (true_pose[1] - state.y()).powi(2))
+                .sqrt();
                 let dr_err = ((true_pose[0] - dr_pose[0]).powi(2)
-                            + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
-                println!("Step {}: EKF_err={:.3}, DR_err={:.3}, n_lm={}, n_obs={}",
-                    step, ekf_err, dr_err, state.n_landmarks, observations.len());
+                    + (true_pose[1] - dr_pose[1]).powi(2))
+                .sqrt();
+                println!(
+                    "Step {}: EKF_err={:.3}, DR_err={:.3}, n_lm={}, n_obs={}",
+                    step,
+                    ekf_err,
+                    dr_err,
+                    state.n_landmarks,
+                    observations.len()
+                );
             }
         }
 
-        let ekf_err = ((true_pose[0] - state.x()).powi(2)
-                     + (true_pose[1] - state.y()).powi(2)).sqrt();
-        let dr_err = ((true_pose[0] - dr_pose[0]).powi(2)
-                    + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
+        let ekf_err =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        let dr_err =
+            ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
 
-        println!("\nFinal (20s): EKF_err={:.3}m, DR_err={:.3}m", ekf_err, dr_err);
+        println!(
+            "\nFinal (20s): EKF_err={:.3}m, DR_err={:.3}m",
+            ekf_err, dr_err
+        );
         println!("EKF should be MUCH better than DR with biased odometry");
 
         // EKF should be significantly better than DR
-        assert!(ekf_err < dr_err,
-            "EKF ({:.3}) should be better than DR ({:.3})", ekf_err, dr_err);
-        assert!(ekf_err < 1.0, "EKF error should be < 1m, got {:.3}", ekf_err);
+        assert!(
+            ekf_err < dr_err,
+            "EKF ({:.3}) should be better than DR ({:.3})",
+            ekf_err,
+            dr_err
+        );
+        assert!(
+            ekf_err < 1.0,
+            "EKF error should be < 1m, got {:.3}",
+            ekf_err
+        );
     }
 
     #[test]
@@ -1001,8 +1039,8 @@ mod tests {
                 update(&mut state, &config, &observations);
             }
 
-            let pos_err = ((true_pose[0] - state.x()).powi(2)
-                + (true_pose[1] - state.y()).powi(2)).sqrt();
+            let pos_err =
+                ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
             total_pos_err += pos_err;
 
             // Average landmark error
@@ -1010,25 +1048,36 @@ mod tests {
             for (i, true_lm) in landmarks.iter().enumerate() {
                 if let Some(est_lm) = state.landmark(i) {
                     lm_err_sum += ((true_lm[0] - est_lm[0]).powi(2)
-                        + (true_lm[1] - est_lm[1]).powi(2)).sqrt();
+                        + (true_lm[1] - est_lm[1]).powi(2))
+                    .sqrt();
                 }
             }
             total_lm_err += lm_err_sum / landmarks.len() as f32;
 
             // Should discover all landmarks
-            assert_eq!(state.n_landmarks, landmarks.len(),
-                "Should discover all {} landmarks", landmarks.len());
+            assert_eq!(
+                state.n_landmarks,
+                landmarks.len(),
+                "Should discover all {} landmarks",
+                landmarks.len()
+            );
         }
 
         let avg_pos_err = total_pos_err / n_trials as f32;
         let avg_lm_err = total_lm_err / n_trials as f32;
 
         // Average position error should be < 1m
-        assert!(avg_pos_err < 1.0,
-            "Average position error too large: {:.3}m", avg_pos_err);
+        assert!(
+            avg_pos_err < 1.0,
+            "Average position error too large: {:.3}m",
+            avg_pos_err
+        );
         // Average landmark error should be < 1m
-        assert!(avg_lm_err < 1.0,
-            "Average landmark error too large: {:.3}m", avg_lm_err);
+        assert!(
+            avg_lm_err < 1.0,
+            "Average landmark error too large: {:.3}m",
+            avg_lm_err
+        );
     }
 
     /// Test without observation noise to verify algorithm correctness
@@ -1060,17 +1109,31 @@ mod tests {
 
             if step % 100 == 0 {
                 let est = state.robot_pose();
-                let err = ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
-                println!("Step {}: true=({:.2}, {:.2}), est=({:.2}, {:.2}), err={:.4}, n_obs={}",
-                    step, true_pose[0], true_pose[1], est[0], est[1], err, observations.len());
+                let err =
+                    ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
+                println!(
+                    "Step {}: true=({:.2}, {:.2}), est=({:.2}, {:.2}), err={:.4}, n_obs={}",
+                    step,
+                    true_pose[0],
+                    true_pose[1],
+                    est[0],
+                    est[1],
+                    err,
+                    observations.len()
+                );
             }
         }
 
-        let final_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        let final_err =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
         println!("Final error: {:.4}", final_err);
 
         // With no observation noise, error should be very small
-        assert!(final_err < 0.5, "Error without noise should be < 0.5m, got {:.4}", final_err);
+        assert!(
+            final_err < 0.5,
+            "Error without noise should be < 0.5m, got {:.4}",
+            final_err
+        );
     }
 
     /// Test when landmarks change mid-simulation (simulating UI change)
@@ -1104,13 +1167,21 @@ mod tests {
 
             if step % 100 == 0 {
                 let est = state.robot_pose();
-                let err = ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
-                println!("  Step {}: err={:.3}, n_lm={}", step, err, state.n_landmarks);
+                let err =
+                    ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
+                println!(
+                    "  Step {}: err={:.3}, n_lm={}",
+                    step, err, state.n_landmarks
+                );
             }
         }
 
-        let err_before = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        println!("Before change: err={:.3}, discovered={}", err_before, state.n_landmarks);
+        let err_before =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        println!(
+            "Before change: err={:.3}, discovered={}",
+            err_before, state.n_landmarks
+        );
 
         // Phase 2: Add new landmarks (simulating UI increase)
         println!("\nPhase 2: Adding 4 more landmarks (total 8)");
@@ -1127,13 +1198,24 @@ mod tests {
 
             if step % 100 == 0 {
                 let est = state.robot_pose();
-                let err = ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
-                println!("  Step {}: err={:.3}, n_lm={}, n_obs={}", step, err, state.n_landmarks, observations.len());
+                let err =
+                    ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
+                println!(
+                    "  Step {}: err={:.3}, n_lm={}, n_obs={}",
+                    step,
+                    err,
+                    state.n_landmarks,
+                    observations.len()
+                );
             }
         }
 
-        let err_after_add = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        println!("After adding: err={:.3}, discovered={}", err_after_add, state.n_landmarks);
+        let err_after_add =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        println!(
+            "After adding: err={:.3}, discovered={}",
+            err_after_add, state.n_landmarks
+        );
 
         // Phase 3: Replace ALL landmarks with completely new ones (simulating UI regeneration)
         println!("\nPhase 3: Replacing ALL landmarks with new positions");
@@ -1158,13 +1240,24 @@ mod tests {
 
             if step % 100 == 0 {
                 let est = state.robot_pose();
-                let err = ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
-                println!("  Step {}: err={:.3}, n_lm={}, n_obs={}", step, err, state.n_landmarks, observations.len());
+                let err =
+                    ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
+                println!(
+                    "  Step {}: err={:.3}, n_lm={}, n_obs={}",
+                    step,
+                    err,
+                    state.n_landmarks,
+                    observations.len()
+                );
             }
         }
 
-        let err_without_reset = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        println!("Without reset: err={:.3}, discovered={}", err_without_reset, state.n_landmarks);
+        let err_without_reset =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        println!(
+            "Without reset: err={:.3}, discovered={}",
+            err_without_reset, state.n_landmarks
+        );
 
         // Phase 4: Now reset and try again
         println!("\nPhase 4: Reset SLAM state and continue");
@@ -1182,20 +1275,37 @@ mod tests {
 
             if step % 100 == 0 {
                 let est = state.robot_pose();
-                let err = ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
-                println!("  Step {}: err={:.3}, n_lm={}, n_obs={}", step, err, state.n_landmarks, observations.len());
+                let err =
+                    ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
+                println!(
+                    "  Step {}: err={:.3}, n_lm={}, n_obs={}",
+                    step,
+                    err,
+                    state.n_landmarks,
+                    observations.len()
+                );
             }
         }
 
-        let err_with_reset = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        println!("With reset: err={:.3}, discovered={}", err_with_reset, state.n_landmarks);
+        let err_with_reset =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        println!(
+            "With reset: err={:.3}, discovered={}",
+            err_with_reset, state.n_landmarks
+        );
 
         // The error after proper reset should be much smaller
-        assert!(err_with_reset < 1.0, "Error after reset should be < 1m, got {:.3}", err_with_reset);
+        assert!(
+            err_with_reset < 1.0,
+            "Error after reset should be < 1m, got {:.3}",
+            err_with_reset
+        );
 
         // Document that without reset, error grows
-        println!("\nConclusion: Without reset err={:.3}, With reset err={:.3}",
-            err_without_reset, err_with_reset);
+        println!(
+            "\nConclusion: Without reset err={:.3}, With reset err={:.3}",
+            err_without_reset, err_with_reset
+        );
     }
 
     /// Test with landmarks going in and out of range
@@ -1240,26 +1350,53 @@ mod tests {
             // Log when observations change
             if observations.len() != last_n_obs {
                 let est = state.robot_pose();
-                let err = ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
-                println!("Step {}: pos=({:.1}, {:.1}), n_obs={}->{}, n_lm={}, err={:.2}",
-                    step, true_pose[0], true_pose[1], last_n_obs, observations.len(),
-                    state.n_landmarks, err);
+                let err =
+                    ((true_pose[0] - est[0]).powi(2) + (true_pose[1] - est[1]).powi(2)).sqrt();
+                println!(
+                    "Step {}: pos=({:.1}, {:.1}), n_obs={}->{}, n_lm={}, err={:.2}",
+                    step,
+                    true_pose[0],
+                    true_pose[1],
+                    last_n_obs,
+                    observations.len(),
+                    state.n_landmarks,
+                    err
+                );
                 last_n_obs = observations.len();
             }
 
             update(&mut state, &config, &observations);
         }
 
-        let final_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        println!("\nFinal: true=({:.2}, {:.2}), est=({:.2}, {:.2}), err={:.2}",
-            true_pose[0], true_pose[1], state.x(), state.y(), final_err);
-        println!("Landmarks discovered: {} (expected: {})", state.n_landmarks, landmarks.len());
+        let final_err =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        println!(
+            "\nFinal: true=({:.2}, {:.2}), est=({:.2}, {:.2}), err={:.2}",
+            true_pose[0],
+            true_pose[1],
+            state.x(),
+            state.y(),
+            final_err
+        );
+        println!(
+            "Landmarks discovered: {} (expected: {})",
+            state.n_landmarks,
+            landmarks.len()
+        );
         println!("Steps with zero observations: {}", zero_obs_count);
 
         // Should have discovered all close landmarks
-        assert!(state.n_landmarks >= 6, "Should discover at least 6 landmarks, got {}", state.n_landmarks);
+        assert!(
+            state.n_landmarks >= 6,
+            "Should discover at least 6 landmarks, got {}",
+            state.n_landmarks
+        );
         // Error should be reasonable
-        assert!(final_err < 3.0, "Position error too large: {:.2}", final_err);
+        assert!(
+            final_err < 3.0,
+            "Position error too large: {:.2}",
+            final_err
+        );
     }
 
     #[test]
@@ -1313,10 +1450,7 @@ mod tests {
         let mut state = EkfSlamState::new();
         let config = EkfSlamConfig::default();
 
-        let landmarks = vec![
-            Vector2::new(5.0, 5.0),
-            Vector2::new(10.0, 0.0),
-        ];
+        let landmarks = vec![Vector2::new(5.0, 5.0), Vector2::new(10.0, 0.0)];
 
         // Simulate a few steps
         let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
@@ -1336,9 +1470,8 @@ mod tests {
         assert!(state.n_landmarks > 0);
 
         // Estimated pose should be reasonably close to true pose
-        let pose_error = ((state.x() - true_pose[0]).powi(2)
-            + (state.y() - true_pose[1]).powi(2))
-        .sqrt();
+        let pose_error =
+            ((state.x() - true_pose[0]).powi(2) + (state.y() - true_pose[1]).powi(2)).sqrt();
         assert!(pose_error < 5.0, "Pose error too large: {}", pose_error);
     }
 
@@ -1376,8 +1509,12 @@ mod tests {
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
-                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-                println!("  Step {}: err={:.3}, n_lm={}", step, err, state.n_landmarks);
+                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2))
+                    .sqrt();
+                println!(
+                    "  Step {}: err={:.3}, n_lm={}",
+                    step, err, state.n_landmarks
+                );
             }
         }
 
@@ -1389,13 +1526,20 @@ mod tests {
             }
         }
         let n_landmarks_before = state.n_landmarks;
-        let robot_err_before = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        let robot_err_before =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
 
-        println!("\nBefore new landmark: n_lm={}, robot_err={:.3}", n_landmarks_before, robot_err_before);
+        println!(
+            "\nBefore new landmark: n_lm={}, robot_err={:.3}",
+            n_landmarks_before, robot_err_before
+        );
         for (i, lm) in lm_estimates_before.iter().enumerate() {
             let true_lm = &close_landmarks[i];
             let lm_err = ((true_lm[0] - lm[0]).powi(2) + (true_lm[1] - lm[1]).powi(2)).sqrt();
-            println!("  Landmark {}: est=({:.2}, {:.2}), err={:.3}", i, lm[0], lm[1], lm_err);
+            println!(
+                "  Landmark {}: est=({:.2}, {:.2}), err={:.3}",
+                i, lm[0], lm[1], lm_err
+            );
         }
 
         // Phase 2: Move toward far landmark and discover it
@@ -1417,21 +1561,28 @@ mod tests {
 
             // Check if we just discovered the far landmark
             if observations.len() > state.n_landmarks && state.n_landmarks == n_landmarks_before {
-                println!("  Step {}: About to discover new landmark! Robot at ({:.2}, {:.2})", step, true_pose[0], true_pose[1]);
+                println!(
+                    "  Step {}: About to discover new landmark! Robot at ({:.2}, {:.2})",
+                    step, true_pose[0], true_pose[1]
+                );
             }
 
             let n_before_update = state.n_landmarks;
             update(&mut state, &config, &observations);
 
             if state.n_landmarks > n_before_update {
-                println!("  Step {}: NEW LANDMARK ADDED! n_lm: {} -> {}", step, n_before_update, state.n_landmarks);
+                println!(
+                    "  Step {}: NEW LANDMARK ADDED! n_lm: {} -> {}",
+                    step, n_before_update, state.n_landmarks
+                );
 
                 // Immediately check if existing landmarks were corrupted
                 println!("  Checking existing landmark estimates after adding new landmark:");
                 for i in 0..n_landmarks_before {
                     if let Some(lm) = state.landmark(i) {
                         let diff = ((lm[0] - lm_estimates_before[i][0]).powi(2)
-                            + (lm[1] - lm_estimates_before[i][1]).powi(2)).sqrt();
+                            + (lm[1] - lm_estimates_before[i][1]).powi(2))
+                        .sqrt();
                         println!("    Landmark {}: before=({:.2}, {:.2}), after=({:.2}, {:.2}), change={:.4}",
                             i, lm_estimates_before[i][0], lm_estimates_before[i][1], lm[0], lm[1], diff);
                     }
@@ -1439,42 +1590,69 @@ mod tests {
             }
 
             if step % 100 == 0 {
-                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-                println!("  Step {}: robot at ({:.2}, {:.2}), err={:.3}, n_lm={}, n_obs={}",
-                    step, true_pose[0], true_pose[1], err, state.n_landmarks, observations.len());
+                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2))
+                    .sqrt();
+                println!(
+                    "  Step {}: robot at ({:.2}, {:.2}), err={:.3}, n_lm={}, n_obs={}",
+                    step,
+                    true_pose[0],
+                    true_pose[1],
+                    err,
+                    state.n_landmarks,
+                    observations.len()
+                );
             }
         }
 
         // Phase 3: Check final estimates
         println!("\nPhase 3: Final check");
-        let robot_err_after = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        println!("Robot error: before={:.3}, after={:.3}", robot_err_before, robot_err_after);
+        let robot_err_after =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        println!(
+            "Robot error: before={:.3}, after={:.3}",
+            robot_err_before, robot_err_after
+        );
 
         println!("\nExisting landmark estimate changes:");
         let mut max_landmark_drift = 0.0f32;
         for i in 0..n_landmarks_before.min(state.n_landmarks) {
             if let Some(lm) = state.landmark(i) {
                 let diff = ((lm[0] - lm_estimates_before[i][0]).powi(2)
-                    + (lm[1] - lm_estimates_before[i][1]).powi(2)).sqrt();
+                    + (lm[1] - lm_estimates_before[i][1]).powi(2))
+                .sqrt();
                 let true_lm = &close_landmarks[i];
-                let err_before = ((true_lm[0] - lm_estimates_before[i][0]).powi(2) + (true_lm[1] - lm_estimates_before[i][1]).powi(2)).sqrt();
-                let err_after = ((true_lm[0] - lm[0]).powi(2) + (true_lm[1] - lm[1]).powi(2)).sqrt();
+                let err_before = ((true_lm[0] - lm_estimates_before[i][0]).powi(2)
+                    + (true_lm[1] - lm_estimates_before[i][1]).powi(2))
+                .sqrt();
+                let err_after =
+                    ((true_lm[0] - lm[0]).powi(2) + (true_lm[1] - lm[1]).powi(2)).sqrt();
                 max_landmark_drift = max_landmark_drift.max(diff);
-                println!("  Landmark {}: drift={:.4}, err_before={:.3}, err_after={:.3}",
-                    i, diff, err_before, err_after);
+                println!(
+                    "  Landmark {}: drift={:.4}, err_before={:.3}, err_after={:.3}",
+                    i, diff, err_before, err_after
+                );
             }
         }
 
         // Key assertion: adding a new landmark should NOT dramatically corrupt existing estimates
         // Some drift is expected due to continued EKF updates, but it should be small
-        assert!(max_landmark_drift < 2.0,
-            "Existing landmarks drifted too much after new landmark: {:.3}m", max_landmark_drift);
+        assert!(
+            max_landmark_drift < 2.0,
+            "Existing landmarks drifted too much after new landmark: {:.3}m",
+            max_landmark_drift
+        );
         // Robot pose can drift during straight-line motion when fewer landmarks are visible
         // The key test is landmark drift, not robot pose drift
-        assert!(robot_err_after < 5.0,
-            "Robot error too large after new landmark: {:.3}m", robot_err_after);
+        assert!(
+            robot_err_after < 5.0,
+            "Robot error too large after new landmark: {:.3}m",
+            robot_err_after
+        );
 
-        println!("\nTest PASSED: max_landmark_drift={:.3}m, robot_err={:.3}m", max_landmark_drift, robot_err_after);
+        println!(
+            "\nTest PASSED: max_landmark_drift={:.3}m, robot_err={:.3}m",
+            max_landmark_drift, robot_err_after
+        );
     }
 
     /// Helper to generate random landmarks in a ring around origin
@@ -1495,8 +1673,14 @@ mod tests {
         const N_INITIAL_LANDMARKS: usize = 10;
         const N_NEW_LANDMARKS: usize = 4;
 
-        println!("\n=== Randomized New Landmark Test ({} trials) ===", N_TRIALS);
-        println!("Initial landmarks: {}, New landmarks to add: {}", N_INITIAL_LANDMARKS, N_NEW_LANDMARKS);
+        println!(
+            "\n=== Randomized New Landmark Test ({} trials) ===",
+            N_TRIALS
+        );
+        println!(
+            "Initial landmarks: {}, New landmarks to add: {}",
+            N_INITIAL_LANDMARKS, N_NEW_LANDMARKS
+        );
 
         let mut failures = Vec::new();
         let mut max_drift_seen = 0.0f32;
@@ -1522,7 +1706,8 @@ mod tests {
             for _ in 0..400 {
                 true_pose = motion_model(&true_pose, v, w, dt);
                 predict(&mut state, &config, v, w, dt);
-                let observations = generate_observations(&true_pose, &initial_landmarks, &config, true);
+                let observations =
+                    generate_observations(&true_pose, &initial_landmarks, &config, true);
                 update(&mut state, &config, &observations);
             }
 
@@ -1540,7 +1725,8 @@ mod tests {
                 }
             }
             let n_before = state.n_landmarks;
-            let robot_err_before = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+            let robot_err_before =
+                ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
 
             // Phase 2: Move outward to discover new landmarks
             let mut all_landmarks = initial_landmarks.clone();
@@ -1573,21 +1759,24 @@ mod tests {
             for i in 0..n_before {
                 if let Some(lm) = state.landmark(i) {
                     let drift = ((lm[0] - lm_estimates_before[i][0]).powi(2)
-                        + (lm[1] - lm_estimates_before[i][1]).powi(2)).sqrt();
+                        + (lm[1] - lm_estimates_before[i][1]).powi(2))
+                    .sqrt();
                     max_drift = max_drift.max(drift);
 
                     // Also check error relative to true landmark
                     let true_lm = &initial_landmarks[i];
                     let err_before = ((true_lm[0] - lm_estimates_before[i][0]).powi(2)
-                        + (true_lm[1] - lm_estimates_before[i][1]).powi(2)).sqrt();
-                    let err_after = ((true_lm[0] - lm[0]).powi(2)
-                        + (true_lm[1] - lm[1]).powi(2)).sqrt();
+                        + (true_lm[1] - lm_estimates_before[i][1]).powi(2))
+                    .sqrt();
+                    let err_after =
+                        ((true_lm[0] - lm[0]).powi(2) + (true_lm[1] - lm[1]).powi(2)).sqrt();
                     let err_increase = err_after - err_before;
                     max_err_increase = max_err_increase.max(err_increase);
                 }
             }
 
-            let robot_err_after = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+            let robot_err_after =
+                ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
 
             max_drift_seen = max_drift_seen.max(max_drift);
             max_robot_err_seen = max_robot_err_seen.max(robot_err_after);
@@ -1611,8 +1800,10 @@ mod tests {
             }
 
             if trial % 5 == 0 {
-                println!("Trial {}: n_lm: {} -> {}, max_drift={:.3}m, robot_err: {:.3} -> {:.3}m",
-                    trial, n_before, n_after, max_drift, robot_err_before, robot_err_after);
+                println!(
+                    "Trial {}: n_lm: {} -> {}, max_drift={:.3}m, robot_err: {:.3} -> {:.3}m",
+                    trial, n_before, n_after, max_drift, robot_err_before, robot_err_after
+                );
             }
         }
 
@@ -1625,7 +1816,11 @@ mod tests {
             println!("  FAILURE: {}", failure);
         }
 
-        assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "Some trials failed:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// Stress test: rapidly add many landmarks and check stability
@@ -1671,13 +1866,16 @@ mod tests {
                 }
 
                 if step % 100 == 0 {
-                    let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+                    let err = ((true_pose[0] - state.x()).powi(2)
+                        + (true_pose[1] - state.y()).powi(2))
+                    .sqrt();
                     robot_errors.push(err);
                 }
             }
 
             // Check for error spikes after landmark discovery
-            let final_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+            let final_err =
+                ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
 
             // Check if covariance matrix is still positive semi-definite
             let sigma = &state.sigma;
@@ -1690,7 +1888,9 @@ mod tests {
                             break;
                         }
                     }
-                    if !symmetric { break; }
+                    if !symmetric {
+                        break;
+                    }
                 }
                 symmetric
             };
@@ -1715,11 +1915,16 @@ mod tests {
             }
 
             if final_err > 5.0 {
-                failures.push(format!("Trial {}: Final robot error too large: {:.3}m", trial, final_err));
+                failures.push(format!(
+                    "Trial {}: Final robot error too large: {:.3}m",
+                    trial, final_err
+                ));
             }
 
-            println!("Trial {}: discovered {} landmarks, final_err={:.3}m, symmetric={}, diag_pos={}",
-                trial, state.n_landmarks, final_err, is_symmetric, diag_positive);
+            println!(
+                "Trial {}: discovered {} landmarks, final_err={:.3}m, symmetric={}, diag_pos={}",
+                trial, state.n_landmarks, final_err, is_symmetric, diag_positive
+            );
         }
 
         println!("\nFailures: {}/{}", failures.len(), N_TRIALS);
@@ -1727,7 +1932,11 @@ mod tests {
             println!("  FAILURE: {}", failure);
         }
 
-        assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "Some trials failed:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// Test: check specific edge case where landmark is added at boundary of sensor range
@@ -1780,7 +1989,8 @@ mod tests {
 
                 update(&mut state, &config, &observations);
 
-                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2))
+                    .sqrt();
                 max_robot_err = max_robot_err.max(err);
 
                 // Check for immediate corruption (error spike)
@@ -1793,7 +2003,8 @@ mod tests {
                 }
             }
 
-            let final_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+            let final_err =
+                ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
 
             if final_err > 5.0 {
                 failures.push(format!(
@@ -1802,8 +2013,10 @@ mod tests {
                 ));
             }
 
-            println!("Trial {}: n_lm={}, max_err={:.3}m, final_err={:.3}m, visibility_changes={}",
-                trial, state.n_landmarks, max_robot_err, final_err, visibility_changes);
+            println!(
+                "Trial {}: n_lm={}, max_err={:.3}m, final_err={:.3}m, visibility_changes={}",
+                trial, state.n_landmarks, max_robot_err, final_err, visibility_changes
+            );
         }
 
         println!("\nFailures: {}/{}", failures.len(), N_TRIALS);
@@ -1811,7 +2024,11 @@ mod tests {
             println!("  FAILURE: {}", failure);
         }
 
-        assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "Some trials failed:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// Test: check for numerical stability with large state vectors
@@ -1849,7 +2066,8 @@ mod tests {
                 let n_before = state.n_landmarks;
                 update(&mut state, &config, &observations);
 
-                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+                let err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2))
+                    .sqrt();
 
                 // Detect sudden error spikes when new landmark is added
                 if state.n_landmarks > n_before {
@@ -1891,7 +2109,11 @@ mod tests {
             }
         }
 
-        assert!(failures.is_empty(), "Some trials failed:\n{}", failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "Some trials failed:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// Test to reproduce the landmark rotation issue with 20 landmarks
@@ -1929,8 +2151,8 @@ mod tests {
             }
 
             // Calculate robot position error
-            let pos_err = ((true_pose[0] - state.x()).powi(2)
-                + (true_pose[1] - state.y()).powi(2)).sqrt();
+            let pos_err =
+                ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
 
             // Calculate landmark errors and check for rotation pattern
             let mut landmark_errors: Vec<f32> = Vec::new();
@@ -1943,7 +2165,8 @@ mod tests {
                     let mut matched_idx = 0;
                     for (j, true_lm) in landmarks.iter().enumerate() {
                         let dist = ((est_lm[0] - true_lm[0]).powi(2)
-                            + (est_lm[1] - true_lm[1]).powi(2)).sqrt();
+                            + (est_lm[1] - true_lm[1]).powi(2))
+                        .sqrt();
                         if dist < min_dist {
                             min_dist = dist;
                             matched_idx = j;
@@ -1956,16 +2179,26 @@ mod tests {
                     let true_angle = (true_lm[1] - true_pose[1]).atan2(true_lm[0] - true_pose[0]);
                     let est_angle = (est_lm[1] - state.y()).atan2(est_lm[0] - state.x());
                     let angle_diff = (true_angle - est_angle).abs();
-                    let angle_diff = if angle_diff > PI { 2.0 * PI - angle_diff } else { angle_diff };
+                    let angle_diff = if angle_diff > PI {
+                        2.0 * PI - angle_diff
+                    } else {
+                        angle_diff
+                    };
                     angular_diffs.push(angle_diff);
                 }
             }
 
-            let avg_landmark_err = if landmark_errors.is_empty() { 0.0 }
-                else { landmark_errors.iter().sum::<f32>() / landmark_errors.len() as f32 };
+            let avg_landmark_err = if landmark_errors.is_empty() {
+                0.0
+            } else {
+                landmark_errors.iter().sum::<f32>() / landmark_errors.len() as f32
+            };
             let max_landmark_err = landmark_errors.iter().cloned().fold(0.0f32, f32::max);
-            let avg_angular_diff = if angular_diffs.is_empty() { 0.0 }
-                else { angular_diffs.iter().sum::<f32>() / angular_diffs.len() as f32 };
+            let avg_angular_diff = if angular_diffs.is_empty() {
+                0.0
+            } else {
+                angular_diffs.iter().sum::<f32>() / angular_diffs.len() as f32
+            };
 
             // Check for high error
             if pos_err > 1.0 {
@@ -1975,10 +2208,15 @@ mod tests {
             // Check for rotation pattern (consistent angular offset across landmarks)
             let angular_std = if angular_diffs.len() > 1 {
                 let mean = avg_angular_diff;
-                let variance = angular_diffs.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
+                let variance = angular_diffs
+                    .iter()
+                    .map(|x| (x - mean).powi(2))
+                    .sum::<f32>()
                     / angular_diffs.len() as f32;
                 variance.sqrt()
-            } else { 0.0 };
+            } else {
+                0.0
+            };
 
             // Low std with non-zero mean suggests rotation
             let rotation_detected = avg_angular_diff > 0.05 && angular_std < 0.1;
@@ -1986,17 +2224,32 @@ mod tests {
                 rotation_detected_count += 1;
             }
 
-            println!("Trial {:2}: pos_err={:.3}m, avg_lm_err={:.3}m, max_lm_err={:.3}m, \
+            println!(
+                "Trial {:2}: pos_err={:.3}m, avg_lm_err={:.3}m, max_lm_err={:.3}m, \
                       avg_angle={:.3}rad, angle_std={:.3}, rotation={}",
-                trial, pos_err, avg_landmark_err, max_landmark_err,
-                avg_angular_diff, angular_std, if rotation_detected { "YES" } else { "no" });
+                trial,
+                pos_err,
+                avg_landmark_err,
+                max_landmark_err,
+                avg_angular_diff,
+                angular_std,
+                if rotation_detected { "YES" } else { "no" }
+            );
         }
 
         println!("\nSummary:");
-        println!("  High error (>1m): {}/{} trials ({:.0}%)",
-            high_error_count, N_TRIALS, 100.0 * high_error_count as f32 / N_TRIALS as f32);
-        println!("  Rotation detected: {}/{} trials ({:.0}%)",
-            rotation_detected_count, N_TRIALS, 100.0 * rotation_detected_count as f32 / N_TRIALS as f32);
+        println!(
+            "  High error (>1m): {}/{} trials ({:.0}%)",
+            high_error_count,
+            N_TRIALS,
+            100.0 * high_error_count as f32 / N_TRIALS as f32
+        );
+        println!(
+            "  Rotation detected: {}/{} trials ({:.0}%)",
+            rotation_detected_count,
+            N_TRIALS,
+            100.0 * rotation_detected_count as f32 / N_TRIALS as f32
+        );
 
         // This test is for reproduction - we expect some failures
         // If > 30% have high error, that confirms the user's observation
@@ -2068,21 +2321,38 @@ mod tests {
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
-                let ekf_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-                let dr_err = ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
-                println!("Step {:4}: EKF_err={:.3}m, DR_err={:.3}m, n_obs={}, n_lm={}",
-                    step, ekf_err, dr_err, observations.len(), state.n_landmarks);
+                let ekf_err = ((true_pose[0] - state.x()).powi(2)
+                    + (true_pose[1] - state.y()).powi(2))
+                .sqrt();
+                let dr_err = ((true_pose[0] - dr_pose[0]).powi(2)
+                    + (true_pose[1] - dr_pose[1]).powi(2))
+                .sqrt();
+                println!(
+                    "Step {:4}: EKF_err={:.3}m, DR_err={:.3}m, n_obs={}, n_lm={}",
+                    step,
+                    ekf_err,
+                    dr_err,
+                    observations.len(),
+                    state.n_landmarks
+                );
             }
         }
 
-        let ekf_err_phase1 = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        let dr_err_phase1 = ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
-        println!("End Phase 1: EKF_err={:.3}m, DR_err={:.3}m, landmarks discovered={}",
-            ekf_err_phase1, dr_err_phase1, state.n_landmarks);
+        let ekf_err_phase1 =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        let dr_err_phase1 =
+            ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
+        println!(
+            "End Phase 1: EKF_err={:.3}m, DR_err={:.3}m, landmarks discovered={}",
+            ekf_err_phase1, dr_err_phase1, state.n_landmarks
+        );
 
         // Record heading uncertainty before going blind
         let heading_var_before_blind = state.sigma[(2, 2)];
-        println!("Heading variance before blind phase: {:.6}", heading_var_before_blind);
+        println!(
+            "Heading variance before blind phase: {:.6}",
+            heading_var_before_blind
+        );
 
         println!("\n--- Phase 2: Moving away (NO landmarks visible) ---");
         // Move in a straight line away from landmarks
@@ -2107,21 +2377,38 @@ mod tests {
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
-                let ekf_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-                let dr_err = ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
+                let ekf_err = ((true_pose[0] - state.x()).powi(2)
+                    + (true_pose[1] - state.y()).powi(2))
+                .sqrt();
+                let dr_err = ((true_pose[0] - dr_pose[0]).powi(2)
+                    + (true_pose[1] - dr_pose[1]).powi(2))
+                .sqrt();
                 let dist_from_origin = (true_pose[0].powi(2) + true_pose[1].powi(2)).sqrt();
-                println!("Step {:4}: EKF_err={:.3}m, DR_err={:.3}m, n_obs={}, dist_from_origin={:.1}m",
-                    step, ekf_err, dr_err, observations.len(), dist_from_origin);
+                println!(
+                    "Step {:4}: EKF_err={:.3}m, DR_err={:.3}m, n_obs={}, dist_from_origin={:.1}m",
+                    step,
+                    ekf_err,
+                    dr_err,
+                    observations.len(),
+                    dist_from_origin
+                );
             }
         }
 
-        let ekf_err_phase2 = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        let dr_err_phase2 = ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
+        let ekf_err_phase2 =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        let dr_err_phase2 =
+            ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
         let heading_var_after_blind = state.sigma[(2, 2)];
-        println!("End Phase 2: EKF_err={:.3}m, DR_err={:.3}m, steps with 0 obs={}",
-            ekf_err_phase2, dr_err_phase2, zero_obs_steps);
-        println!("Heading variance after blind phase: {:.6} (grew by {:.2}x)",
-            heading_var_after_blind, heading_var_after_blind / heading_var_before_blind);
+        println!(
+            "End Phase 2: EKF_err={:.3}m, DR_err={:.3}m, steps with 0 obs={}",
+            ekf_err_phase2, dr_err_phase2, zero_obs_steps
+        );
+        println!(
+            "Heading variance after blind phase: {:.6} (grew by {:.2}x)",
+            heading_var_after_blind,
+            heading_var_after_blind / heading_var_before_blind
+        );
 
         println!("\n--- Phase 3: Returning to landmarks ---");
         // Turn around and head back toward origin
@@ -2147,56 +2434,106 @@ mod tests {
             // Record when we first see landmarks again
             if !observations.is_empty() && first_obs_step.is_none() {
                 first_obs_step = Some(step);
-                let ekf_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-                println!("Step {:4}: First observation after blind phase! EKF_err={:.3}m, n_obs={}",
-                    step, ekf_err, observations.len());
+                let ekf_err = ((true_pose[0] - state.x()).powi(2)
+                    + (true_pose[1] - state.y()).powi(2))
+                .sqrt();
+                println!(
+                    "Step {:4}: First observation after blind phase! EKF_err={:.3}m, n_obs={}",
+                    step,
+                    ekf_err,
+                    observations.len()
+                );
             }
 
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
-                let ekf_err = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-                let dr_err = ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
+                let ekf_err = ((true_pose[0] - state.x()).powi(2)
+                    + (true_pose[1] - state.y()).powi(2))
+                .sqrt();
+                let dr_err = ((true_pose[0] - dr_pose[0]).powi(2)
+                    + (true_pose[1] - dr_pose[1]).powi(2))
+                .sqrt();
                 let dist_from_origin = (true_pose[0].powi(2) + true_pose[1].powi(2)).sqrt();
-                println!("Step {:4}: EKF_err={:.3}m, DR_err={:.3}m, n_obs={}, dist={:.1}m",
-                    step, ekf_err, dr_err,
+                println!(
+                    "Step {:4}: EKF_err={:.3}m, DR_err={:.3}m, n_obs={}, dist={:.1}m",
+                    step,
+                    ekf_err,
+                    dr_err,
                     generate_observations(&true_pose, &landmarks, &config, false).len(),
-                    dist_from_origin);
+                    dist_from_origin
+                );
             }
         }
 
-        let ekf_err_final = ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
-        let dr_err_final = ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
+        let ekf_err_final =
+            ((true_pose[0] - state.x()).powi(2) + (true_pose[1] - state.y()).powi(2)).sqrt();
+        let dr_err_final =
+            ((true_pose[0] - dr_pose[0]).powi(2) + (true_pose[1] - dr_pose[1]).powi(2)).sqrt();
 
         println!("\n=== Summary ===");
-        println!("Phase 1 (visible):  EKF_err={:.3}m, DR_err={:.3}m", ekf_err_phase1, dr_err_phase1);
-        println!("Phase 2 (blind):    EKF_err={:.3}m, DR_err={:.3}m", ekf_err_phase2, dr_err_phase2);
-        println!("Phase 3 (recovery): EKF_err={:.3}m, DR_err={:.3}m", ekf_err_final, dr_err_final);
+        println!(
+            "Phase 1 (visible):  EKF_err={:.3}m, DR_err={:.3}m",
+            ekf_err_phase1, dr_err_phase1
+        );
+        println!(
+            "Phase 2 (blind):    EKF_err={:.3}m, DR_err={:.3}m",
+            ekf_err_phase2, dr_err_phase2
+        );
+        println!(
+            "Phase 3 (recovery): EKF_err={:.3}m, DR_err={:.3}m",
+            ekf_err_final, dr_err_final
+        );
 
         // Key checks
         let recovered = ekf_err_final < ekf_err_phase2 * 0.5; // Error should reduce significantly
         let ekf_better_than_dr = ekf_err_final < dr_err_final;
 
-        println!("\nRecovery check: EKF error reduced from {:.3}m to {:.3}m ({})",
-            ekf_err_phase2, ekf_err_final,
-            if recovered { "RECOVERED" } else { "FAILED TO RECOVER" });
-        println!("EKF vs DR: {} (EKF={:.3}m, DR={:.3}m)",
-            if ekf_better_than_dr { "EKF better" } else { "DR better or equal" },
-            ekf_err_final, dr_err_final);
+        println!(
+            "\nRecovery check: EKF error reduced from {:.3}m to {:.3}m ({})",
+            ekf_err_phase2,
+            ekf_err_final,
+            if recovered {
+                "RECOVERED"
+            } else {
+                "FAILED TO RECOVER"
+            }
+        );
+        println!(
+            "EKF vs DR: {} (EKF={:.3}m, DR={:.3}m)",
+            if ekf_better_than_dr {
+                "EKF better"
+            } else {
+                "DR better or equal"
+            },
+            ekf_err_final,
+            dr_err_final
+        );
 
         // Diagnostic: check landmark drift in EKF map
         println!("\n=== Diagnostic: Landmark Drift in EKF Map ===");
-        println!("EKF robot pose: ({:.2}, {:.2}, {:.2}°)",
-            state.x(), state.y(), state.theta().to_degrees());
-        println!("True robot pose: ({:.2}, {:.2}, {:.2}°)",
-            true_pose[0], true_pose[1], true_pose[2].to_degrees());
+        println!(
+            "EKF robot pose: ({:.2}, {:.2}, {:.2}°)",
+            state.x(),
+            state.y(),
+            state.theta().to_degrees()
+        );
+        println!(
+            "True robot pose: ({:.2}, {:.2}, {:.2}°)",
+            true_pose[0],
+            true_pose[1],
+            true_pose[2].to_degrees()
+        );
 
         for i in 0..state.n_landmarks.min(landmarks.len()) {
             if let Some(est_lm) = state.landmark(i) {
                 let true_lm = &landmarks[i];
-                let lm_err = ((est_lm[0] - true_lm[0]).powi(2) + (est_lm[1] - true_lm[1]).powi(2)).sqrt();
-                println!("  Landmark {}: EKF=({:.2}, {:.2}), True=({:.2}, {:.2}), drift={:.2}m",
-                    i, est_lm[0], est_lm[1], true_lm[0], true_lm[1], lm_err);
+                let lm_err =
+                    ((est_lm[0] - true_lm[0]).powi(2) + (est_lm[1] - true_lm[1]).powi(2)).sqrt();
+                println!(
+                    "  Landmark {}: EKF=({:.2}, {:.2}), True=({:.2}, {:.2}), drift={:.2}m",
+                    i, est_lm[0], est_lm[1], true_lm[0], true_lm[1], lm_err
+                );
             }
         }
 
@@ -2209,8 +2546,10 @@ mod tests {
             let robot_pose = state.robot_pose();
             let obs_lm_x = robot_pose[0] + obs.range * (robot_pose[2] + obs.bearing).cos();
             let obs_lm_y = robot_pose[1] + obs.range * (robot_pose[2] + obs.bearing).sin();
-            println!("  Obs {}: computed at ({:.2}, {:.2}) from EKF pose, true at ({:.2}, {:.2})",
-                true_idx, obs_lm_x, obs_lm_y, landmarks[*true_idx][0], landmarks[*true_idx][1]);
+            println!(
+                "  Obs {}: computed at ({:.2}, {:.2}) from EKF pose, true at ({:.2}, {:.2})",
+                true_idx, obs_lm_x, obs_lm_y, landmarks[*true_idx][0], landmarks[*true_idx][1]
+            );
         }
 
         // Analyze EKF-SLAM recovery
@@ -2220,7 +2559,10 @@ mod tests {
             println!("The Mahalanobis distance with grown covariance allowed data association.");
         } else {
             println!("FAILED: EKF-SLAM did not recover from large drift.");
-            println!("\nThe robot pose drifted {:.1}m during the blind phase.", ekf_err_phase2);
+            println!(
+                "\nThe robot pose drifted {:.1}m during the blind phase.",
+                ekf_err_phase2
+            );
             println!("Possible causes:");
             println!("1. Innovation gating rejected observations");
             println!("2. Data association matched wrong landmarks");

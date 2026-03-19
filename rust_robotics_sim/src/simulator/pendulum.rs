@@ -248,6 +248,10 @@ impl InvertedPendulum {
         }
     }
 
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
     pub fn x_position(&self) -> f32 {
         self.state[0]
     }
@@ -377,9 +381,12 @@ impl Draw for InvertedPendulum {
                                     ComboBox::from_label("")
                                         .selected_text(self.controller.to_string())
                                         .show_ui(ui, |ui| {
-                                            for options in
-                                                [Controller::lqr(self.model), Controller::pid(), Controller::mpc(self.model)]
-                                                    .iter()
+                                            for options in [
+                                                Controller::lqr(self.model),
+                                                Controller::pid(),
+                                                Controller::mpc(self.model),
+                                            ]
+                                            .iter()
                                             {
                                                 ui.selectable_value(
                                                     &mut self.controller,

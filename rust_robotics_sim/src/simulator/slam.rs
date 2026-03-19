@@ -1,8 +1,8 @@
-use super::*;
 use super::common::{
     rand_noise,
     visualization::{colors, covariance_ellipse_points, draw_labeled_vehicle, draw_trajectory},
 };
+use super::*;
 
 use egui::{Color32, DragValue, Ui};
 use egui_plot::{Line, LineStyle, PlotPoints, PlotUi, Points, Polygon};
@@ -10,8 +10,8 @@ use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
 use rb::control::vehicle::VehicleParams;
 use rb::prelude::*;
 use rb::slam::{
-    generate_observations, motion_model, predict, update, EkfSlamConfig, EkfSlamState, Observation,
-    GraphSlam, Pose2D, Landmark2D, RobustKernelType,
+    generate_observations, motion_model, predict, update, EkfSlamConfig, EkfSlamState, GraphSlam,
+    Landmark2D, Observation, Pose2D, RobustKernelType,
 };
 use rust_robotics_algo as rb;
 use web_time::Instant;
@@ -26,7 +26,7 @@ const WORLD_SIZE: f32 = 40.0;
 const MIN_LANDMARK_SPACING: f32 = 5.0;
 
 /// Colors for different algorithms
-const EKF_COLOR: Color32 = Color32::from_rgb(66, 135, 245);   // Blue
+const EKF_COLOR: Color32 = Color32::from_rgb(66, 135, 245); // Blue
 const GRAPH_COLOR: Color32 = Color32::from_rgb(156, 39, 176); // Purple
 
 /// Drive mode for the SLAM vehicle
@@ -126,7 +126,14 @@ impl EkfSlamInstance {
         self.avg_update_us = 0.0;
     }
 
-    fn step(&mut self, config: &EkfSlamConfig, v: f32, w: f32, dt: f32, observations: &[(usize, Observation)]) {
+    fn step(
+        &mut self,
+        config: &EkfSlamConfig,
+        v: f32,
+        w: f32,
+        dt: f32,
+        observations: &[(usize, Observation)],
+    ) {
         if !self.enabled {
             return;
         }
@@ -218,7 +225,11 @@ impl GraphSlamInstance {
         let config = self.graph.config.clone();
         self.graph = GraphSlam::new();
         self.graph.config = config;
-        self.graph.add_pose(Pose2D::new(initial_pose[0], initial_pose[1], initial_pose[2]));
+        self.graph.add_pose(Pose2D::new(
+            initial_pose[0],
+            initial_pose[1],
+            initial_pose[2],
+        ));
         self.landmark_to_graph_idx = vec![None; n_landmarks];
         self.prev_keyframe_idx = 0;
         self.accumulated_motion = (0.0, 0.0, 0.0);
@@ -299,7 +310,12 @@ impl GraphSlamInstance {
             0.5 * trans.max(0.1),
             0.2 * rot.max(0.05),
         ));
-        self.graph.add_odometry(self.prev_keyframe_idx, new_pose_idx, odom_measurement, &odom_cov);
+        self.graph.add_odometry(
+            self.prev_keyframe_idx,
+            new_pose_idx,
+            odom_measurement,
+            &odom_cov,
+        );
 
         // Observation constraints - tighter than odometry to give observations more weight
         let obs_cov = Matrix2::from_diagonal(&nalgebra::Vector2::new(0.1, 0.02));
@@ -320,7 +336,13 @@ impl GraphSlamInstance {
                 idx
             };
 
-            self.graph.add_observation(new_pose_idx, graph_lm_idx, obs.range, obs.bearing, &obs_cov);
+            self.graph.add_observation(
+                new_pose_idx,
+                graph_lm_idx,
+                obs.range,
+                obs.bearing,
+                &obs_cov,
+            );
         }
 
         self.prev_keyframe_idx = new_pose_idx;
@@ -360,12 +382,18 @@ impl GraphSlamInstance {
     fn get_pose(&self) -> rb::Vector3 {
         let prev_kf = &self.graph.poses[self.prev_keyframe_idx];
         let (acc_x, acc_y, acc_theta) = self.accumulated_motion;
-        rb::Vector3::new(prev_kf.x + acc_x, prev_kf.y + acc_y, prev_kf.theta + acc_theta)
+        rb::Vector3::new(
+            prev_kf.x + acc_x,
+            prev_kf.y + acc_y,
+            prev_kf.theta + acc_theta,
+        )
     }
 }
 
 /// SLAM demonstration with shared vehicle and multiple algorithms
 pub struct SlamDemo {
+    /// Unique simulation id
+    id: usize,
     /// True robot state [x, y, θ]
     x_true: rb::Vector3,
     /// True landmark positions
@@ -410,11 +438,12 @@ pub struct SlamDemo {
 }
 
 impl SlamDemo {
-    pub fn new(_id: usize, _time: f32) -> Self {
+    pub fn new(id: usize, _time: f32) -> Self {
         let n_landmarks = 8;
         let landmarks_true = generate_landmarks(n_landmarks);
 
         Self {
+            id,
             x_true: rb::Vector3::zeros(),
             landmarks_true,
             x_dr: rb::Vector3::zeros(),
@@ -436,6 +465,10 @@ impl SlamDemo {
             vehicle_params: VehicleParams::default(),
             step_count: 0,
         }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
     }
 
     /// Handle keyboard input for manual mode
@@ -492,13 +525,20 @@ impl SlamDemo {
         let mut output = String::new();
 
         // Header
-        output.push_str(&format!("=== SLAM Debug Dump (step {}) ===\n\n", self.step_count));
+        output.push_str(&format!(
+            "=== SLAM Debug Dump (step {}) ===\n\n",
+            self.step_count
+        ));
 
         // True state
         output.push_str("--- True State ---\n");
-        output.push_str(&format!("Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
-            self.x_true[0], self.x_true[1],
-            self.x_true[2].to_degrees(), self.x_true[2]));
+        output.push_str(&format!(
+            "Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
+            self.x_true[0],
+            self.x_true[1],
+            self.x_true[2].to_degrees(),
+            self.x_true[2]
+        ));
         output.push_str(&format!("Landmarks ({}):\n", self.landmarks_true.len()));
         for (i, lm) in self.landmarks_true.iter().enumerate() {
             output.push_str(&format!("  LM{}: ({:.3}, {:.3})\n", i, lm[0], lm[1]));
@@ -506,34 +546,56 @@ impl SlamDemo {
 
         // Dead reckoning
         output.push_str("\n--- Dead Reckoning ---\n");
-        output.push_str(&format!("Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
-            self.x_dr[0], self.x_dr[1],
-            self.x_dr[2].to_degrees(), self.x_dr[2]));
+        output.push_str(&format!(
+            "Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
+            self.x_dr[0],
+            self.x_dr[1],
+            self.x_dr[2].to_degrees(),
+            self.x_dr[2]
+        ));
         let dr_err = ((self.x_true[0] - self.x_dr[0]).powi(2)
-            + (self.x_true[1] - self.x_dr[1]).powi(2)).sqrt();
+            + (self.x_true[1] - self.x_dr[1]).powi(2))
+        .sqrt();
         output.push_str(&format!("Position error: {:.3}m\n", dr_err));
 
         // EKF state
         if self.ekf.enabled {
             output.push_str("\n--- EKF-SLAM State ---\n");
             let ekf_pose = self.ekf.get_pose();
-            output.push_str(&format!("Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
-                ekf_pose[0], ekf_pose[1],
-                ekf_pose[2].to_degrees(), ekf_pose[2]));
+            output.push_str(&format!(
+                "Robot: x={:.3}, y={:.3}, θ={:.3}° ({:.3} rad)\n",
+                ekf_pose[0],
+                ekf_pose[1],
+                ekf_pose[2].to_degrees(),
+                ekf_pose[2]
+            ));
             let ekf_err = ((self.x_true[0] - ekf_pose[0]).powi(2)
-                + (self.x_true[1] - ekf_pose[1]).powi(2)).sqrt();
+                + (self.x_true[1] - ekf_pose[1]).powi(2))
+            .sqrt();
             output.push_str(&format!("Position error: {:.3}m\n", ekf_err));
-            output.push_str(&format!("Heading error: {:.3}°\n",
-                (self.x_true[2] - ekf_pose[2]).to_degrees()));
+            output.push_str(&format!(
+                "Heading error: {:.3}°\n",
+                (self.x_true[2] - ekf_pose[2]).to_degrees()
+            ));
 
             // Robot covariance
             let cov = self.ekf.state.robot_covariance();
-            output.push_str(&format!("Robot covariance (diag): σx²={:.4}, σy²={:.4}, σθ²={:.4}\n",
-                cov[(0,0)], cov[(1,1)], cov[(2,2)]));
-            output.push_str(&format!("Position variance: {:.4}\n", cov[(0,0)] + cov[(1,1)]));
+            output.push_str(&format!(
+                "Robot covariance (diag): σx²={:.4}, σy²={:.4}, σθ²={:.4}\n",
+                cov[(0, 0)],
+                cov[(1, 1)],
+                cov[(2, 2)]
+            ));
+            output.push_str(&format!(
+                "Position variance: {:.4}\n",
+                cov[(0, 0)] + cov[(1, 1)]
+            ));
 
             // EKF landmarks
-            output.push_str(&format!("EKF Landmarks ({}):\n", self.ekf.state.n_landmarks));
+            output.push_str(&format!(
+                "EKF Landmarks ({}):\n",
+                self.ekf.state.n_landmarks
+            ));
             for i in 0..self.ekf.state.n_landmarks {
                 if let Some(lm) = self.ekf.state.landmark(i) {
                     let true_lm = if i < self.landmarks_true.len() {
@@ -541,7 +603,8 @@ impl SlamDemo {
                     } else {
                         None
                     };
-                    let drift = true_lm.map(|t| ((lm[0] - t[0]).powi(2) + (lm[1] - t[1]).powi(2)).sqrt());
+                    let drift =
+                        true_lm.map(|t| ((lm[0] - t[0]).powi(2) + (lm[1] - t[1]).powi(2)).sqrt());
                     output.push_str(&format!("  LM{}: ({:.3}, {:.3})", i, lm[0], lm[1]));
                     if let Some(d) = drift {
                         output.push_str(&format!(" [drift: {:.3}m]", d));
@@ -554,12 +617,23 @@ impl SlamDemo {
         }
 
         // Current observations
-        output.push_str(&format!("\n--- Current Observations ({}) ---\n", self.current_observations.len()));
+        output.push_str(&format!(
+            "\n--- Current Observations ({}) ---\n",
+            self.current_observations.len()
+        ));
         for (true_idx, obs) in &self.current_observations {
             let true_lm = &self.landmarks_true[*true_idx];
-            output.push_str(&format!("  Obs to LM{}: range={:.3}m, bearing={:.3}° ({:.3} rad)\n",
-                true_idx, obs.range, obs.bearing.to_degrees(), obs.bearing));
-            output.push_str(&format!("    True LM position: ({:.3}, {:.3})\n", true_lm[0], true_lm[1]));
+            output.push_str(&format!(
+                "  Obs to LM{}: range={:.3}m, bearing={:.3}° ({:.3} rad)\n",
+                true_idx,
+                obs.range,
+                obs.bearing.to_degrees(),
+                obs.bearing
+            ));
+            output.push_str(&format!(
+                "    True LM position: ({:.3}, {:.3})\n",
+                true_lm[0], true_lm[1]
+            ));
 
             // Compute where EKF thinks this observation points
             if self.ekf.enabled {
@@ -567,8 +641,10 @@ impl SlamDemo {
                 let obs_x = ekf_pose[0] + obs.range * (ekf_pose[2] + obs.bearing).cos();
                 let obs_y = ekf_pose[1] + obs.range * (ekf_pose[2] + obs.bearing).sin();
                 let obs_err = ((obs_x - true_lm[0]).powi(2) + (obs_y - true_lm[1]).powi(2)).sqrt();
-                output.push_str(&format!("    EKF-computed position: ({:.3}, {:.3}) [err: {:.3}m]\n",
-                    obs_x, obs_y, obs_err));
+                output.push_str(&format!(
+                    "    EKF-computed position: ({:.3}, {:.3}) [err: {:.3}m]\n",
+                    obs_x, obs_y, obs_err
+                ));
             }
         }
 
@@ -611,14 +687,20 @@ impl SlamDemo {
             let mut min_dist = f32::MAX;
             let mut closest_true_idx = 0;
             for (true_idx, true_lm) in self.landmarks_true.iter().enumerate() {
-                let dist = ((lm.x - true_lm[0] as f32).powi(2) + (lm.y - true_lm[1] as f32).powi(2)).sqrt();
+                let dist = ((lm.x - true_lm[0] as f32).powi(2)
+                    + (lm.y - true_lm[1] as f32).powi(2))
+                .sqrt();
                 if dist < min_dist {
                     min_dist = dist;
                     closest_true_idx = true_idx;
                 }
             }
             slam_to_true_mapping.push((slam_idx, closest_true_idx, min_dist));
-            self.graph.graph.diagnostics.landmark_errors.push((slam_idx, min_dist));
+            self.graph
+                .graph
+                .diagnostics
+                .landmark_errors
+                .push((slam_idx, min_dist));
         }
 
         let filename = format!("graph_slam_debug_{}.txt", std::process::id());
@@ -631,15 +713,25 @@ impl SlamDemo {
 
                 // True robot state
                 let _ = writeln!(file, "--- True Robot State ---");
-                let _ = writeln!(file, "Position: ({:.3}, {:.3})", self.x_true[0], self.x_true[1]);
-                let _ = writeln!(file, "Heading: {:.1}° ({:.3} rad)", self.x_true[2].to_degrees(), self.x_true[2]);
+                let _ = writeln!(
+                    file,
+                    "Position: ({:.3}, {:.3})",
+                    self.x_true[0], self.x_true[1]
+                );
+                let _ = writeln!(
+                    file,
+                    "Heading: {:.1}° ({:.3} rad)",
+                    self.x_true[2].to_degrees(),
+                    self.x_true[2]
+                );
                 let _ = writeln!(file, "");
 
                 // Graph pose error
                 if !self.graph.graph.poses.is_empty() {
                     let last_pose = &self.graph.graph.poses[self.graph.graph.poses.len() - 1];
                     let pos_err = ((last_pose.x - self.x_true[0] as f32).powi(2)
-                        + (last_pose.y - self.x_true[1] as f32).powi(2)).sqrt();
+                        + (last_pose.y - self.x_true[1] as f32).powi(2))
+                    .sqrt();
                     let _ = writeln!(file, "Graph SLAM position error: {:.3}m", pos_err);
                     let _ = writeln!(file, "");
                 }
@@ -654,8 +746,11 @@ impl SlamDemo {
                 for (slam_idx, true_idx, dist) in &slam_to_true_mapping {
                     let lm = &self.graph.graph.landmarks[*slam_idx];
                     let true_lm = &self.landmarks_true[*true_idx];
-                    let _ = writeln!(file, "  SLAM LM {} ({:.2}, {:.2}) -> True LM {} ({:.2}, {:.2}), error={:.3}m",
-                        slam_idx, lm.x, lm.y, true_idx, true_lm[0], true_lm[1], dist);
+                    let _ = writeln!(
+                        file,
+                        "  SLAM LM {} ({:.2}, {:.2}) -> True LM {} ({:.2}, {:.2}), error={:.3}m",
+                        slam_idx, lm.x, lm.y, true_idx, true_lm[0], true_lm[1], dist
+                    );
                 }
                 let _ = writeln!(file, "");
 
@@ -667,7 +762,10 @@ impl SlamDemo {
                 let _ = writeln!(file, "");
 
                 // True LM -> SLAM LM mapping (data association)
-                let _ = writeln!(file, "--- True LM -> SLAM LM Mapping (Data Association) ---");
+                let _ = writeln!(
+                    file,
+                    "--- True LM -> SLAM LM Mapping (Data Association) ---"
+                );
                 for (true_idx, slam_idx) in self.graph.landmark_to_graph_idx.iter().enumerate() {
                     if let Some(slam_idx) = slam_idx {
                         let _ = writeln!(file, "  True LM {} -> SLAM LM {}", true_idx, slam_idx);
@@ -676,11 +774,25 @@ impl SlamDemo {
                 let _ = writeln!(file, "");
 
                 // Current observations
-                let _ = writeln!(file, "--- Current Observations ({}) ---", self.current_observations.len());
+                let _ = writeln!(
+                    file,
+                    "--- Current Observations ({}) ---",
+                    self.current_observations.len()
+                );
                 for (true_idx, obs) in &self.current_observations {
-                    let slam_idx = self.graph.landmark_to_graph_idx.get(*true_idx).and_then(|x| *x);
-                    let _ = writeln!(file, "  True LM {} (SLAM LM {:?}): range={:.3}m, bearing={:.1}°",
-                        true_idx, slam_idx, obs.range, obs.bearing.to_degrees());
+                    let slam_idx = self
+                        .graph
+                        .landmark_to_graph_idx
+                        .get(*true_idx)
+                        .and_then(|x| *x);
+                    let _ = writeln!(
+                        file,
+                        "  True LM {} (SLAM LM {:?}): range={:.3}m, bearing={:.1}°",
+                        true_idx,
+                        slam_idx,
+                        obs.range,
+                        obs.bearing.to_degrees()
+                    );
                 }
 
                 println!("Saved graph SLAM diagnostics to: {}", filename);
@@ -735,8 +847,15 @@ impl Simulate for SlamDemo {
             generate_observations(&self.x_true, &self.landmarks_true, &self.config, true);
 
         // Both algorithms use noisy control (simulating real odometry)
-        self.ekf.step(&self.config, v_noisy, w_noisy, dt, &self.current_observations);
-        self.graph.step(v_noisy, w_noisy, dt, &self.current_observations);
+        self.ekf.step(
+            &self.config,
+            v_noisy,
+            w_noisy,
+            dt,
+            &self.current_observations,
+        );
+        self.graph
+            .step(v_noisy, w_noisy, dt, &self.current_observations);
 
         self.step_count += 1;
         self.update_history();
@@ -821,14 +940,21 @@ impl Draw for SlamDemo {
             // EKF vehicle
             let ekf_pose = self.ekf.get_pose();
             draw_labeled_vehicle(
-                plot_ui, &ekf_pose, self.velocity, "EKF", 3.0, 0.0,
-                &self.vehicle_params, "EKF Estimate",
+                plot_ui,
+                &ekf_pose,
+                self.velocity,
+                "EKF",
+                3.0,
+                0.0,
+                &self.vehicle_params,
+                "EKF Estimate",
             );
 
             // EKF robot covariance
             if self.show_covariance {
                 let cov = self.ekf.state.robot_covariance();
-                let pos_cov = nalgebra::Matrix2::new(cov[(0, 0)], cov[(0, 1)], cov[(1, 0)], cov[(1, 1)]);
+                let pos_cov =
+                    nalgebra::Matrix2::new(cov[(0, 0)], cov[(0, 1)], cov[(1, 0)], cov[(1, 1)]);
                 let ellipse = covariance_ellipse_points(ekf_pose[0], ekf_pose[1], &pos_cov, 2.0);
                 plot_ui.polygon(
                     Polygon::new("", PlotPoints::new(ellipse))
@@ -856,10 +982,13 @@ impl Draw for SlamDemo {
                     let from = &self.graph.graph.poses[c.from_idx];
                     let to = &self.graph.graph.poses[c.to_idx];
                     plot_ui.line(
-                        Line::new("", PlotPoints::new(vec![
-                            [from.x as f64, from.y as f64],
-                            [to.x as f64, to.y as f64],
-                        ]))
+                        Line::new(
+                            "",
+                            PlotPoints::new(vec![
+                                [from.x as f64, from.y as f64],
+                                [to.x as f64, to.y as f64],
+                            ]),
+                        )
                         .style(LineStyle::Dashed { length: 4.0 })
                         .color(Color32::from_rgb(255, 165, 0)) // Orange for loop closures
                         .width(2.0),
@@ -883,8 +1012,14 @@ impl Draw for SlamDemo {
             // Graph vehicle
             let graph_pose = self.graph.get_pose();
             draw_labeled_vehicle(
-                plot_ui, &graph_pose, self.velocity, "Graph", 5.0, 0.0,
-                &self.vehicle_params, "Graph Estimate",
+                plot_ui,
+                &graph_pose,
+                self.velocity,
+                "Graph",
+                5.0,
+                0.0,
+                &self.vehicle_params,
+                "Graph Estimate",
             );
         }
 
@@ -894,10 +1029,13 @@ impl Draw for SlamDemo {
                 if *landmark_idx < self.landmarks_true.len() {
                     let lm = &self.landmarks_true[*landmark_idx];
                     plot_ui.line(
-                        Line::new("", PlotPoints::new(vec![
-                            [self.x_true[0] as f64, self.x_true[1] as f64],
-                            [lm[0] as f64, lm[1] as f64],
-                        ]))
+                        Line::new(
+                            "",
+                            PlotPoints::new(vec![
+                                [self.x_true[0] as f64, self.x_true[1] as f64],
+                                [lm[0] as f64, lm[1] as f64],
+                            ]),
+                        )
                         .style(LineStyle::Dotted { spacing: 5.0 })
                         .color(colors::OBSERVATION)
                         .width(1.5),
@@ -912,19 +1050,34 @@ impl Draw for SlamDemo {
         // Draw dead reckoning
         if self.show_dr {
             draw_trajectory(
-                plot_ui, self.h_dr.iter(), colors::DR, 1.5,
+                plot_ui,
+                self.h_dr.iter(),
+                colors::DR,
+                1.5,
                 Some(LineStyle::Dashed { length: 8.0 }),
             );
             draw_labeled_vehicle(
-                plot_ui, &self.x_dr, self.velocity, "DR", 3.0, 0.0,
-                &self.vehicle_params, "Dead Reckoning",
+                plot_ui,
+                &self.x_dr,
+                self.velocity,
+                "DR",
+                3.0,
+                0.0,
+                &self.vehicle_params,
+                "Dead Reckoning",
             );
         }
 
         // Draw true vehicle
         draw_labeled_vehicle(
-            plot_ui, &self.x_true, self.velocity, "GT", 3.0, 0.0,
-            &self.vehicle_params, "Ground Truth",
+            plot_ui,
+            &self.x_true,
+            self.velocity,
+            "GT",
+            3.0,
+            0.0,
+            &self.vehicle_params,
+            "Ground Truth",
         );
     }
 
@@ -1001,15 +1154,28 @@ impl Draw for SlamDemo {
                     ui.horizontal(|ui| {
                         ui.label("Motion:");
                         for mode in [DriveMode::Auto, DriveMode::Manual] {
-                            if ui.selectable_label(self.drive_mode == mode, mode.label()).clicked() {
+                            if ui
+                                .selectable_label(self.drive_mode == mode, mode.label())
+                                .clicked()
+                            {
                                 self.drive_mode = mode;
                             }
                         }
                     });
                     match self.drive_mode {
                         DriveMode::Auto => {
-                            ui.add(DragValue::new(&mut self.velocity).speed(0.05).range(0.1_f32..=3.0).prefix("v: "));
-                            ui.add(DragValue::new(&mut self.yaw_rate).speed(0.01).range(-0.5_f32..=0.5).prefix("ω: "));
+                            ui.add(
+                                DragValue::new(&mut self.velocity)
+                                    .speed(0.05)
+                                    .range(0.1_f32..=3.0)
+                                    .prefix("v: "),
+                            );
+                            ui.add(
+                                DragValue::new(&mut self.yaw_rate)
+                                    .speed(0.01)
+                                    .range(-0.5_f32..=0.5)
+                                    .prefix("ω: "),
+                            );
                         }
                         DriveMode::Manual => {
                             ui.label(format!("v: {:.1} m/s", self.keyboard.velocity));
@@ -1039,17 +1205,20 @@ impl Draw for SlamDemo {
                     if self.ekf.enabled {
                         let ekf_pose = self.ekf.get_pose();
                         let ekf_err = ((self.x_true[0] - ekf_pose[0]).powi(2)
-                            + (self.x_true[1] - ekf_pose[1]).powi(2)).sqrt();
+                            + (self.x_true[1] - ekf_pose[1]).powi(2))
+                        .sqrt();
                         ui.colored_label(EKF_COLOR, format!("{:.2}m", ekf_err));
                     }
                     if self.graph.enabled {
                         let graph_pose = self.graph.get_pose();
                         let graph_err = ((self.x_true[0] - graph_pose[0]).powi(2)
-                            + (self.x_true[1] - graph_pose[1]).powi(2)).sqrt();
+                            + (self.x_true[1] - graph_pose[1]).powi(2))
+                        .sqrt();
                         ui.colored_label(GRAPH_COLOR, format!("{:.2}m", graph_err));
                     }
                     let dr_err = ((self.x_true[0] - self.x_dr[0]).powi(2)
-                        + (self.x_true[1] - self.x_dr[1]).powi(2)).sqrt();
+                        + (self.x_true[1] - self.x_dr[1]).powi(2))
+                    .sqrt();
                     ui.label(format!("DR {:.2}m", dr_err));
                 });
             });
@@ -1085,7 +1254,9 @@ impl Draw for SlamDemo {
     fn plot(&self, plot_ui: &mut PlotUi<'_>) {
         // EKF error over time
         if self.ekf.enabled {
-            let ekf_errors: PlotPoints<'_> = self.h_true.iter()
+            let ekf_errors: PlotPoints<'_> = self
+                .h_true
+                .iter()
                 .zip(self.ekf.h_est.iter())
                 .enumerate()
                 .map(|(i, (t, e))| {
@@ -1102,7 +1273,9 @@ impl Draw for SlamDemo {
 
         // Graph error over time
         if self.graph.enabled {
-            let graph_errors: PlotPoints<'_> = self.h_true.iter()
+            let graph_errors: PlotPoints<'_> = self
+                .h_true
+                .iter()
                 .zip(self.graph.h_est.iter())
                 .enumerate()
                 .map(|(i, (t, e))| {
@@ -1118,7 +1291,9 @@ impl Draw for SlamDemo {
         }
 
         // DR error
-        let dr_errors: PlotPoints<'_> = self.h_true.iter()
+        let dr_errors: PlotPoints<'_> = self
+            .h_true
+            .iter()
             .zip(self.h_dr.iter())
             .enumerate()
             .map(|(i, (t, d))| {
@@ -1134,7 +1309,10 @@ impl Draw for SlamDemo {
 
         // EKF timing (scaled to ms, dashed line)
         if self.ekf.enabled && !self.ekf.h_update_us.is_empty() {
-            let ekf_timing: PlotPoints<'_> = self.ekf.h_update_us.iter()
+            let ekf_timing: PlotPoints<'_> = self
+                .ekf
+                .h_update_us
+                .iter()
                 .enumerate()
                 .map(|(i, &t)| [i as f64 * 0.01, t / 1000.0]) // Convert μs to ms
                 .collect();
@@ -1148,7 +1326,10 @@ impl Draw for SlamDemo {
 
         // Graph timing (scaled to ms, dashed line)
         if self.graph.enabled && !self.graph.h_update_us.is_empty() {
-            let graph_timing: PlotPoints<'_> = self.graph.h_update_us.iter()
+            let graph_timing: PlotPoints<'_> = self
+                .graph
+                .h_update_us
+                .iter()
                 .enumerate()
                 .map(|(i, &t)| [i as f64 * 0.01, t / 1000.0]) // Convert μs to ms
                 .collect();

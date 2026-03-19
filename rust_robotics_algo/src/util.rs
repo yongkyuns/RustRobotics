@@ -4,9 +4,9 @@ use nalgebra::allocator::Allocator;
 use nalgebra::constraint::{SameNumberOfColumns, SameNumberOfRows, ShapeConstraint};
 use nalgebra::dimension::{DimAdd, DimSum};
 use nalgebra::storage::{Storage, StorageMut};
-use nalgebra::{DefaultAllocator, OMatrix };
+use nalgebra::{ArrayStorage, Const};
+use nalgebra::{DefaultAllocator, OMatrix};
 use nalgebra::{Dim, Matrix, Scalar};
-use nalgebra::{Const, ArrayStorage};
 use num_traits::Zero;
 
 pub use core::f32::consts::PI;
@@ -25,54 +25,51 @@ pub type RowVector4 = nalgebra::RowVector4<f32>;
 pub type Mat<const M: usize, const N: usize, S = f32> =
     Matrix<S, Const<M>, Const<N>, ArrayStorage<S, M, N>>;
 
-pub type Vector<const M: usize, S = f32> =
-    Matrix<S, Const<M>, Const<1>, ArrayStorage<S, M, 1>>;
+pub type Vector<const M: usize, S = f32> = Matrix<S, Const<M>, Const<1>, ArrayStorage<S, M, 1>>;
 
-pub type RowVector<const M: usize, S = f32> =
-    Matrix<S, Const<1>, Const<M>, ArrayStorage<S, 1, M>>;
+pub type RowVector<const M: usize, S = f32> = Matrix<S, Const<1>, Const<M>, ArrayStorage<S, 1, M>>;
 
-
-pub trait MatrixUtil{
-    fn get_diagonal(&self, index:usize)->f32;
+pub trait MatrixUtil {
+    fn get_diagonal(&self, index: usize) -> f32;
 }
 
-impl MatrixUtil for Matrix2{
-    fn get_diagonal(&self, index:usize)->f32{
+impl MatrixUtil for Matrix2 {
+    fn get_diagonal(&self, index: usize) -> f32 {
         *self.diagonal().get(index).unwrap()
     }
 }
 
-pub trait Point{
-    fn x(&self)->f32;    
-    fn y(&self)->f32;    
+pub trait Point {
+    fn x(&self) -> f32;
+    fn y(&self) -> f32;
 }
 
-impl Point for Vector2{
-    fn x(&self)->f32{
+impl Point for Vector2 {
+    fn x(&self) -> f32 {
         *self.get(0).expect("Cannot get 1st element of Vector2")
     }
-    fn y(&self)->f32{
+    fn y(&self) -> f32 {
         *self.get(1).expect("Cannot get 2nd element of Vector2")
-    }   
+    }
 }
 
-pub fn exp(u:f32)->f32{
+pub fn exp(u: f32) -> f32 {
     u.exp()
 }
 
-pub fn sqrt(u:f32)->f32{
+pub fn sqrt(u: f32) -> f32 {
     u.sqrt()
 }
 
-pub fn hypot(x:f32,y:f32)->f32{
-    (x*x + y*y).sqrt()
+pub fn hypot(x: f32, y: f32) -> f32 {
+    (x * x + y * y).sqrt()
 }
 
-pub fn sin(u:f32)->f32{
+pub fn sin(u: f32) -> f32 {
     u.sin()
 }
 
-pub fn cos(u:f32)->f32{
+pub fn cos(u: f32) -> f32 {
     u.cos()
 }
 
@@ -265,7 +262,6 @@ where
     OMatrix::zeros_generic(rows, cols)
 }
 
-
 #[macro_export]
 macro_rules! block {
     ($( $( $x: expr ),*);*) => {
@@ -365,7 +361,7 @@ macro_rules! block_diag {
 macro_rules! diag {
     (
         $(
-            $x:expr        
+            $x:expr
         ),*
     )=>{{
         use nalgebra::{ SMatrix, vector };
@@ -377,28 +373,27 @@ macro_rules! diag {
 macro_rules! eye {
     (
         $size:expr        
-    )=>{{
-        use nalgebra::{ SMatrix, SVector };
+    ) => {{
+        use nalgebra::{SMatrix, SVector};
         SMatrix::from_diagonal(&SVector::from([1.0; $size]))
     }};
     (
         $size:expr,
         $off_diag:expr      
-    )=>{{
-		// use crate::S;
-        let mut out = zeros!($size,$size);
+    ) => {{
+        // use crate::S;
+        let mut out = zeros!($size, $size);
         let offset = (($off_diag as f32).abs() as usize);
-        if $off_diag > 0{
+        if $off_diag > 0 {
             for i in offset..$size {
-                out[(i-offset, i)] = 1.0;
+                out[(i - offset, i)] = 1.0;
             }
-        }else{
-            for i in 0..$size-offset {
-                out[(i+offset, i)] = 1.0;
+        } else {
+            for i in 0..$size - offset {
+                out[(i + offset, i)] = 1.0;
             }
         }
         out
-
     }};
 }
 
@@ -407,7 +402,7 @@ macro_rules! dot {
     ($mat:expr, $vec:expr) => {{
         let mut out = ($vec).clone_owned();
         let v = ($vec).transpose();
-        for i in 0..out.nrows(){
+        for i in 0..out.nrows() {
             out[i] = ($mat).row(i).dot(&v);
         }
         out
@@ -417,7 +412,7 @@ macro_rules! dot {
 #[macro_export]
 macro_rules! kron {
     ($a:expr, $b:expr) => {{
-		($a).kronecker(&$b)
+        ($a).kronecker(&$b)
     }};
 }
 
@@ -503,4 +498,3 @@ macro_rules! disp {
     };
     () => {};
 }
-

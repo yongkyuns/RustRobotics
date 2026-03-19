@@ -2,7 +2,6 @@ mod lqr;
 mod mpc;
 mod pid;
 
-pub use lqr::*;
 pub use mpc::*;
 pub use pid::*;
 

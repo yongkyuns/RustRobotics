@@ -128,7 +128,7 @@ impl<'a> AStarPlanner<'a> {
             (1, 0),
             (-1, 0),
             (0, 1),
-            (0, -1),  // Cardinal
+            (0, -1), // Cardinal
             (1, 1),
             (1, -1),
             (-1, 1),
@@ -188,7 +188,10 @@ impl<'a> AStarPlanner<'a> {
 
                 let tentative_g = current.g + move_cost;
 
-                let current_g = g_scores.get(&neighbor_pos).copied().unwrap_or(f32::INFINITY);
+                let current_g = g_scores
+                    .get(&neighbor_pos)
+                    .copied()
+                    .unwrap_or(f32::INFINITY);
 
                 if tentative_g < current_g {
                     came_from.insert(neighbor_pos, current_pos);

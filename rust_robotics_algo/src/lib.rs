@@ -12,13 +12,12 @@ pub mod prelude {
     pub use crate::*;
     pub use control::inverted_pendulum;
     pub use localization::particle_filter as pf;
+    pub use nalgebra;
+    pub use nalgebra::{matrix, vector};
     pub use path_planning::{
         AStarPlanner, AStarResult, CircleObstacle, DijkstraPlanner, DijkstraResult, Grid,
         RrtConfig, RrtNode, RrtPlanner, RrtResult,
     };
-    pub use nalgebra;
-    pub use nalgebra::{matrix, vector};
-
 
     // #[cfg(not(feature = "libm"))]
     // pub mod std {

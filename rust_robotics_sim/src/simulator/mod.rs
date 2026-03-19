@@ -205,8 +205,7 @@ impl Simulator {
                 self.pendulums.iter_mut().for_each(|sim| sim.reset_state());
                 // Sync states
                 if let Some((first, rest)) = self.pendulums.split_first_mut() {
-                    rest.iter_mut()
-                        .for_each(|sim| sim.match_state_with(first));
+                    rest.iter_mut().for_each(|sim| sim.match_state_with(first));
                 }
             }
             SimMode::Localization => {
@@ -243,15 +242,15 @@ impl Simulator {
     fn add_simulation(&mut self) {
         match self.mode {
             SimMode::InvertedPendulum => {
-                let id = self.pendulums.iter().map(|s| *s.get_state().downcast_ref::<usize>().unwrap()).max().unwrap_or(0) + 1;
+                let id = self.pendulums.iter().map(|s| s.id()).max().unwrap_or(0) + 1;
                 self.pendulums.push(InvertedPendulum::new(id, self.time));
             }
             SimMode::Localization => {
-                let id = self.vehicles.iter().map(|s| *s.get_state().downcast_ref::<usize>().unwrap()).max().unwrap_or(0) + 1;
+                let id = self.vehicles.iter().map(|s| s.id()).max().unwrap_or(0) + 1;
                 self.vehicles.push(ParticleFilter::new(id, self.time));
             }
             SimMode::PathPlanning => {
-                let id = self.planners.iter().map(|s| *s.get_state().downcast_ref::<usize>().unwrap()).max().unwrap_or(0) + 1;
+                let id = self.planners.iter().map(|s| s.id()).max().unwrap_or(0) + 1;
                 let mut new_planner = PathPlanning::new(id, self.time);
                 // Apply shared settings
                 new_planner.update_grid_settings(
@@ -261,7 +260,7 @@ impl Simulator {
                 );
                 new_planner.set_env_mode(self.env_mode);
                 new_planner.set_continuous_obstacle_radius(self.continuous_obstacle_radius);
-                
+
                 // Copy state from first existing planner if available
                 if let Some(first) = self.planners.first() {
                     new_planner.copy_state_from(first);
@@ -269,7 +268,7 @@ impl Simulator {
                 self.planners.push(new_planner);
             }
             SimMode::Slam => {
-                let id = self.slam_demos.iter().map(|s| *s.get_state().downcast_ref::<usize>().unwrap()).max().unwrap_or(0) + 1;
+                let id = self.slam_demos.iter().map(|s| s.id()).max().unwrap_or(0) + 1;
                 self.slam_demos.push(SlamDemo::new(id, self.time));
             }
         }
@@ -307,14 +306,22 @@ impl Simulator {
         // Mode selector at the top
         ui.horizontal(|ui| {
             ui.label("Simulation:");
-            for mode in [SimMode::InvertedPendulum, SimMode::Localization, SimMode::PathPlanning, SimMode::Slam] {
-                if ui.selectable_label(self.mode == mode, mode.label()).clicked() {
+            for mode in [
+                SimMode::InvertedPendulum,
+                SimMode::Localization,
+                SimMode::PathPlanning,
+                SimMode::Slam,
+            ] {
+                if ui
+                    .selectable_label(self.mode == mode, mode.label())
+                    .clicked()
+                {
                     self.mode = mode;
                     self.time = 0.0;
                 }
             }
         });
-        
+
         // Check if we need to show help for current mode
         if !self.visited_modes.contains(&self.mode) {
             self.visited_modes.insert(self.mode);
@@ -364,7 +371,8 @@ impl Simulator {
                 if let Some(slam) = self.slam_demos.first_mut() {
                     ui.separator();
                     ui.label("Landmarks:");
-                    let response = ui.add(Slider::new(&mut slam.n_landmarks, 1..=50).show_value(true));
+                    let response =
+                        ui.add(Slider::new(&mut slam.n_landmarks, 1..=50).show_value(true));
                     // Only regenerate when slider is released, not during drag
                     if response.drag_stopped() {
                         slam.regenerate_landmarks();
@@ -391,19 +399,32 @@ impl Simulator {
                 // Common settings
                 ui.horizontal(|ui| {
                     ui.label("Env:");
-                    if ui.selectable_label(self.env_mode == EnvironmentMode::Grid, "Grid").clicked() {
+                    if ui
+                        .selectable_label(self.env_mode == EnvironmentMode::Grid, "Grid")
+                        .clicked()
+                    {
                         self.env_mode = EnvironmentMode::Grid;
                     }
-                    if ui.selectable_label(self.env_mode == EnvironmentMode::Continuous, "Continuous").clicked() {
+                    if ui
+                        .selectable_label(
+                            self.env_mode == EnvironmentMode::Continuous,
+                            "Continuous",
+                        )
+                        .clicked()
+                    {
                         self.env_mode = EnvironmentMode::Continuous;
                     }
-                    
+
                     if self.env_mode == EnvironmentMode::Continuous {
-                         ui.label("Obs Radius:");
-                         ui.add(DragValue::new(&mut self.continuous_obstacle_radius).range(0.1..=5.0).speed(0.1));
+                        ui.label("Obs Radius:");
+                        ui.add(
+                            DragValue::new(&mut self.continuous_obstacle_radius)
+                                .range(0.1..=5.0)
+                                .speed(0.1),
+                        );
                     }
                 });
-                
+
                 if self.env_mode == EnvironmentMode::Grid {
                     ui.horizontal(|ui| {
                         ui.label("Grid:");
@@ -439,8 +460,8 @@ impl Simulator {
 
                 // Sync env mode and radius always
                 for planner in &mut self.planners {
-                     planner.set_env_mode(self.env_mode);
-                     planner.set_continuous_obstacle_radius(self.continuous_obstacle_radius);
+                    planner.set_env_mode(self.env_mode);
+                    planner.set_continuous_obstacle_radius(self.continuous_obstacle_radius);
                 }
 
                 ui.separator();
@@ -491,7 +512,7 @@ impl Simulator {
                     ui.label("• Left-click on the map to set the Start point (Green).");
                     ui.label("• Left-click again to set the Goal point (Red).");
                     ui.label("• Once both are set, all active planners will run automatically.");
-                    
+
                     ui.add_space(5.0);
                     ui.label(RichText::new("2. Environment").strong());
                     if self.env_mode == EnvironmentMode::Grid {
@@ -502,7 +523,7 @@ impl Simulator {
                         ui.label("• Right-click: Add a circular obstacle at cursor.");
                         ui.label("• Right-click on existing obstacle: Remove it.");
                     }
-                    
+
                     ui.add_space(5.0);
                     ui.label(RichText::new("3. Planners").strong());
                     ui.label("• Click 'Add Planner' (top) to compare multiple algorithms.");
@@ -510,11 +531,11 @@ impl Simulator {
                     ui.label("• Compare Path Length, Execution Time, and Optimality Ratio.");
                 }
                 SimMode::Localization | SimMode::Slam => {
-                     ui.label("• Use Keyboard arrows to drive.");
+                    ui.label("• Use Keyboard arrows to drive.");
                 }
                 _ => {}
             }
-            
+
             ui.add_space(5.0);
             ui.label(RichText::new("Navigation").strong());
             ui.label("• Pan by dragging, or scroll (+ shift = horizontal).");
@@ -546,20 +567,18 @@ impl Simulator {
                 .allow_zoom(false);
         }
 
-        let plot_response = plot.show(ui, |plot_ui| {
-            match self.mode {
-                SimMode::InvertedPendulum => {
-                    self.pendulums.iter().for_each(|sim| sim.scene(plot_ui));
-                }
-                SimMode::Localization => {
-                    self.vehicles.iter().for_each(|sim| sim.scene(plot_ui));
-                }
-                SimMode::Slam => {
-                    self.slam_demos.iter().for_each(|sim| sim.scene(plot_ui));
-                }
-                SimMode::PathPlanning => {
-                    self.planners.iter().for_each(|sim| sim.scene(plot_ui));
-                }
+        let plot_response = plot.show(ui, |plot_ui| match self.mode {
+            SimMode::InvertedPendulum => {
+                self.pendulums.iter().for_each(|sim| sim.scene(plot_ui));
+            }
+            SimMode::Localization => {
+                self.vehicles.iter().for_each(|sim| sim.scene(plot_ui));
+            }
+            SimMode::Slam => {
+                self.slam_demos.iter().for_each(|sim| sim.scene(plot_ui));
+            }
+            SimMode::PathPlanning => {
+                self.planners.iter().for_each(|sim| sim.scene(plot_ui));
             }
         });
 
@@ -638,20 +657,18 @@ impl Simulator {
                 .show(ui.ctx(), |ui| {
                     Plot::new("Plot")
                         .legend(Legend::default().position(Corner::RightTop))
-                        .show(ui, |plot_ui| {
-                            match self.mode {
-                                SimMode::InvertedPendulum => {
-                                    self.pendulums.iter().for_each(|sim| sim.plot(plot_ui));
-                                }
-                                SimMode::Localization => {
-                                    self.vehicles.iter().for_each(|sim| sim.plot(plot_ui));
-                                }
-                                SimMode::PathPlanning => {
-                                    self.planners.iter().for_each(|sim| sim.plot(plot_ui));
-                                }
-                                SimMode::Slam => {
-                                    self.slam_demos.iter().for_each(|sim| sim.plot(plot_ui));
-                                }
+                        .show(ui, |plot_ui| match self.mode {
+                            SimMode::InvertedPendulum => {
+                                self.pendulums.iter().for_each(|sim| sim.plot(plot_ui));
+                            }
+                            SimMode::Localization => {
+                                self.vehicles.iter().for_each(|sim| sim.plot(plot_ui));
+                            }
+                            SimMode::PathPlanning => {
+                                self.planners.iter().for_each(|sim| sim.plot(plot_ui));
+                            }
+                            SimMode::Slam => {
+                                self.slam_demos.iter().for_each(|sim| sim.plot(plot_ui));
                             }
                         });
                 });

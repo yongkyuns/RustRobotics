@@ -93,10 +93,10 @@ impl<'a> ThetaStarPlanner<'a> {
         let mut closed_set = HashSet::new();
         let mut visited_order = Vec::new();
         let mut iterations = 0usize;
-        
+
         // Maps current node -> parent node
         let mut came_from: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
-        
+
         // Cost from start to node
         let mut g_scores: HashMap<(usize, usize), f32> = HashMap::new();
 
@@ -110,13 +110,19 @@ impl<'a> ThetaStarPlanner<'a> {
 
         g_scores.insert((start_node.x, start_node.y), 0.0);
         // Start node is its own parent (sentinel)
-        came_from.insert((start_node.x, start_node.y), (start_node.x, start_node.y)); 
+        came_from.insert((start_node.x, start_node.y), (start_node.x, start_node.y));
         open_set.push(start_node);
 
         // 8-directional movement
         let directions: [(i32, i32); 8] = [
-            (1, 0), (-1, 0), (0, 1), (0, -1),  // Cardinal
-            (1, 1), (1, -1), (-1, 1), (-1, -1), // Diagonal
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1), // Cardinal
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1), // Diagonal
         ];
 
         while let Some(current) = open_set.pop() {
@@ -210,7 +216,11 @@ impl<'a> ThetaStarPlanner<'a> {
         }
     }
 
-    fn fail_with_visited(&self, visited: Vec<(usize, usize)>, iterations: usize) -> ThetaStarResult {
+    fn fail_with_visited(
+        &self,
+        visited: Vec<(usize, usize)>,
+        iterations: usize,
+    ) -> ThetaStarResult {
         ThetaStarResult {
             path: vec![],
             visited,
@@ -250,8 +260,8 @@ impl<'a> ThetaStarPlanner<'a> {
 
         loop {
             // Check if current cell is obstacle
-            // (Note: s and e are start and end, we usually allow start to be whatever, 
-            // but for LOS check in path planning, we need strictly free path. 
+            // (Note: s and e are start and end, we usually allow start to be whatever,
+            // but for LOS check in path planning, we need strictly free path.
             // However, usually the start and end nodes themselves are free if we got here.)
             if self.grid.is_obstacle(x as usize, y as usize) {
                 return false;
@@ -287,7 +297,7 @@ impl<'a> ThetaStarPlanner<'a> {
 
         // In Theta*, parent can be far away, so we just add the waypoints.
         // The path is the sequence of parents.
-        
+
         path.push(self.grid.grid_to_world(current.0, current.1));
 
         while current != start {
@@ -295,11 +305,11 @@ impl<'a> ThetaStarPlanner<'a> {
                 Some(&parent) => {
                     if parent == current {
                         // Should not happen unless it's start, but start is handled by loop condition
-                        break; 
+                        break;
                     }
                     current = parent;
                     path.push(self.grid.grid_to_world(current.0, current.1));
-                },
+                }
                 None => break, // Should not happen if path found
             }
         }
@@ -307,7 +317,7 @@ impl<'a> ThetaStarPlanner<'a> {
         // Add start position (already added if loop worked correctly?)
         // Wait, loop stops when current == start. So start is NOT added inside the loop.
         // path.push(self.grid.grid_to_world(start.0, start.1)); // The logic above effectively does this?
-        // Let's trace: 
+        // Let's trace:
         // Goal -> Parent(Goal) -> ... -> Start.
         // Loop condition: current != start.
         // Last iteration: current is some node X where Parent(X) == Start.
@@ -315,7 +325,7 @@ impl<'a> ThetaStarPlanner<'a> {
         // We set current = Start.
         // Loop terminates.
         // Start is NOT pushed.
-        
+
         // Wait, checking A* implementation:
         /*
         while current != start {
@@ -325,14 +335,18 @@ impl<'a> ThetaStarPlanner<'a> {
         path.push(start_world);
         */
         // Yes, need to push start.
-        
+
         // Check duplication: If start == goal?
         // path has goal. loop doesn't run. we push start. path = [goal, start].
         // distinct? yes. (x,y) are same but floats.
-        
+
         // To be safe and clean:
-        if path.last().map(|p| *p != self.grid.grid_to_world(start.0, start.1)).unwrap_or(true) {
-             path.push(self.grid.grid_to_world(start.0, start.1));
+        if path
+            .last()
+            .map(|p| *p != self.grid.grid_to_world(start.0, start.1))
+            .unwrap_or(true)
+        {
+            path.push(self.grid.grid_to_world(start.0, start.1));
         }
 
         // Reverse to get path from start to goal

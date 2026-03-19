@@ -456,7 +456,10 @@ mod tests {
         // Check sparsity
         let stats = SparseSlamSolver::sparsity_stats(&j_sparse);
         println!("Sparse system: {}", stats);
-        assert!(stats.nnz < stats.rows * stats.cols, "Matrix should be sparse");
+        assert!(
+            stats.nnz < stats.rows * stats.cols,
+            "Matrix should be sparse"
+        );
     }
 
     #[test]

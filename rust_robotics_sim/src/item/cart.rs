@@ -1,6 +1,6 @@
 use super::{Circle, Point, Rectangle, Shape, WithPosition, WithSize};
 use crate::math::{cos, sin};
-use egui_plot::{Line, PlotUi, PlotPoints};
+use egui_plot::{Line, PlotPoints, PlotUi};
 use rust_robotics_algo::inverted_pendulum::Model;
 
 pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &Model, name: &str) {
@@ -36,17 +36,14 @@ pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &M
         .into_polygon();
     let rod = Line::new(
         "",
-        PlotPoints::new(vec![
-            [rod_bottom.x, rod_bottom.y],
-            [rod_top.x, rod_top.y],
-        ]),
+        PlotPoints::new(vec![[rod_bottom.x, rod_bottom.y], [rod_top.x, rod_top.y]]),
     );
 
     plot_ui.polygon(body.name(name));
-    plot_ui.polygon(left_wheel.name(""));  // Hide from legend
+    plot_ui.polygon(left_wheel.name("")); // Hide from legend
     plot_ui.polygon(right_wheel.name("")); // Hide from legend
-    plot_ui.polygon(ball.name(""));        // Hide from legend
-    plot_ui.line(rod.name(""));            // Hide from legend
+    plot_ui.polygon(ball.name("")); // Hide from legend
+    plot_ui.line(rod.name("")); // Hide from legend
 
     // Draw wheel tick marks to show rotation
     // Wheel rotation angle = -distance traveled / radius (negative for clockwise when moving right)
@@ -59,7 +56,10 @@ pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &M
         "",
         PlotPoints::new(vec![
             [left_wheel_cx, left_wheel_cy],
-            [left_wheel_cx + r_whl * cos(wheel_angle), left_wheel_cy + r_whl * sin(wheel_angle)],
+            [
+                left_wheel_cx + r_whl * cos(wheel_angle),
+                left_wheel_cy + r_whl * sin(wheel_angle),
+            ],
         ]),
     );
     plot_ui.line(left_tick);
@@ -71,7 +71,10 @@ pub fn draw_cart(plot_ui: &mut PlotUi<'_>, x_pos: f32, rod_angle: f32, model: &M
         "",
         PlotPoints::new(vec![
             [right_wheel_cx, right_wheel_cy],
-            [right_wheel_cx + r_whl * cos(wheel_angle), right_wheel_cy + r_whl * sin(wheel_angle)],
+            [
+                right_wheel_cx + r_whl * cos(wheel_angle),
+                right_wheel_cy + r_whl * sin(wheel_angle),
+            ],
         ]),
     );
     plot_ui.line(right_tick);

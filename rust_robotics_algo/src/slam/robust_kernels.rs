@@ -73,7 +73,9 @@ impl Default for HuberKernel {
 
 impl HuberKernel {
     pub fn new(k: f64) -> Self {
-        Self { k: k.abs().max(1e-6) }
+        Self {
+            k: k.abs().max(1e-6),
+        }
     }
 
     /// Create with automatic scaling based on MAD (Median Absolute Deviation)
@@ -129,7 +131,9 @@ impl Default for CauchyKernel {
 
 impl CauchyKernel {
     pub fn new(c: f64) -> Self {
-        Self { c: c.abs().max(1e-6) }
+        Self {
+            c: c.abs().max(1e-6),
+        }
     }
 
     /// Create with automatic scaling based on MAD
@@ -178,7 +182,9 @@ impl Default for TukeyKernel {
 
 impl TukeyKernel {
     pub fn new(c: f64) -> Self {
-        Self { c: c.abs().max(1e-6) }
+        Self {
+            c: c.abs().max(1e-6),
+        }
     }
 
     /// Create with automatic scaling based on MAD
@@ -243,15 +249,9 @@ impl DynamicKernel {
     pub fn new(kernel_type: RobustKernelType, scale: Option<f64>) -> Self {
         let kernel: Box<dyn RobustKernel + Send + Sync> = match kernel_type {
             RobustKernelType::None => Box::new(TrivialKernel),
-            RobustKernelType::Huber => {
-                Box::new(scale.map(HuberKernel::new).unwrap_or_default())
-            }
-            RobustKernelType::Cauchy => {
-                Box::new(scale.map(CauchyKernel::new).unwrap_or_default())
-            }
-            RobustKernelType::Tukey => {
-                Box::new(scale.map(TukeyKernel::new).unwrap_or_default())
-            }
+            RobustKernelType::Huber => Box::new(scale.map(HuberKernel::new).unwrap_or_default()),
+            RobustKernelType::Cauchy => Box::new(scale.map(CauchyKernel::new).unwrap_or_default()),
+            RobustKernelType::Tukey => Box::new(scale.map(TukeyKernel::new).unwrap_or_default()),
         };
         Self { kernel }
     }

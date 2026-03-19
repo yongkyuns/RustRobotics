@@ -407,9 +407,7 @@ impl LocalInfoBuilder {
             .flat_map(|&start| [start, start + 1, start + 2])
             .collect();
 
-        let keep_local: Vec<usize> = (0..n_vars)
-            .filter(|i| !marg_local.contains(i))
-            .collect();
+        let keep_local: Vec<usize> = (0..n_vars).filter(|i| !marg_local.contains(i)).collect();
 
         (h, b, marg_local, keep_local)
     }
@@ -469,17 +467,15 @@ mod tests {
             4,
             4,
             &[
-                100.0, 10.0, 5.0, 2.0, 10.0, 100.0, 2.0, 5.0, 5.0, 2.0, 100.0, 10.0, 2.0, 5.0, 10.0,
-                100.0,
+                100.0, 10.0, 5.0, 2.0, 10.0, 100.0, 2.0, 5.0, 5.0, 2.0, 100.0, 10.0, 2.0, 5.0,
+                10.0, 100.0,
             ],
         );
         let b = DVector::zeros(4);
 
         let marginalizer = Marginalizer::new();
 
-        let (h_prime, _) = marginalizer
-            .marginalize(&h, &b, &[0, 1], &[2, 3])
-            .unwrap();
+        let (h_prime, _) = marginalizer.marginalize(&h, &b, &[0, 1], &[2, 3]).unwrap();
 
         // The marginalized matrix should have information from the off-diagonal blocks
         // H' = Hoo - Hom * Hmm^-1 * Hmo

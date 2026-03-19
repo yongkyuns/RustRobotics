@@ -624,7 +624,11 @@ impl GraphSlam {
             .map(|c| self.observation_mahalanobis_sq(c))
             .collect();
 
-        for (c, mahal_sq) in self.observation_constraints.iter_mut().zip(obs_mahal.iter()) {
+        for (c, mahal_sq) in self
+            .observation_constraints
+            .iter_mut()
+            .zip(obs_mahal.iter())
+        {
             if enable_outlier {
                 c.is_outlier = chi_squared::is_outlier(*mahal_sq, 2, chi2_conf);
             }
@@ -640,8 +644,16 @@ impl GraphSlam {
 
     /// Get the number of detected outliers
     pub fn outlier_count(&self) -> (usize, usize) {
-        let odom = self.odometry_constraints.iter().filter(|c| c.is_outlier).count();
-        let obs = self.observation_constraints.iter().filter(|c| c.is_outlier).count();
+        let odom = self
+            .odometry_constraints
+            .iter()
+            .filter(|c| c.is_outlier)
+            .count();
+        let obs = self
+            .observation_constraints
+            .iter()
+            .filter(|c| c.is_outlier)
+            .count();
         (odom, obs)
     }
 
@@ -880,14 +892,16 @@ impl GraphSlam {
             let dy_old = lm.y - current_pose.y;
             let range_old = (dx_old * dx_old + dy_old * dy_old).sqrt();
             let bearing_old = normalize_angle(dy_old.atan2(dx_old) - current_pose.theta);
-            old_error += (range_obs - range_old).powi(2) + normalize_angle(bearing_obs - bearing_old).powi(2);
+            old_error += (range_obs - range_old).powi(2)
+                + normalize_angle(bearing_obs - bearing_old).powi(2);
 
             // Error from computed pose
             let dx_new = lm.x - computed_pose.x;
             let dy_new = lm.y - computed_pose.y;
             let range_new = (dx_new * dx_new + dy_new * dy_new).sqrt();
             let bearing_new = normalize_angle(dy_new.atan2(dx_new) - computed_pose.theta);
-            new_error += (range_obs - range_new).powi(2) + normalize_angle(bearing_obs - bearing_new).powi(2);
+            new_error += (range_obs - range_new).powi(2)
+                + normalize_angle(bearing_obs - bearing_new).powi(2);
         }
 
         // Only apply if the computed pose significantly reduces error
@@ -936,11 +950,15 @@ impl GraphSlam {
 
         // Landmark info
         self.diagnostics.landmark_info.clear();
-        for (idx, (last_obs, count)) in self.landmark_last_obs_pose.iter()
+        for (idx, (last_obs, count)) in self
+            .landmark_last_obs_pose
+            .iter()
             .zip(self.landmark_obs_count.iter())
             .enumerate()
         {
-            self.diagnostics.landmark_info.push((idx, *last_obs, *count));
+            self.diagnostics
+                .landmark_info
+                .push((idx, *last_obs, *count));
         }
 
         // Observation residuals for current pose
@@ -950,12 +968,9 @@ impl GraphSlam {
             if c.pose_idx == current_pose_idx {
                 let e = self.observation_error(c);
                 let mahal_sq = self.observation_mahalanobis_sq(c);
-                self.diagnostics.observation_residuals.push((
-                    c.landmark_idx,
-                    e[0],
-                    e[1],
-                    mahal_sq,
-                ));
+                self.diagnostics
+                    .observation_residuals
+                    .push((c.landmark_idx, e[0], e[1], mahal_sq));
             }
         }
     }
@@ -966,23 +981,43 @@ impl GraphSlam {
         writeln!(file, "=== SLAM DIAGNOSTICS ===")?;
         writeln!(file, "Pose: {} / {} poses", d.current_pose_idx, d.num_poses)?;
         writeln!(file, "Landmarks: {}", d.num_landmarks)?;
-        writeln!(file, "Constraints: {} odom, {} obs", d.num_odom_constraints, d.num_obs_constraints)?;
+        writeln!(
+            file,
+            "Constraints: {} odom, {} obs",
+            d.num_odom_constraints, d.num_obs_constraints
+        )?;
         writeln!(file, "Blind duration: {} poses", d.poses_since_observation)?;
-        writeln!(file, "Outliers: {} odom, {} obs", d.outlier_counts.0, d.outlier_counts.1)?;
+        writeln!(
+            file,
+            "Outliers: {} odom, {} obs",
+            d.outlier_counts.0, d.outlier_counts.1
+        )?;
         writeln!(file, "Loop closures: {}", d.loop_closures_detected)?;
-        writeln!(file, "Optimization: {} iters, error {:.4} -> {:.4}",
-            d.last_opt_iterations, d.last_opt_initial_error, d.last_opt_final_error)?;
+        writeln!(
+            file,
+            "Optimization: {} iters, error {:.4} -> {:.4}",
+            d.last_opt_iterations, d.last_opt_initial_error, d.last_opt_final_error
+        )?;
 
         writeln!(file, "\n--- Landmark Info ---")?;
         for (idx, last_obs, count) in &d.landmark_info {
-            let obs_str = last_obs.map(|p| format!("pose {}", p)).unwrap_or("None".to_string());
-            writeln!(file, "  LM {}: last_obs={}, total_obs={}", idx, obs_str, count)?;
+            let obs_str = last_obs
+                .map(|p| format!("pose {}", p))
+                .unwrap_or("None".to_string());
+            writeln!(
+                file,
+                "  LM {}: last_obs={}, total_obs={}",
+                idx, obs_str, count
+            )?;
         }
 
         writeln!(file, "\n--- Current Observation Residuals ---")?;
         for (lm_idx, range_res, bearing_res, mahal_sq) in &d.observation_residuals {
-            writeln!(file, "  LM {}: range_res={:.4}, bearing_res={:.4}, mahal_sq={:.4}",
-                lm_idx, range_res, bearing_res, mahal_sq)?;
+            writeln!(
+                file,
+                "  LM {}: range_res={:.4}, bearing_res={:.4}, mahal_sq={:.4}",
+                lm_idx, range_res, bearing_res, mahal_sq
+            )?;
         }
 
         if !d.landmark_errors.is_empty() {
@@ -994,8 +1029,14 @@ impl GraphSlam {
 
         writeln!(file, "\n--- Pose Positions ---")?;
         for (i, pose) in self.poses.iter().enumerate() {
-            writeln!(file, "  Pose {}: ({:.2}, {:.2}, {:.1}°)",
-                i, pose.x, pose.y, pose.theta.to_degrees())?;
+            writeln!(
+                file,
+                "  Pose {}: ({:.2}, {:.2}, {:.1}°)",
+                i,
+                pose.x,
+                pose.y,
+                pose.theta.to_degrees()
+            )?;
         }
 
         writeln!(file, "\n--- Landmark Positions ---")?;
@@ -1028,7 +1069,9 @@ impl GraphSlam {
 
             let error = self.odometry_error(c);
 
-            let sqrt_info = c.information.cholesky()
+            let sqrt_info = c
+                .information
+                .cholesky()
                 .map(|ch| ch.l())
                 .unwrap_or(Matrix3::identity());
 
@@ -1040,9 +1083,15 @@ impl GraphSlam {
 
             if let Some(idx1) = self.pose_state_idx(c.from_idx) {
                 let j1 = Matrix3::new(
-                    -cos_t, -sin_t, -sin_t * dx + cos_t * dy,
-                    sin_t, -cos_t, -cos_t * dx - sin_t * dy,
-                    0.0, 0.0, -1.0,
+                    -cos_t,
+                    -sin_t,
+                    -sin_t * dx + cos_t * dy,
+                    sin_t,
+                    -cos_t,
+                    -cos_t * dx - sin_t * dy,
+                    0.0,
+                    0.0,
+                    -1.0,
                 );
                 let wj1 = sqrt_info * j1 * sqrt_robust;
                 for i in 0..3 {
@@ -1053,11 +1102,7 @@ impl GraphSlam {
             }
 
             if let Some(idx2) = self.pose_state_idx(c.to_idx) {
-                let j2 = Matrix3::new(
-                    cos_t, sin_t, 0.0,
-                    -sin_t, cos_t, 0.0,
-                    0.0, 0.0, 1.0,
-                );
+                let j2 = Matrix3::new(cos_t, sin_t, 0.0, -sin_t, cos_t, 0.0, 0.0, 0.0, 1.0);
                 let wj2 = sqrt_info * j2 * sqrt_robust;
                 for i in 0..3 {
                     for j in 0..3 {
@@ -1081,7 +1126,9 @@ impl GraphSlam {
 
             let error = self.observation_error(c);
 
-            let sqrt_info = c.information.cholesky()
+            let sqrt_info = c
+                .information
+                .cholesky()
                 .map(|ch| ch.l())
                 .unwrap_or(Matrix2::identity());
 
@@ -1092,8 +1139,12 @@ impl GraphSlam {
 
             if let Some(pose_idx) = self.pose_state_idx(c.pose_idx) {
                 let jp = nalgebra::Matrix2x3::new(
-                    -dx / sqrt_q, -dy / sqrt_q, 0.0,
-                    dy / q, -dx / q, -1.0,
+                    -dx / sqrt_q,
+                    -dy / sqrt_q,
+                    0.0,
+                    dy / q,
+                    -dx / q,
+                    -1.0,
                 );
                 let wjp = sqrt_info * jp * sqrt_robust;
                 for i in 0..2 {
@@ -1104,10 +1155,7 @@ impl GraphSlam {
             }
 
             let lm_idx = self.landmark_state_idx(c.landmark_idx);
-            let jl = Matrix2::new(
-                dx / sqrt_q, dy / sqrt_q,
-                -dy / q, dx / q,
-            );
+            let jl = Matrix2::new(dx / sqrt_q, dy / sqrt_q, -dy / q, dx / q);
             let wjl = sqrt_info * jl * sqrt_robust;
             for i in 0..2 {
                 for j in 0..2 {

@@ -17,4 +17,6 @@ pub use error_tracking::ErrorTracker;
 pub use history::HistoryManager;
 pub use noise::{gaussian_noise, rand_noise};
 pub use ui_builders::{DisplayToggles, MotionConfig, SensorConfig};
-pub use visualization::{draw_covariance_ellipse, draw_labeled_vehicle, draw_labeled_vehicle_state4, draw_trajectory};
+pub use visualization::{
+    draw_covariance_ellipse, draw_labeled_vehicle, draw_labeled_vehicle_state4, draw_trajectory,
+};

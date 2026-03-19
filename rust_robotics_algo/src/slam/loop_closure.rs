@@ -137,7 +137,8 @@ impl LoopClosureDetector {
                 .cmp(&b.from_pose_idx)
                 .then(a.to_pose_idx.cmp(&b.to_pose_idx))
         });
-        closures.dedup_by(|a, b| a.from_pose_idx == b.from_pose_idx && a.to_pose_idx == b.to_pose_idx);
+        closures
+            .dedup_by(|a, b| a.from_pose_idx == b.from_pose_idx && a.to_pose_idx == b.to_pose_idx);
 
         // Sort by confidence (highest first)
         closures.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
@@ -174,7 +175,8 @@ impl LoopClosureDetector {
         }
 
         // Find candidate poses
-        let max_candidate_idx = current_pose_idx.saturating_sub(self.config.min_temporal_separation);
+        let max_candidate_idx =
+            current_pose_idx.saturating_sub(self.config.min_temporal_separation);
 
         for candidate_idx in 0..=max_candidate_idx {
             let candidate_pose = &poses[candidate_idx];
@@ -214,11 +216,8 @@ impl LoopClosureDetector {
                 current_pose_idx,
             ) {
                 // Validate with chi-squared test
-                let mahalanobis_sq = self.compute_mahalanobis(
-                    candidate_pose,
-                    current_pose,
-                    &transform,
-                );
+                let mahalanobis_sq =
+                    self.compute_mahalanobis(candidate_pose, current_pose, &transform);
 
                 if mahalanobis_sq <= self.config.max_mahalanobis_sq {
                     closures.push(LoopClosure {
@@ -332,11 +331,8 @@ impl LoopClosureDetector {
             ) {
                 // For landmark-based detection, use a higher Mahalanobis threshold
                 // since we expect the poses to have drifted
-                let mahalanobis_sq = self.compute_mahalanobis(
-                    candidate_pose,
-                    current_pose,
-                    &transform,
-                );
+                let mahalanobis_sq =
+                    self.compute_mahalanobis(candidate_pose, current_pose, &transform);
 
                 // Accept higher Mahalanobis for landmark-based (3x normal threshold)
                 if mahalanobis_sq <= self.config.max_mahalanobis_sq * 3.0 {
@@ -363,9 +359,7 @@ impl LoopClosureDetector {
         let mut map: HashMap<usize, HashSet<usize>> = HashMap::new();
 
         for c in observation_constraints {
-            map.entry(c.pose_idx)
-                .or_default()
-                .insert(c.landmark_idx);
+            map.entry(c.pose_idx).or_default().insert(c.landmark_idx);
         }
 
         map
@@ -429,7 +423,9 @@ impl LoopClosureDetector {
 
         // Compute rigid transform from candidate to current frame
         // Using SVD-based point cloud alignment
-        if let Some((rotation, translation)) = self.compute_rigid_transform(&points_candidate, &points_current) {
+        if let Some((rotation, translation)) =
+            self.compute_rigid_transform(&points_candidate, &points_current)
+        {
             // Convert to (dx, dy, dtheta) in candidate's frame
             // The transform represents: current_pose = candidate_pose ⊕ transform
             let _dtheta = rotation;
@@ -447,7 +443,12 @@ impl LoopClosureDetector {
             let dtheta_local = normalize_angle(current_pose.theta - candidate_pose.theta);
 
             // Confidence based on residual fit
-            let residual = self.compute_alignment_residual(&points_candidate, &points_current, rotation, &translation);
+            let residual = self.compute_alignment_residual(
+                &points_candidate,
+                &points_current,
+                rotation,
+                &translation,
+            );
             let confidence = 1.0 / (1.0 + residual);
 
             Some((Vector3::new(dx_local, dy_local, dtheta_local), confidence))
@@ -560,7 +561,11 @@ impl LoopClosureDetector {
         let error = transform - expected;
 
         // Use closure covariance for Mahalanobis distance
-        let info = self.config.closure_covariance.try_inverse().unwrap_or(Matrix3::identity());
+        let info = self
+            .config
+            .closure_covariance
+            .try_inverse()
+            .unwrap_or(Matrix3::identity());
         let weighted = info * error;
         error.dot(&weighted)
     }
@@ -683,14 +688,26 @@ mod tests {
         println!("Closures detected: {}", closures.len());
 
         for (i, c) in closures.iter().enumerate() {
-            println!("  Closure {}: pose {} -> pose {}", i, c.from_pose_idx, c.to_pose_idx);
-            println!("    Transform: ({:.3}, {:.3}, {:.3}°)",
-                c.transform.x, c.transform.y, c.transform.z.to_degrees());
-            println!("    Matches: {}, Confidence: {:.3}, Mahalanobis: {:.3}",
-                c.num_matches, c.confidence, c.mahalanobis_sq);
+            println!(
+                "  Closure {}: pose {} -> pose {}",
+                i, c.from_pose_idx, c.to_pose_idx
+            );
+            println!(
+                "    Transform: ({:.3}, {:.3}, {:.3}°)",
+                c.transform.x,
+                c.transform.y,
+                c.transform.z.to_degrees()
+            );
+            println!(
+                "    Matches: {}, Confidence: {:.3}, Mahalanobis: {:.3}",
+                c.num_matches, c.confidence, c.mahalanobis_sq
+            );
         }
 
-        assert!(!closures.is_empty(), "Should detect loop closure between pose 0 and 4");
+        assert!(
+            !closures.is_empty(),
+            "Should detect loop closure between pose 0 and 4"
+        );
         assert_eq!(closures[0].from_pose_idx, 0);
         assert_eq!(closures[0].to_pose_idx, 4);
     }
@@ -715,12 +732,22 @@ mod tests {
         assert!(result.is_some());
 
         let (rotation, translation) = result.unwrap();
-        println!("Rotation: {:.3}°, Translation: ({:.3}, {:.3})",
-            rotation.to_degrees(), translation.x, translation.y);
+        println!(
+            "Rotation: {:.3}°, Translation: ({:.3}, {:.3})",
+            rotation.to_degrees(),
+            translation.x,
+            translation.y
+        );
 
         assert!(rotation.abs() < 0.1, "Rotation should be near zero");
-        assert!((translation.x - 1.0).abs() < 0.1, "Translation X should be ~1");
-        assert!((translation.y - 1.0).abs() < 0.1, "Translation Y should be ~1");
+        assert!(
+            (translation.x - 1.0).abs() < 0.1,
+            "Translation X should be ~1"
+        );
+        assert!(
+            (translation.y - 1.0).abs() < 0.1,
+            "Translation Y should be ~1"
+        );
     }
 
     #[test]
@@ -745,6 +772,9 @@ mod tests {
         let (rotation, _translation) = result.unwrap();
         println!("Rotation: {:.3}° (expected ~90°)", rotation.to_degrees());
 
-        assert!((rotation - PI / 2.0).abs() < 0.1, "Rotation should be ~90 degrees");
+        assert!(
+            (rotation - PI / 2.0).abs() < 0.1,
+            "Rotation should be ~90 degrees"
+        );
     }
 }

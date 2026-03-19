@@ -25,7 +25,13 @@ const REAR_OVERHANG: f64 = 0.5; // Fixed rear overhang beyond rear axle [m]
 /// state: [x, y, phi, v]
 /// steering: front wheel steering angle in radians
 /// params: vehicle parameters (lf, lr, mass) for sizing
-pub fn draw_vehicle(plot_ui: &mut PlotUi<'_>, state: Vector4, name: &str, steering: f32, params: &VehicleParams) {
+pub fn draw_vehicle(
+    plot_ui: &mut PlotUi<'_>,
+    state: Vector4,
+    name: &str,
+    steering: f32,
+    params: &VehicleParams,
+) {
     let x = state.x() as f64;
     let y = state.y() as f64;
     let ang = state.phi() as f64;
@@ -46,8 +52,8 @@ pub fn draw_vehicle(plot_ui: &mut PlotUi<'_>, state: Vector4, name: &str, steeri
 
     // Body dimensions
     let body_front = front_axle + front_overhang; // Front edge from CG
-    let body_rear = rear_axle + rear_overhang;    // Rear edge from CG
-    let body_w = body_front + body_rear;          // Total body length
+    let body_rear = rear_axle + rear_overhang; // Rear edge from CG
+    let body_w = body_front + body_rear; // Total body length
     let body_center_offset = (body_front - body_rear) / 2.0; // Body center offset from CG
 
     // Width scales with sqrt of mass
@@ -74,7 +80,7 @@ pub fn draw_vehicle(plot_ui: &mut PlotUi<'_>, state: Vector4, name: &str, steeri
         local_to_global(tri_offset, -tri_base * 0.5, x, y, ang),
         local_to_global(tri_offset + tri_height, 0.0, x, y, ang),
     ]);
-    let triangle = Polygon::new("", tri_points)  // Hide from legend
+    let triangle = Polygon::new("", tri_points) // Hide from legend
         .fill_color(Color32::TRANSPARENT);
     plot_ui.polygon(triangle);
 
@@ -85,10 +91,10 @@ pub fn draw_vehicle(plot_ui: &mut PlotUi<'_>, state: Vector4, name: &str, steeri
 
     // Wheel positions based on actual lf/lr from CG: (local_x, local_y, is_front)
     let wheel_configs = [
-        (front_axle, wheel_y_offset, true),    // Front-left
-        (front_axle, -wheel_y_offset, true),   // Front-right
-        (-rear_axle, wheel_y_offset, false),   // Rear-left
-        (-rear_axle, -wheel_y_offset, false),  // Rear-right
+        (front_axle, wheel_y_offset, true),   // Front-left
+        (front_axle, -wheel_y_offset, true),  // Front-right
+        (-rear_axle, wheel_y_offset, false),  // Rear-left
+        (-rear_axle, -wheel_y_offset, false), // Rear-right
     ];
 
     for (wx, wy, is_front) in wheel_configs {

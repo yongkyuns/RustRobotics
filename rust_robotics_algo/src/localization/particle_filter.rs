@@ -150,7 +150,16 @@ pub fn pf_localization(
     u: Vector2,
     dt: f32,
 ) -> Matrix3 {
-    pf_localization_with_state(x_est, px, pw, z, u, dt, &mut PFState::default(), &PFNoiseParams::default())
+    pf_localization_with_state(
+        x_est,
+        px,
+        pw,
+        z,
+        u,
+        dt,
+        &mut PFState::default(),
+        &PFNoiseParams::default(),
+    )
 }
 
 /// Particle filter state for tracking recovery phases
@@ -262,7 +271,8 @@ pub fn pf_localization_with_state(
     let spread_factor = (particle_spread / PARTICLE_SPREAD_THRESHOLD).min(1.0);
     let smoothing = if state.recovery_count > 0 && state.recovery_count < 20 {
         // During early recovery, blend based on spread
-        ESTIMATE_SMOOTHING_RECOVERY * spread_factor + ESTIMATE_SMOOTHING_BASE * (1.0 - spread_factor)
+        ESTIMATE_SMOOTHING_RECOVERY * spread_factor
+            + ESTIMATE_SMOOTHING_BASE * (1.0 - spread_factor)
     } else {
         // Normal operation - light smoothing
         ESTIMATE_SMOOTHING_BASE * spread_factor
@@ -292,8 +302,8 @@ fn reset_particles_around_observations(px: &mut PX, pw: &mut PW, z: &[Vector3], 
         let new_particle = vector![
             zi.x() + dist * cos(angle),
             zi.y() + dist * sin(angle),
-            x_est[2] + rand() * 0.3,  // Keep approximate heading with small noise
-            x_est[3]                   // Keep velocity
+            x_est[2] + rand() * 0.3, // Keep approximate heading with small noise
+            x_est[3]                 // Keep velocity
         ];
         px.set_column(ip, &new_particle);
     }

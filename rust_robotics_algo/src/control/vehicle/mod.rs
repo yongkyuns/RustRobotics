@@ -30,10 +30,10 @@ pub struct TireParams {
 impl Default for TireParams {
     fn default() -> Self {
         Self {
-            b: 12.0,      // Stiffness factor (higher for sharper peak)
-            c: 1.9,       // Shape factor for lateral
-            d: 4500.0,    // Peak force ~4500N per tire
-            e: 0.97,      // Curvature factor
+            b: 12.0,   // Stiffness factor (higher for sharper peak)
+            c: 1.9,    // Shape factor for lateral
+            d: 4500.0, // Peak force ~4500N per tire
+            e: 0.97,   // Curvature factor
         }
     }
 }
@@ -41,7 +41,10 @@ impl Default for TireParams {
 impl TireParams {
     /// Create tire params with specified peak force
     pub fn with_peak_force(d: f32) -> Self {
-        Self { d, ..Default::default() }
+        Self {
+            d,
+            ..Default::default()
+        }
     }
 
     /// Compute lateral force using Pacejka Magic Formula
@@ -87,12 +90,12 @@ pub struct VehicleParams {
 impl Default for VehicleParams {
     fn default() -> Self {
         Self {
-            mass: 1500.0,      // kg
-            iz: 3000.0,        // kg*m^2
-            lf: 1.2,           // m
-            lr: 1.4,           // m
-            cf: 80000.0,       // N/rad
-            cr: 80000.0,       // N/rad
+            mass: 1500.0, // kg
+            iz: 3000.0,   // kg*m^2
+            lf: 1.2,      // m
+            lr: 1.4,      // m
+            cf: 80000.0,  // N/rad
+            cr: 80000.0,  // N/rad
         }
     }
 }
@@ -158,7 +161,12 @@ impl BicycleModel {
     }
 
     /// Create a bicycle model with custom tire parameters
-    pub fn with_tires(params: VehicleParams, vx: f32, tire_front: TireParams, tire_rear: TireParams) -> Self {
+    pub fn with_tires(
+        params: VehicleParams,
+        vx: f32,
+        tire_front: TireParams,
+        tire_rear: TireParams,
+    ) -> Self {
         Self {
             params,
             vx,
@@ -202,7 +210,14 @@ impl BicycleModel {
     /// State: x = [r, ψ, y, vy]^T
     /// Input: u = [δ]
     pub fn continuous_model(&self) -> (AMatLat, BMatLat) {
-        let VehicleParams { mass: m, iz, lf, lr, cf, cr } = self.params;
+        let VehicleParams {
+            mass: m,
+            iz,
+            lf,
+            lr,
+            cf,
+            cr,
+        } = self.params;
         // Use threshold velocity for A matrix to prevent singularity
         // The blending in step() handles the transition smoothly
         let vx = self.vx.max(Self::KINEMATIC_THRESHOLD);
@@ -320,7 +335,13 @@ impl BicycleModel {
         requested_ax: f32,
         dt: f32,
     ) -> (f32, f32, f32) {
-        let VehicleParams { mass: m, iz, lf, lr, .. } = self.params;
+        let VehicleParams {
+            mass: m,
+            iz,
+            lf,
+            lr,
+            ..
+        } = self.params;
         let vx = self.vx.max(0.1);
 
         // Compute slip angles
@@ -376,7 +397,14 @@ impl BicycleModel {
         requested_ax: f32,
         dt: f32,
     ) -> (f32, f32, f32) {
-        let VehicleParams { mass: m, iz, lf, lr, cf, cr } = self.params;
+        let VehicleParams {
+            mass: m,
+            iz,
+            lf,
+            lr,
+            cf,
+            cr,
+        } = self.params;
         let vx = self.vx.max(0.1);
 
         // Compute slip angles
@@ -503,7 +531,8 @@ impl VehicleState {
         let blended_vy = kinematic_vy * (1.0 - alpha) + dyn_vy * alpha;
 
         // Apply saturation limits
-        self.yaw_rate = blended_yaw_rate.clamp(-BicycleModel::MAX_YAW_RATE, BicycleModel::MAX_YAW_RATE);
+        self.yaw_rate =
+            blended_yaw_rate.clamp(-BicycleModel::MAX_YAW_RATE, BicycleModel::MAX_YAW_RATE);
         self.vy = blended_vy.clamp(-BicycleModel::MAX_VY, BicycleModel::MAX_VY);
 
         // Update heading
@@ -562,8 +591,12 @@ mod tests {
             state.step(&mut model, steering, acceleration, dt);
         }
 
-        println!("Final state: x={:.2}, y={:.2}, yaw={:.2}°",
-                 state.x, state.y, state.yaw.to_degrees());
+        println!(
+            "Final state: x={:.2}, y={:.2}, yaw={:.2}°",
+            state.x,
+            state.y,
+            state.yaw.to_degrees()
+        );
 
         // With positive steering, vehicle should turn
         assert!(state.yaw.abs() > 0.0);
@@ -595,7 +628,10 @@ mod tests {
         println!("Force at 0 slip: {:.2} N", force_zero);
         println!("Force at 0.05 rad: {:.2} N", force_small);
         println!("Force at 0.5 rad: {:.2} N", force_large);
-        println!("Force at 1.0 rad: {:.2} N (should be less than peak)", force_very_large);
+        println!(
+            "Force at 1.0 rad: {:.2} N (should be less than peak)",
+            force_very_large
+        );
     }
 
     #[test]
@@ -617,8 +653,13 @@ mod tests {
             state.step(&mut model, steering, acceleration, dt);
         }
 
-        println!("Pacejka Final state: x={:.2}, y={:.2}, yaw={:.2}°, vy={:.2}",
-                 state.x, state.y, state.yaw.to_degrees(), state.vy);
+        println!(
+            "Pacejka Final state: x={:.2}, y={:.2}, yaw={:.2}°, vy={:.2}",
+            state.x,
+            state.y,
+            state.yaw.to_degrees(),
+            state.vy
+        );
 
         // With positive steering, vehicle should turn
         assert!(state.yaw.abs() > 0.0);
@@ -643,8 +684,13 @@ mod tests {
             state.step(&mut model, steering, acceleration, dt);
         }
 
-        println!("Linear Final state: x={:.2}, y={:.2}, yaw={:.2}°, vy={:.2}",
-                 state.x, state.y, state.yaw.to_degrees(), state.vy);
+        println!(
+            "Linear Final state: x={:.2}, y={:.2}, yaw={:.2}°, vy={:.2}",
+            state.x,
+            state.y,
+            state.yaw.to_degrees(),
+            state.vy
+        );
 
         // With positive steering, vehicle should turn
         assert!(state.yaw.abs() > 0.0);

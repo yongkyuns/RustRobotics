@@ -125,7 +125,7 @@ impl<'a> DijkstraPlanner<'a> {
             (1, 0),
             (-1, 0),
             (0, 1),
-            (0, -1),  // Cardinal
+            (0, -1), // Cardinal
             (1, 1),
             (1, -1),
             (-1, 1),
@@ -185,7 +185,10 @@ impl<'a> DijkstraPlanner<'a> {
 
                 let new_cost = current.cost + move_cost;
 
-                let current_cost = cost_so_far.get(&neighbor_pos).copied().unwrap_or(f32::INFINITY);
+                let current_cost = cost_so_far
+                    .get(&neighbor_pos)
+                    .copied()
+                    .unwrap_or(f32::INFINITY);
 
                 if new_cost < current_cost {
                     came_from.insert(neighbor_pos, current_pos);

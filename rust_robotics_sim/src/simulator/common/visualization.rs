@@ -2,9 +2,9 @@
 
 use egui::Color32;
 use egui_plot::{Line, LineStyle, PlotPoint, PlotPoints, PlotUi, Polygon, Text};
-use rust_robotics_algo::nalgebra::{Matrix2, SymmetricEigen};
 use rust_robotics_algo::control::vehicle::VehicleParams;
 use rust_robotics_algo::nalgebra::Vector4 as NaVector4;
+use rust_robotics_algo::nalgebra::{Matrix2, SymmetricEigen};
 use rust_robotics_algo::Vector4;
 
 use crate::item::draw_vehicle;
@@ -50,9 +50,7 @@ pub fn draw_trajectory<'a, T: HasPosition + 'a>(
     width: f32,
     style: Option<LineStyle>,
 ) {
-    let points: PlotPoints<'_> = history
-        .map(|p| [p.x() as f64, p.y() as f64])
-        .collect();
+    let points: PlotPoints<'_> = history.map(|p| [p.x() as f64, p.y() as f64]).collect();
 
     let mut line = Line::new("", points).color(color).width(width);
 

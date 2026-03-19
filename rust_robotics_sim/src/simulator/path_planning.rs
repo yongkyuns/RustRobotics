@@ -34,7 +34,7 @@ impl Algorithm {
             Algorithm::Rrt => "RRT",
         }
     }
-    
+
     fn is_grid(&self) -> bool {
         match self {
             Algorithm::AStar | Algorithm::Dijkstra => true,
@@ -165,36 +165,41 @@ impl PathPlanning {
             planners: Vec::new(),
             next_planner_id: 0,
         };
-        
+
         // Add a default planner
         app.add_planner(Algorithm::AStar);
         app
     }
-    
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
     fn get_color(sim_id: usize, planner_id: usize) -> Color32 {
         let colors = [
-            Color32::from_rgb(50, 100, 255),  // Blue
-            Color32::from_rgb(255, 100, 50),  // Red
-            Color32::from_rgb(50, 255, 100),  // Green
-            Color32::from_rgb(255, 200, 50),  // Yellow
-            Color32::from_rgb(200, 50, 255),  // Purple
-            Color32::from_rgb(50, 255, 255),  // Cyan
+            Color32::from_rgb(50, 100, 255), // Blue
+            Color32::from_rgb(255, 100, 50), // Red
+            Color32::from_rgb(50, 255, 100), // Green
+            Color32::from_rgb(255, 200, 50), // Yellow
+            Color32::from_rgb(200, 50, 255), // Purple
+            Color32::from_rgb(50, 255, 255), // Cyan
         ];
         colors[(sim_id + planner_id) % colors.len()]
     }
-    
+
     fn add_planner(&mut self, algorithm: Algorithm) {
         let color = Self::get_color(self.id, self.next_planner_id);
-        self.planners.push(PlannerInstance::new(self.next_planner_id, algorithm, color));
+        self.planners
+            .push(PlannerInstance::new(self.next_planner_id, algorithm, color));
         self.next_planner_id += 1;
-        
+
         // If we have start/goal, run this new planner immediately
         if self.start.is_some() && self.goal.is_some() {
             let last_idx = self.planners.len() - 1;
             self.run_single_planner(last_idx);
         }
     }
-    
+
     fn remove_planner(&mut self, planner_id: usize) {
         if let Some(pos) = self.planners.iter().position(|p| p.id == planner_id) {
             self.planners.remove(pos);
@@ -206,26 +211,26 @@ impl PathPlanning {
         if self.start.is_some() && self.goal.is_some() {
             self.animation_progress = 0.0;
             self.animation_complete = false;
-            
+
             // Need to compute this once but borrow checker makes it hard to share euclidean_dist
             // So we'll just let each planner compute it or compute it inside the loop
-            
+
             for i in 0..self.planners.len() {
                 self.run_single_planner(i);
             }
             self.state = PlanningState::ShowingResult;
         }
     }
-    
+
     fn run_single_planner(&mut self, idx: usize) {
         if let (Some(start), Some(goal)) = (self.start, self.goal) {
-             let algo = self.planners[idx].algorithm;
-             
-             // Compute euclidean distance
+            let algo = self.planners[idx].algorithm;
+
+            // Compute euclidean distance
             let dx = goal.0 - start.0;
             let dy = goal.1 - start.1;
             let euclidean_distance = (dx * dx + dy * dy).sqrt();
-            
+
             // If in continuous mode and using a grid-based algo (or Theta*), rasterize first
             if self.mode == EnvironmentMode::Continuous {
                 match algo {
@@ -235,10 +240,10 @@ impl PathPlanning {
                     _ => {}
                 }
             }
-            
+
             // Re-borrow for RRT config access if needed
             // But we need to be careful. RRT Configs are stored in planner_inst.
-            
+
             let start_time = std::time::Instant::now();
 
             let mut result = match algo {
@@ -287,8 +292,8 @@ impl PathPlanning {
                 Algorithm::Rrt => {
                     let (min_x, min_y, max_x, max_y) = self.grid.world_bounds();
                     let config = {
-                         let p = &self.planners[idx];
-                         RrtConfig {
+                        let p = &self.planners[idx];
+                        RrtConfig {
                             expand_distance: p.rrt_expand_dist,
                             goal_sample_rate: p.rrt_goal_sample_rate,
                             max_iterations: p.rrt_max_iter,
@@ -296,7 +301,7 @@ impl PathPlanning {
                             seed: None,
                         }
                     };
-                    
+
                     let mut planner = RrtPlanner::new(min_x, max_x, min_y, max_y, config);
 
                     if self.mode == EnvironmentMode::Grid {
@@ -326,7 +331,7 @@ impl PathPlanning {
                     }
                 }
             };
-            
+
             result.execution_time = start_time.elapsed();
             result.path_length = Self::compute_path_length(&result.path);
             self.planners[idx].result = Some(result);
@@ -362,7 +367,7 @@ impl PathPlanning {
     /// Copy state from another planner (Used for persistent state across hot reloads or resets)
     pub fn copy_state_from(&mut self, other: &PathPlanning) {
         self.mode = other.mode;
-        
+
         // Copy grid settings
         self.grid_width = other.grid_width;
         self.grid_height = other.grid_height;
@@ -373,14 +378,14 @@ impl PathPlanning {
         for &(x, y) in other.grid.obstacles() {
             self.grid.set_obstacle(x, y);
         }
-        
+
         // Copy continuous obstacles
         self.continuous_obstacles = other.continuous_obstacles.clone();
 
         // Copy start and goal
         self.start = other.start;
         self.goal = other.goal;
-        
+
         // Copy planners configs?
         // Since Planners are dynamic now, we try to preserve them if possible
         // But for simplicity in this context, we just keep defaults or copy if struct matches.
@@ -389,7 +394,7 @@ impl PathPlanning {
         self.planners.clear();
         if !other.planners.is_empty() {
             // Re-create planners with same algos
-             for p in &other.planners {
+            for p in &other.planners {
                 let color = Self::get_color(self.id, p.id);
                 let mut new_p = PlannerInstance::new(p.id, p.algorithm, color);
                 new_p.rrt_expand_dist = p.rrt_expand_dist;
@@ -397,12 +402,16 @@ impl PathPlanning {
                 new_p.rrt_max_iter = p.rrt_max_iter;
                 new_p.show_visited = p.show_visited;
                 self.planners.push(new_p);
-             }
-             self.next_planner_id = other.next_planner_id;
+            }
+            self.next_planner_id = other.next_planner_id;
         } else {
-             // Fallback default
-             let default_algo = if self.mode == EnvironmentMode::Grid { Algorithm::AStar } else { Algorithm::Rrt };
-             self.add_planner(default_algo);
+            // Fallback default
+            let default_algo = if self.mode == EnvironmentMode::Grid {
+                Algorithm::AStar
+            } else {
+                Algorithm::Rrt
+            };
+            self.add_planner(default_algo);
         }
 
         // Update state based on what we have
@@ -434,7 +443,10 @@ impl PathPlanning {
 
     /// Update grid settings from external configuration
     pub fn update_grid_settings(&mut self, width: usize, height: usize, resolution: f32) {
-        if self.grid_width != width || self.grid_height != height || self.grid_resolution != resolution {
+        if self.grid_width != width
+            || self.grid_height != height
+            || self.grid_resolution != resolution
+        {
             self.grid_width = width;
             self.grid_height = height;
             self.grid_resolution = resolution;
@@ -464,10 +476,11 @@ impl PathPlanning {
     fn rasterize_continuous_to_grid(&mut self) {
         // Clear all obstacles first
         self.grid.clear_all_obstacles();
-        
+
         let radius_sq = self.continuous_obstacle_radius * self.continuous_obstacle_radius;
         // Padding to ensure we cover all cells that might overlap
-        let check_radius_cells = (self.continuous_obstacle_radius / self.grid.resolution).ceil() as usize;
+        let check_radius_cells =
+            (self.continuous_obstacle_radius / self.grid.resolution).ceil() as usize;
 
         for obs in &self.continuous_obstacles {
             if let Some((cx, cy)) = self.grid.world_to_grid(obs.x, obs.y) {
@@ -476,7 +489,7 @@ impl PathPlanning {
                 let min_y = cy.saturating_sub(check_radius_cells);
                 let max_x = (cx + check_radius_cells).min(self.grid.width - 1);
                 let max_y = (cy + check_radius_cells).min(self.grid.height - 1);
-                
+
                 let obs_r_sq = obs.radius * obs.radius;
 
                 for y in min_y..=max_y {
@@ -484,7 +497,7 @@ impl PathPlanning {
                         let (wx, wy) = self.grid.grid_to_world(x, y);
                         let dx = wx - obs.x;
                         let dy = wy - obs.y;
-                        if dx*dx + dy*dy <= obs_r_sq {
+                        if dx * dx + dy * dy <= obs_r_sq {
                             self.grid.set_obstacle(x, y);
                         }
                     }
@@ -515,7 +528,7 @@ impl PathPlanning {
             }
         }
     }
-    
+
     fn handle_mouse_grid(&mut self, wx: f32, wy: f32, plot_response: &egui_plot::PlotResponse<()>) {
         if let Some((gx, gy)) = self.grid.world_to_grid(wx, wy) {
             let current_cell = (gx, gy);
@@ -529,10 +542,16 @@ impl PathPlanning {
                     self.grid.clear_obstacle(gx, gy);
                 }
                 self.last_toggled_cell = Some(current_cell);
-                if self.start.is_some() && self.goal.is_some() { self.run_all_planners(); }
+                if self.start.is_some() && self.goal.is_some() {
+                    self.run_all_planners();
+                }
             }
             // Right-click drag
-            else if plot_response.response.ctx.input(|i| i.pointer.secondary_down()) {
+            else if plot_response
+                .response
+                .ctx
+                .input(|i| i.pointer.secondary_down())
+            {
                 if self.last_toggled_cell != Some(current_cell) {
                     if self.drag_adding_obstacle {
                         self.grid.set_obstacle(gx, gy);
@@ -540,7 +559,9 @@ impl PathPlanning {
                         self.grid.clear_obstacle(gx, gy);
                     }
                     self.last_toggled_cell = Some(current_cell);
-                    if self.start.is_some() && self.goal.is_some() { self.run_all_planners(); }
+                    if self.start.is_some() && self.goal.is_some() {
+                        self.run_all_planners();
+                    }
                 }
             }
             // Left-click to set start/goal
@@ -553,44 +574,55 @@ impl PathPlanning {
         }
     }
 
-    fn handle_mouse_continuous(&mut self, wx: f32, wy: f32, plot_response: &egui_plot::PlotResponse<()>) {
+    fn handle_mouse_continuous(
+        &mut self,
+        wx: f32,
+        wy: f32,
+        plot_response: &egui_plot::PlotResponse<()>,
+    ) {
         // Right-click to add/remove obstacles
         if plot_response.response.secondary_clicked() {
             // Check if clicking existing obstacle
             let mut removed = false;
             let click_radius_sq = self.continuous_obstacle_radius * self.continuous_obstacle_radius;
-            
+
             // Iterate backwards
             if let Some(idx) = self.continuous_obstacles.iter().position(|obs| {
                 let dx = obs.x - wx;
                 let dy = obs.y - wy;
-                (dx*dx + dy*dy) < click_radius_sq
+                (dx * dx + dy * dy) < click_radius_sq
             }) {
                 self.continuous_obstacles.remove(idx);
                 removed = true;
             }
 
             if !removed {
-                self.continuous_obstacles.push(CircleObstacle::new(wx, wy, self.continuous_obstacle_radius));
+                self.continuous_obstacles.push(CircleObstacle::new(
+                    wx,
+                    wy,
+                    self.continuous_obstacle_radius,
+                ));
             }
-            
-            if self.start.is_some() && self.goal.is_some() { self.run_all_planners(); }
+
+            if self.start.is_some() && self.goal.is_some() {
+                self.run_all_planners();
+            }
         }
         // Left-click to set start/goal
         else if plot_response.response.clicked() {
             // Check collision with obstacles
             let mut collision = false;
             for obs in &self.continuous_obstacles {
-                 let dx = obs.x - wx;
-                 let dy = obs.y - wy;
-                 if (dx*dx + dy*dy) < obs.radius * obs.radius {
-                     collision = true;
-                     break;
-                 }
+                let dx = obs.x - wx;
+                let dy = obs.y - wy;
+                if (dx * dx + dy * dy) < obs.radius * obs.radius {
+                    collision = true;
+                    break;
+                }
             }
-            
+
             if !collision {
-                 self.handle_left_click((wx, wy));
+                self.handle_left_click((wx, wy));
             }
         }
     }
@@ -608,7 +640,9 @@ impl PathPlanning {
             PlanningState::ShowingResult => {
                 self.start = Some(world_pos);
                 self.goal = None;
-                for p in &mut self.planners { p.result = None; }
+                for p in &mut self.planners {
+                    p.result = None;
+                }
                 self.state = PlanningState::WaitingForGoal;
             }
         }
@@ -661,12 +695,12 @@ impl PathPlanning {
             );
         }
     }
-    
+
     /// Draw continuous obstacles (circles)
     fn draw_continuous_obstacles(&self, plot_ui: &mut PlotUi<'_>) {
         for obs in &self.continuous_obstacles {
             let points = self.circle_points(obs.x, obs.y, obs.radius, 32);
-             plot_ui.polygon(
+            plot_ui.polygon(
                 Polygon::new("", points)
                     .fill_color(Color32::from_gray(80))
                     .stroke(egui::Stroke::new(1.0, Color32::from_gray(60))),
@@ -676,7 +710,9 @@ impl PathPlanning {
 
     /// Draw visited cells for grid-based algorithms
     fn draw_visited(&self, plot_ui: &mut PlotUi<'_>, planner: &PlannerInstance) {
-        if !planner.show_visited { return; }
+        if !planner.show_visited {
+            return;
+        }
 
         if let Some(result) = &planner.result {
             let num_cells = if self.animation_complete {
@@ -685,11 +721,12 @@ impl PathPlanning {
                 (result.visited.len() as f32 * self.animation_progress) as usize
             };
 
-            // To avoid z-fighting or mess with multiple planners showing visited, 
+            // To avoid z-fighting or mess with multiple planners showing visited,
             // we should probably make them more transparent or only show for one?
             // For now, let's just make them very transparent and tinted with planner color.
             let base_color = planner.color;
-            let fill_color = Color32::from_rgba_unmultiplied(base_color.r(), base_color.g(), base_color.b(), 30);
+            let fill_color =
+                Color32::from_rgba_unmultiplied(base_color.r(), base_color.g(), base_color.b(), 30);
 
             for &(gx, gy) in result.visited.iter().take(num_cells) {
                 let (cx, cy) = self.grid.grid_to_world(gx, gy);
@@ -714,7 +751,9 @@ impl PathPlanning {
 
     /// Draw RRT tree
     fn draw_tree(&self, plot_ui: &mut PlotUi<'_>, planner: &PlannerInstance) {
-        if !planner.show_visited { return; }
+        if !planner.show_visited {
+            return;
+        }
 
         if let Some(result) = &planner.result {
             let num_edges = if self.animation_complete {
@@ -722,9 +761,14 @@ impl PathPlanning {
             } else {
                 (result.tree.len() as f32 * self.animation_progress) as usize
             };
-            
+
             let base_color = planner.color;
-            let line_color = Color32::from_rgba_unmultiplied(base_color.r(), base_color.g(), base_color.b(), 100);
+            let line_color = Color32::from_rgba_unmultiplied(
+                base_color.r(),
+                base_color.g(),
+                base_color.b(),
+                100,
+            );
 
             for node in result.tree.iter().take(num_edges) {
                 if let Some(parent_idx) = node.parent {
@@ -733,11 +777,7 @@ impl PathPlanning {
                         [parent.x as f64, parent.y as f64],
                         [node.x as f64, node.y as f64],
                     ]);
-                    plot_ui.line(
-                        Line::new("", points)
-                            .color(line_color)
-                            .width(1.0),
-                    );
+                    plot_ui.line(Line::new("", points).color(line_color).width(1.0));
                 }
             }
         }
@@ -762,9 +802,12 @@ impl PathPlanning {
                     .collect();
 
                 plot_ui.line(
-                    Line::new(format!("{} (Sim {})", planner.algorithm.label(), self.id), PlotPoints::new(points))
-                        .color(planner.color)
-                        .width(3.0),
+                    Line::new(
+                        format!("{} (Sim {})", planner.algorithm.label(), self.id),
+                        PlotPoints::new(points),
+                    )
+                    .color(planner.color)
+                    .width(3.0),
                 );
             }
         }
@@ -859,18 +902,22 @@ impl Draw for PathPlanning {
             self.draw_grid(plot_ui);
             self.draw_grid_obstacles(plot_ui);
         } else {
-             let (min_x, min_y, max_x, max_y) = self.grid.world_bounds();
-             // Draw boundary box
-             let points = PlotPoints::new(vec![
-                 [min_x as f64, min_y as f64],
-                 [max_x as f64, min_y as f64],
-                 [max_x as f64, max_y as f64],
-                 [min_x as f64, max_y as f64],
-                 [min_x as f64, min_y as f64],
-             ]);
-             plot_ui.line(Line::new("", points).color(Color32::from_gray(100)).width(1.0));
-             
-             self.draw_continuous_obstacles(plot_ui);
+            let (min_x, min_y, max_x, max_y) = self.grid.world_bounds();
+            // Draw boundary box
+            let points = PlotPoints::new(vec![
+                [min_x as f64, min_y as f64],
+                [max_x as f64, min_y as f64],
+                [max_x as f64, max_y as f64],
+                [min_x as f64, max_y as f64],
+                [min_x as f64, min_y as f64],
+            ]);
+            plot_ui.line(
+                Line::new("", points)
+                    .color(Color32::from_gray(100))
+                    .width(1.0),
+            );
+
+            self.draw_continuous_obstacles(plot_ui);
         }
 
         // Draw planners
@@ -878,7 +925,7 @@ impl Draw for PathPlanning {
             if planner.algorithm == Algorithm::Rrt {
                 self.draw_tree(plot_ui, planner);
             } else if self.mode == EnvironmentMode::Grid {
-                 self.draw_visited(plot_ui, planner);
+                self.draw_visited(plot_ui, planner);
             }
             self.draw_path(plot_ui, planner);
         }
@@ -901,104 +948,138 @@ impl Draw for PathPlanning {
                         }
                     });
 
-                ui.separator();
-                
-                // We need to collect IDs to remove to avoid mutable borrow error
-                // let mut remove_ids = Vec::new(); // Unused
-                let mut rerun_indices = Vec::new();
-                
-                for (idx, planner) in self.planners.iter_mut().enumerate() {
-                    ui.push_id(planner.id, |ui| {
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                // Colored indicator
-                                let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-                                ui.painter().circle_filled(rect.center(), 4.0, planner.color);
-                                
-                                // Algorithm Selector
-                                ComboBox::from_id_salt("algo")
-                                    .selected_text(planner.algorithm.label())
-                                    .show_ui(ui, |ui| {
-                                        let available_algos = match self.mode {
-                                            EnvironmentMode::Grid => vec![Algorithm::AStar, Algorithm::ThetaStar, Algorithm::Dijkstra],
-                                            EnvironmentMode::Continuous => vec![Algorithm::Rrt, Algorithm::ThetaStar],
-                                        };
-                                        for algo in available_algos {
-                                            if ui.selectable_value(&mut planner.algorithm, algo, algo.label()).clicked() {
-                                                // If start/goal set, re-run?
-                                                planner.result = None;
-                                                rerun_indices.push(idx);
+                    ui.separator();
+
+                    // We need to collect IDs to remove to avoid mutable borrow error
+                    // let mut remove_ids = Vec::new(); // Unused
+                    let mut rerun_indices = Vec::new();
+
+                    for (idx, planner) in self.planners.iter_mut().enumerate() {
+                        ui.push_id(planner.id, |ui| {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    // Colored indicator
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                                    ui.painter()
+                                        .circle_filled(rect.center(), 4.0, planner.color);
+
+                                    // Algorithm Selector
+                                    ComboBox::from_id_salt("algo")
+                                        .selected_text(planner.algorithm.label())
+                                        .show_ui(ui, |ui| {
+                                            let available_algos = match self.mode {
+                                                EnvironmentMode::Grid => vec![
+                                                    Algorithm::AStar,
+                                                    Algorithm::ThetaStar,
+                                                    Algorithm::Dijkstra,
+                                                ],
+                                                EnvironmentMode::Continuous => {
+                                                    vec![Algorithm::Rrt, Algorithm::ThetaStar]
+                                                }
+                                            };
+                                            for algo in available_algos {
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut planner.algorithm,
+                                                        algo,
+                                                        algo.label(),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    // If start/goal set, re-run?
+                                                    planner.result = None;
+                                                    rerun_indices.push(idx);
+                                                }
                                             }
-                                        }
-                                    });
-                            });
-                            
-                            // Planner specific settings
-                            if planner.algorithm == Algorithm::Rrt {
-                                ui.collapsing("Settings", |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Expand:");
-                                        ui.add(DragValue::new(&mut planner.rrt_expand_dist).range(0.1..=5.0).speed(0.1));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Goal Bias:");
-                                        ui.add(DragValue::new(&mut planner.rrt_goal_sample_rate).range(0.0..=1.0).speed(0.01));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Max Iter:");
-                                        ui.add(DragValue::new(&mut planner.rrt_max_iter).range(100..=5000));
-                                    });
+                                        });
                                 });
-                            }
-                            
-                            let show_label = if planner.algorithm == Algorithm::Rrt { "Show Tree" } else { "Show Visited" };
-                            if self.mode == EnvironmentMode::Grid || planner.algorithm == Algorithm::Rrt {
-                                ui.checkbox(&mut planner.show_visited, show_label);
-                            }
-                            
-                            // Results
-                            if let Some(res) = &planner.result {
-                                if res.success {
-                                    ui.label(format!("Path: {:.2}", res.path_length));
-                                    if res.euclidean_distance > 0.0 {
-                                        ui.label(format!("Ratio: {:.2}", res.path_length / res.euclidean_distance));
-                                    }
-                                } else {
-                                    ui.label("No path found");
+
+                                // Planner specific settings
+                                if planner.algorithm == Algorithm::Rrt {
+                                    ui.collapsing("Settings", |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Expand:");
+                                            ui.add(
+                                                DragValue::new(&mut planner.rrt_expand_dist)
+                                                    .range(0.1..=5.0)
+                                                    .speed(0.1),
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Goal Bias:");
+                                            ui.add(
+                                                DragValue::new(&mut planner.rrt_goal_sample_rate)
+                                                    .range(0.0..=1.0)
+                                                    .speed(0.01),
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Max Iter:");
+                                            ui.add(
+                                                DragValue::new(&mut planner.rrt_max_iter)
+                                                    .range(100..=5000),
+                                            );
+                                        });
+                                    });
                                 }
-                                ui.label(format!("Iter: {}", res.iterations));
-                                ui.label(format!("Time: {:.2?}", res.execution_time));
-                            }
+
+                                let show_label = if planner.algorithm == Algorithm::Rrt {
+                                    "Show Tree"
+                                } else {
+                                    "Show Visited"
+                                };
+                                if self.mode == EnvironmentMode::Grid
+                                    || planner.algorithm == Algorithm::Rrt
+                                {
+                                    ui.checkbox(&mut planner.show_visited, show_label);
+                                }
+
+                                // Results
+                                if let Some(res) = &planner.result {
+                                    if res.success {
+                                        ui.label(format!("Path: {:.2}", res.path_length));
+                                        if res.euclidean_distance > 0.0 {
+                                            ui.label(format!(
+                                                "Ratio: {:.2}",
+                                                res.path_length / res.euclidean_distance
+                                            ));
+                                        }
+                                    } else {
+                                        ui.label("No path found");
+                                    }
+                                    ui.label(format!("Iter: {}", res.iterations));
+                                    ui.label(format!("Time: {:.2?}", res.execution_time));
+                                }
+                            });
                         });
-                    });
-                }
-                
-                for idx in rerun_indices {
-                    if self.start.is_some() && self.goal.is_some() {
-                        self.run_single_planner(idx);
-                        // Also set state to showing result to trigger animation if not already
-                        self.state = PlanningState::ShowingResult;
-                        self.animation_complete = false;
-                        self.animation_progress = 0.0;
                     }
-                }
-                
-                ui.separator();
 
-                // Status
-                let status_text = match self.state {
-                    PlanningState::WaitingForStart => "Click to set start point",
-                    PlanningState::WaitingForGoal => "Click to set goal point",
-                    PlanningState::ShowingResult => "Showing results",
-                };
-                ui.label(format!("Status: {}", status_text));
-                
-                if self.state == PlanningState::ShowingResult {
-                    if ui.button("Re-run All").clicked() {
-                        self.run_all_planners();
+                    for idx in rerun_indices {
+                        if self.start.is_some() && self.goal.is_some() {
+                            self.run_single_planner(idx);
+                            // Also set state to showing result to trigger animation if not already
+                            self.state = PlanningState::ShowingResult;
+                            self.animation_complete = false;
+                            self.animation_progress = 0.0;
+                        }
                     }
-                }
 
+                    ui.separator();
+
+                    // Status
+                    let status_text = match self.state {
+                        PlanningState::WaitingForStart => "Click to set start point",
+                        PlanningState::WaitingForGoal => "Click to set goal point",
+                        PlanningState::ShowingResult => "Showing results",
+                    };
+                    ui.label(format!("Status: {}", status_text));
+
+                    if self.state == PlanningState::ShowingResult {
+                        if ui.button("Re-run All").clicked() {
+                            self.run_all_planners();
+                        }
+                    }
                 }); // end vertical
             }); // end group
         }); // end push_id

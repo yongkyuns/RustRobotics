@@ -1,8 +1,5 @@
+use super::common::{draw_labeled_vehicle_state4, draw_trajectory, ErrorTracker, HistoryManager};
 use super::*;
-use super::common::{
-    ErrorTracker, HistoryManager,
-    draw_labeled_vehicle_state4, draw_trajectory,
-};
 
 use egui::{DragValue, Ui};
 use egui_plot::{Line, LineStyle, PlotPoints, PlotUi, Points};
@@ -65,11 +62,11 @@ impl Default for PFConfig {
     fn default() -> Self {
         Self {
             drive_mode: DriveMode::Kinematic,
-            velocity: 5.0,        // 5 m/s (~18 km/h)
+            velocity: 5.0, // 5 m/s (~18 km/h)
             yaw_rate: 0.1,
-            max_range: 50.0,      // 50m detection range
-            obs_noise: 1.0,       // Observation noise (distance std dev in m)
-            motion_noise_v: 3.0,  // Motion noise velocity (m/s std dev)
+            max_range: 50.0,        // 50m detection range
+            obs_noise: 1.0,         // Observation noise (distance std dev in m)
+            motion_noise_v: 3.0,    // Motion noise velocity (m/s std dev)
             motion_noise_yaw: 30.0, // Motion noise yaw rate (deg std dev)
         }
     }
@@ -199,14 +196,21 @@ impl ParticleFilter {
         }
     }
 
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
     fn update_history(&mut self) {
         self.history.push(self.x_true, self.x_est, self.x_dr);
 
         // Calculate and store errors
         self.errors.track_positions(
-            self.x_true.x(), self.x_true.y(),
-            self.x_est.x(), self.x_est.y(),
-            self.x_dr.x(), self.x_dr.y(),
+            self.x_true.x(),
+            self.x_true.y(),
+            self.x_est.x(),
+            self.x_est.y(),
+            self.x_dr.x(),
+            self.x_dr.y(),
         );
     }
 
@@ -270,9 +274,23 @@ impl Simulate for ParticleFilter {
             DriveMode::Kinematic => {
                 // Original kinematic mode using particle filter observation model
                 let u = self.calc_input();
-                let (z, ud) = observation(&mut self.x_true, &mut self.x_dr, u, &MARKERS, dt, self.config.max_range);
+                let (z, ud) = observation(
+                    &mut self.x_true,
+                    &mut self.x_dr,
+                    u,
+                    &MARKERS,
+                    dt,
+                    self.config.max_range,
+                );
                 self.p_est = pf_localization_with_state(
-                    &mut self.x_est, &mut self.px, &mut self.pw, z, ud, dt, &mut self.pf_state, &noise
+                    &mut self.x_est,
+                    &mut self.px,
+                    &mut self.pw,
+                    z,
+                    ud,
+                    dt,
+                    &mut self.pf_state,
+                    &noise,
                 );
             }
             DriveMode::Dynamic => {
@@ -285,16 +303,31 @@ impl Simulate for ParticleFilter {
                 self.bicycle_model.tire_rear = self.tire_rear;
 
                 // Step vehicle dynamics
-                self.vehicle_state.step(&mut self.bicycle_model, steering, acceleration, dt);
+                self.vehicle_state
+                    .step(&mut self.bicycle_model, steering, acceleration, dt);
 
                 // Update x_true from vehicle state
                 self.x_true = self.vehicle_state.to_vector4();
 
                 // For particle filter, use computed velocity and yaw rate
                 let u = self.calc_input();
-                let (z, ud) = observation_from_state(&self.x_true, &mut self.x_dr, u, &MARKERS, dt, self.config.max_range);
+                let (z, ud) = observation_from_state(
+                    &self.x_true,
+                    &mut self.x_dr,
+                    u,
+                    &MARKERS,
+                    dt,
+                    self.config.max_range,
+                );
                 self.p_est = pf_localization_with_state(
-                    &mut self.x_est, &mut self.px, &mut self.pw, z, ud, dt, &mut self.pf_state, &noise
+                    &mut self.x_est,
+                    &mut self.px,
+                    &mut self.pw,
+                    z,
+                    ud,
+                    dt,
+                    &mut self.pf_state,
+                    &noise,
                 );
             }
         }
@@ -371,10 +404,7 @@ impl Draw for ParticleFilter {
             PlotPoints::new(
                 self.px
                     .column_iter()
-                    .map(|state| [
-                        *state.get(0).unwrap() as f64,
-                        *state.get(1).unwrap() as f64,
-                    ])
+                    .map(|state| [*state.get(0).unwrap() as f64, *state.get(1).unwrap() as f64])
                     .collect(),
             ),
         ));
@@ -395,13 +425,31 @@ impl Draw for ParticleFilter {
 
         // Draw trajectories using shared helper
         let true_points: Vec<_> = self.history.get_true().collect();
-        draw_trajectory(plot_ui, true_points.into_iter(), egui::Color32::LIGHT_GREEN, 2.0, None);
+        draw_trajectory(
+            plot_ui,
+            true_points.into_iter(),
+            egui::Color32::LIGHT_GREEN,
+            2.0,
+            None,
+        );
 
         let dr_points: Vec<_> = self.history.get_dr().collect();
-        draw_trajectory(plot_ui, dr_points.into_iter(), egui::Color32::GRAY, 2.0, None);
+        draw_trajectory(
+            plot_ui,
+            dr_points.into_iter(),
+            egui::Color32::GRAY,
+            2.0,
+            None,
+        );
 
         let est_points: Vec<_> = self.history.get_estimated().collect();
-        draw_trajectory(plot_ui, est_points.into_iter(), egui::Color32::LIGHT_BLUE, 2.0, None);
+        draw_trajectory(
+            plot_ui,
+            est_points.into_iter(),
+            egui::Color32::LIGHT_BLUE,
+            2.0,
+            None,
+        );
 
         // Draw vehicles with labels using shared helper
         draw_labeled_vehicle_state4(
@@ -450,7 +498,10 @@ impl Draw for ParticleFilter {
                 ui.horizontal(|ui| {
                     ui.label("Drive Mode:");
                     for mode in [DriveMode::Kinematic, DriveMode::Dynamic] {
-                        if ui.selectable_label(self.config.drive_mode == mode, mode.label()).clicked() {
+                        if ui
+                            .selectable_label(self.config.drive_mode == mode, mode.label())
+                            .clicked()
+                        {
                             self.config.drive_mode = mode;
                             if mode == DriveMode::Dynamic {
                                 // Initialize vehicle state from current position
@@ -497,10 +548,16 @@ impl Draw for ParticleFilter {
                             ui.horizontal(|ui| {
                                 ui.label("Tire Model:");
                                 let current = self.bicycle_model.tire_model;
-                                if ui.selectable_label(current == TireModel::Pacejka, "Pacejka").clicked() {
+                                if ui
+                                    .selectable_label(current == TireModel::Pacejka, "Pacejka")
+                                    .clicked()
+                                {
                                     self.bicycle_model.tire_model = TireModel::Pacejka;
                                 }
-                                if ui.selectable_label(current == TireModel::Linear, "Linear").clicked() {
+                                if ui
+                                    .selectable_label(current == TireModel::Linear, "Linear")
+                                    .clicked()
+                                {
                                     self.bicycle_model.tire_model = TireModel::Linear;
                                 }
                             });
