@@ -1074,9 +1074,9 @@ impl MujocoRuntime {
                 idx += 1;
             }
         }
-        for step in &self.action_history {
-            for value in step {
-                out[idx] = *value;
+        for joint in 0..12 {
+            for step in &self.action_history {
+                out[idx] = step[joint];
                 idx += 1;
             }
         }
@@ -3409,9 +3409,9 @@ fn oscillator(time_s: f32) -> [f32; 12] {
 #[cfg(not(target_arch = "wasm32"))]
 fn quaternion_yaw(q: [f32; 4]) -> f32 {
     let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
-    let siny_cosp = 2.0 * (w * z + x * y);
-    let cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
-    siny_cosp.atan2(cosy_cosp)
+    let sinz_cosp = 2.0 * (w * z - x * y);
+    let cosz_cosp = w * w + x * x - y * y - z * z;
+    sinz_cosp.atan2(cosz_cosp)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

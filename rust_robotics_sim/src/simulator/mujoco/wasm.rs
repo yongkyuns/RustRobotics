@@ -19,8 +19,8 @@ const BROWSER_ASSET_FILES: &[&str] = &[
     "scene.xml",
     "go2.xml",
     "asset_meta.json",
-    "robust.json",
-    "robust.onnx",
+    "facet.json",
+    "facet.onnx",
     "assets/base_0.obj",
     "assets/base_1.obj",
     "assets/base_2.obj",
@@ -41,7 +41,6 @@ const BROWSER_ASSET_FILES: &[&str] = &[
 
 pub(super) struct WasmMujocoBackend {
     active: bool,
-    command_vel_x: f32,
     diagnostic_colors: bool,
     asset_state: Rc<RefCell<BrowserAssetState>>,
     ort_state: Rc<RefCell<BrowserOrtState>>,
@@ -60,7 +59,6 @@ impl Default for WasmMujocoBackend {
     fn default() -> Self {
         Self {
             active: false,
-            command_vel_x: 0.0,
             diagnostic_colors: false,
             asset_state: Rc::new(RefCell::new(BrowserAssetState::Idle)),
             ort_state: Rc::new(RefCell::new(BrowserOrtState::Idle)),
@@ -80,9 +78,38 @@ impl Default for WasmMujocoBackend {
 #[derive(Debug, Deserialize)]
 struct PolicyFile {
     onnx: OnnxFile,
+    obs_config: PolicyObsConfig,
     action_scale: f32,
     stiffness: f32,
     damping: f32,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PolicyObsConfig {
+    #[serde(default)]
+    command: Vec<PolicyCommandConfig>,
+    #[serde(default, rename = "command_")]
+    command_alt: Vec<PolicyCommandConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyCommandConfig {
+    name: String,
+}
+
+impl PolicyFile {
+    fn command_mode(&self) -> &'static str {
+        let commands = if !self.obs_config.command.is_empty() {
+            &self.obs_config.command
+        } else {
+            &self.obs_config.command_alt
+        };
+        if commands.iter().any(|cfg| cfg.name == "ImpedanceCommand") {
+            "impedance"
+        } else {
+            "velocity"
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +120,7 @@ struct OnnxFile {
 
 #[derive(Debug, Deserialize)]
 struct OnnxMeta {
+    in_keys: Vec<String>,
     in_shapes: Vec<Vec<Vec<usize>>>,
     out_keys: Vec<OnnxKey>,
 }
@@ -193,6 +221,20 @@ struct BrowserMujocoReport {
     policy_outputs: Vec<String>,
     command_vel_x: f32,
     #[serde(default)]
+    command_vel_y: f32,
+    #[serde(default)]
+    use_setpoint_ball: bool,
+    #[serde(default)]
+    command_mode: String,
+    #[serde(default)]
+    setpoint_preview: Vec<f32>,
+    #[serde(default)]
+    debug_drag_mode: String,
+    #[serde(default)]
+    debug_pointer_downs: u32,
+    #[serde(default)]
+    debug_pointer_moves: u32,
+    #[serde(default)]
     display_fps: f32,
     #[serde(default)]
     last_step_wall_ms: f32,
@@ -233,7 +275,10 @@ struct BrowserMujocoConfig {
     action_scale: f32,
     stiffness: f32,
     damping: f32,
+    input_keys: Vec<String>,
     output_keys: Vec<String>,
+    command_dim: usize,
+    command_mode: String,
 }
 
 #[derive(Serialize)]
@@ -380,7 +425,7 @@ impl WasmMujocoBackend {
                 ui.heading("mujoco");
                 ui.label("Browser app shell is active.");
                 ui.label(
-                    "This backend now bundles the real MuJoCo scene, policy config, metadata, ONNX model, and OBJ mesh assets into the wasm build.",
+                    "This backend runs the facet policy and uses the draggable setpoint ball as the only command input.",
                 );
                 ui.label(format!(
                     "Status: {}",
@@ -391,14 +436,7 @@ impl WasmMujocoBackend {
                     }
                 ));
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Command vx:");
-                    ui.add(
-                        egui::Slider::new(&mut self.command_vel_x, -2.0..=2.0)
-                            .show_value(true)
-                            .step_by(0.01),
-                    );
-                });
+                ui.label("Control: drag the red setpoint ball in the viewport.");
                 ui.checkbox(&mut self.diagnostic_colors, "Diagnostic colors");
                 if ui.button("Reset view").clicked() {
                     self.camera = BrowserOrbitCamera::default();
@@ -511,7 +549,16 @@ impl WasmMujocoBackend {
         }
     }
 
+    fn reset_loaded_policy_state(&mut self) {
+        *self.ort_state.borrow_mut() = BrowserOrtState::Idle;
+        *self.mujoco_state.borrow_mut() = BrowserMujocoState::Idle;
+        *self.mujoco_step_in_flight.borrow_mut() = false;
+        #[cfg(not(feature = "web_glow_viewport"))]
+        self.reset_browser_runtime();
+    }
+
     fn ui_asset_report(&self, ui: &mut Ui, bundle: &BrowserAssetBundle) {
+        let policy = bundle.policy();
         ui.label(
             RichText::new("Browser asset bundle")
                 .strong()
@@ -526,16 +573,16 @@ impl WasmMujocoBackend {
         ));
         ui.label(format!(
             "Policy: {} outputs, {:?} input groups, ONNX {}",
-            bundle.policy.onnx.meta.out_keys.len(),
-            bundle.policy.onnx.meta.in_shapes,
+            policy.onnx.meta.out_keys.len(),
+            policy.onnx.meta.in_shapes,
             bundle
                 .files
-                .get("robust.onnx")
+                .get(normalize_rel_path(&policy.onnx.path).as_str())
                 .map(|bytes| format_bytes(bytes.len()))
                 .unwrap_or_else(|| "missing".to_string())
         ));
         let preview_outputs = bundle
-            .policy
+            .policy()
             .onnx
             .meta
             .out_keys
@@ -546,8 +593,11 @@ impl WasmMujocoBackend {
             .join(", ");
         ui.label(format!("Output preview: {preview_outputs}"));
         ui.label(format!(
-            "Control: action_scale {:.2}, kp {:.2}, kd {:.2}",
-            bundle.policy.action_scale, bundle.policy.stiffness, bundle.policy.damping
+            "Control: mode={} action_scale {:.2}, kp {:.2}, kd {:.2}",
+            policy.command_mode(),
+            policy.action_scale,
+            policy.stiffness,
+            policy.damping
         ));
         ui.label(format!(
             "Robot metadata: {} bodies, {} joints, {} default joint positions",
@@ -615,16 +665,43 @@ impl WasmMujocoBackend {
 
         *self.ort_state.borrow_mut() = BrowserOrtState::Loading;
         let state = Rc::clone(&self.ort_state);
-        let Some(model_bytes) = bundle.files.get("robust.onnx").cloned() else {
+        let policy = bundle.policy();
+        let onnx_path = normalize_rel_path(&policy.onnx.path);
+        let Some(model_bytes) = bundle.files.get(onnx_path.as_str()).cloned() else {
             *self.ort_state.borrow_mut() =
-                BrowserOrtState::Error("Browser asset bundle missing robust.onnx".to_string());
+                BrowserOrtState::Error(format!("Browser asset bundle missing {onnx_path}"));
             return;
         };
         let wasm_base_path = "./vendor/onnxruntime-web/dist/";
+        let config = BrowserMujocoConfig {
+            joint_names: bundle.asset_meta.joint_names_isaac.clone(),
+            default_joint_pos: bundle.asset_meta.default_joint_pos.clone(),
+            action_scale: policy.action_scale,
+            stiffness: policy.stiffness,
+            damping: policy.damping,
+            input_keys: policy.onnx.meta.in_keys.clone(),
+            output_keys: policy
+                .onnx
+                .meta
+                .out_keys
+                .iter()
+                .map(OnnxKey::joined)
+                .collect(),
+            command_dim: policy
+                .onnx
+                .meta
+                .in_shapes
+                .first()
+                .and_then(|group| group.first())
+                .and_then(|shape| shape.get(1))
+                .copied()
+                .unwrap_or(16),
+            command_mode: policy.command_mode().to_string(),
+        };
 
         spawn_local(async move {
             let result = async {
-                let js_value = ort_smoke_test(&model_bytes, wasm_base_path).await?;
+                let js_value = ort_smoke_test(&model_bytes, wasm_base_path, &config).await?;
                 serde_wasm_bindgen::from_value::<BrowserOrtReport>(js_value)
                     .map_err(|err| JsValue::from_str(&err.to_string()))
             }
@@ -657,8 +734,17 @@ impl WasmMujocoBackend {
                     report.nbody, report.ngeom, report.nv, report.nu, report.timestep
                 ));
                 ui.label(format!(
-                    "Live state: sim_time={:.4}s step_count={} cmd_vx={:+.2}",
-                    report.sim_time, report.step_count, report.command_vel_x
+                    "Live state: sim_time={:.4}s step_count={}",
+                    report.sim_time, report.step_count
+                ));
+                ui.label("Command mode: setpoint ball");
+                ui.label(format!(
+                    "Policy command: {} | setpoint={:?}",
+                    report.command_mode, report.setpoint_preview
+                ));
+                ui.label(format!(
+                    "Drag debug: mode={} downs={} moves={}",
+                    report.debug_drag_mode, report.debug_pointer_downs, report.debug_pointer_moves
                 ));
                 ui.label(format!(
                     "Display: {:.1} FPS | step: {:.2} ms last, {:.2} ms avg",
@@ -711,19 +797,18 @@ impl WasmMujocoBackend {
             .files
             .iter()
             .filter_map(|(path, bytes)| {
-                if matches!(
-                    path.as_str(),
-                    "asset_meta.json" | "robust.json" | "robust.onnx"
-                ) {
+                if matches!(path.as_str(), "asset_meta.json" | "facet.json" | "facet.onnx") {
                     None
                 } else {
                     Some((path.clone(), bytes.clone()))
                 }
             })
             .collect::<Vec<_>>();
-        let Some(policy_bytes) = bundle.files.get("robust.onnx").cloned() else {
+        let policy = bundle.policy();
+        let onnx_path = normalize_rel_path(&policy.onnx.path);
+        let Some(policy_bytes) = bundle.files.get(onnx_path.as_str()).cloned() else {
             *self.mujoco_state.borrow_mut() =
-                BrowserMujocoState::Error("Browser asset bundle missing robust.onnx".to_string());
+                BrowserMujocoState::Error(format!("Browser asset bundle missing {onnx_path}"));
             return;
         };
         let mujoco_wasm_base_path = "./vendor/mujoco/mt/";
@@ -731,17 +816,27 @@ impl WasmMujocoBackend {
         let config = BrowserMujocoConfig {
             joint_names: bundle.asset_meta.joint_names_isaac.clone(),
             default_joint_pos: bundle.asset_meta.default_joint_pos.clone(),
-            action_scale: bundle.policy.action_scale,
-            stiffness: bundle.policy.stiffness,
-            damping: bundle.policy.damping,
-            output_keys: bundle
-                .policy
+            action_scale: policy.action_scale,
+            stiffness: policy.stiffness,
+            damping: policy.damping,
+            input_keys: policy.onnx.meta.in_keys.clone(),
+            output_keys: policy
                 .onnx
                 .meta
                 .out_keys
                 .iter()
                 .map(OnnxKey::joined)
                 .collect(),
+            command_dim: policy
+                .onnx
+                .meta
+                .in_shapes
+                .first()
+                .and_then(|group| group.first())
+                .and_then(|shape| shape.get(1))
+                .copied()
+                .unwrap_or(16),
+            command_mode: policy.command_mode().to_string(),
         };
 
         spawn_local(async move {
@@ -782,11 +877,15 @@ impl WasmMujocoBackend {
         let state = Rc::clone(&self.mujoco_state);
         let step_in_flight = Rc::clone(&self.mujoco_step_in_flight);
         let step_count = sim_speed.max(1);
-        let command_vel_x = self.command_vel_x;
+        let command_vel_x = 0.0f32;
+        let command_vel_y = 0.0f32;
+        let use_setpoint_ball = true;
 
         spawn_local(async move {
             let result = async {
-                let js_value = mujoco_step(step_count, command_vel_x).await?;
+                let js_value =
+                    mujoco_step(step_count, command_vel_x, command_vel_y, use_setpoint_ball)
+                        .await?;
                 serde_wasm_bindgen::from_value::<BrowserMujocoReport>(js_value)
                     .map_err(|err| JsValue::from_str(&err.to_string()))
             }
@@ -979,8 +1078,8 @@ impl WasmMujocoBackend {
             });
 
             let overlay = format!(
-                "Browser glow viewport\nSim t={:.2}s  steps={}  cmd_vx={:+.2}\nDrag: orbit | Right-drag: pan | Wheel: zoom | Double-click: reset view",
-                report.sim_time, report.step_count, report.command_vel_x
+                "Browser glow viewport\nSim t={:.2}s  steps={}  cmd=({:+.2}, {:+.2})\nDrag: orbit | Right-drag: pan | Wheel: zoom | Double-click: reset view",
+                report.sim_time, report.step_count, report.command_vel_x, report.command_vel_y
             );
             ui.painter().text(
                 rect.left_top() + vec2(12.0, 12.0),
@@ -1131,8 +1230,8 @@ impl WasmMujocoBackend {
             rect.center(),
             Align2::CENTER_CENTER,
             format!(
-                "sim_time={:.2}s\nstep_count={}\ncmd_vx={:+.2}",
-                report.sim_time, report.step_count, report.command_vel_x
+                "sim_time={:.2}s\nstep_count={}\ncmd=({:+.2}, {:+.2})",
+                report.sim_time, report.step_count, report.command_vel_x, report.command_vel_y
             ),
             FontId::monospace(15.0),
             Color32::from_gray(210),
@@ -1188,9 +1287,27 @@ impl WasmMujocoBackend {
         };
         let _ = function.call0(&JsValue::NULL);
     }
+
+    #[cfg(not(feature = "web_glow_viewport"))]
+    fn reset_browser_runtime(&self) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(function) = Reflect::get(window.as_ref(), &JsValue::from_str("rustRoboticsMujocoReset")) else {
+            return;
+        };
+        let Ok(function) = function.dyn_into::<Function>() else {
+            return;
+        };
+        let _ = function.call0(&JsValue::NULL);
+    }
 }
 
 impl BrowserAssetBundle {
+    fn policy(&self) -> &PolicyFile {
+        &self.policy
+    }
+
     async fn load_from_server() -> Result<Self, String> {
         let mut files = BTreeMap::new();
         for path in BROWSER_ASSET_FILES {
@@ -1210,12 +1327,6 @@ impl BrowserAssetBundle {
                 .ok_or_else(|| "Missing fetched go2.xml".to_string())?,
         )
         .map_err(|err| format!("go2.xml is not valid UTF-8: {err}"))?;
-        let policy_json = std::str::from_utf8(
-            files
-                .get("robust.json")
-                .ok_or_else(|| "Missing fetched robust.json".to_string())?,
-        )
-        .map_err(|err| format!("robust.json is not valid UTF-8: {err}"))?;
         let asset_meta_json = std::str::from_utf8(
             files
                 .get("asset_meta.json")
@@ -1246,20 +1357,32 @@ impl BrowserAssetBundle {
             }
         }
 
+        let policy_path = "facet.json";
+        let policy_json = std::str::from_utf8(
+            files
+                .get(policy_path)
+                .ok_or_else(|| format!("Missing fetched {policy_path}"))?,
+        )
+        .map_err(|err| format!("{policy_path} is not valid UTF-8: {err}"))?;
         let policy: PolicyFile = serde_json::from_str(policy_json)
-            .map_err(|err| format!("Failed to parse fetched robust.json: {err}"))?;
+            .map_err(|err| format!("Failed to parse fetched {policy_path}: {err}"))?;
         let onnx_path = normalize_rel_path(&policy.onnx.path);
         if !files.contains_key(onnx_path.as_str()) {
             return Err(format!(
-                "Policy config points to missing fetched ONNX file {}",
+                "Policy config {policy_path} points to missing fetched ONNX file {}",
                 onnx_path
             ));
         }
+        if policy.onnx.meta.in_keys.len() < 4 {
+            return Err(format!(
+                "Policy {policy_path} is missing expected ONNX input keys"
+            ));
+        }
         if policy.onnx.meta.in_shapes.is_empty() {
-            return Err("Policy metadata is missing input shapes".to_string());
+            return Err(format!("Policy {policy_path} metadata is missing input shapes"));
         }
         if policy.onnx.meta.out_keys.is_empty() {
-            return Err("Policy metadata is missing output keys".to_string());
+            return Err(format!("Policy {policy_path} metadata is missing output keys"));
         }
 
         let asset_meta: AssetMeta = serde_json::from_str(asset_meta_json)
@@ -1381,7 +1504,11 @@ fn js_error_to_string(value: JsValue) -> String {
     value.as_string().unwrap_or_else(|| format!("{value:?}"))
 }
 
-async fn ort_smoke_test(model_bytes: &[u8], wasm_base_path: &str) -> Result<JsValue, JsValue> {
+async fn ort_smoke_test(
+    model_bytes: &[u8],
+    wasm_base_path: &str,
+    config: &BrowserMujocoConfig,
+) -> Result<JsValue, JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is unavailable"))?;
     let function = Reflect::get(
         window.as_ref(),
@@ -1391,11 +1518,14 @@ async fn ort_smoke_test(model_bytes: &[u8], wasm_base_path: &str) -> Result<JsVa
     .map_err(|_| JsValue::from_str("rustRoboticsOrtSmokeTest is not a function"))?;
 
     let bytes = Uint8Array::from(model_bytes);
+    let config = serde_wasm_bindgen::to_value(config)
+        .map_err(|err| JsValue::from_str(&format!("Failed to serialize ORT config: {err}")))?;
     let promise = function
-        .call2(
+        .call3(
             &JsValue::NULL,
             &bytes.into(),
             &JsValue::from_str(wasm_base_path),
+            &config,
         )?
         .dyn_into::<Promise>()
         .map_err(|_| JsValue::from_str("rustRoboticsOrtSmokeTest did not return a Promise"))?;
@@ -1443,7 +1573,12 @@ async fn mujoco_init(
     wasm_bindgen_futures::JsFuture::from(promise).await
 }
 
-async fn mujoco_step(step_count: usize, command_vel_x: f32) -> Result<JsValue, JsValue> {
+async fn mujoco_step(
+    step_count: usize,
+    command_vel_x: f32,
+    command_vel_y: f32,
+    use_setpoint_ball: bool,
+) -> Result<JsValue, JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is unavailable"))?;
     let function = Reflect::get(
         window.as_ref(),
@@ -1453,10 +1588,12 @@ async fn mujoco_step(step_count: usize, command_vel_x: f32) -> Result<JsValue, J
     .map_err(|_| JsValue::from_str("rustRoboticsMujocoStep is not a function"))?;
 
     let promise = function
-        .call2(
+        .call4(
             &JsValue::NULL,
             &JsValue::from_f64(step_count as f64),
             &JsValue::from_f64(command_vel_x as f64),
+            &JsValue::from_f64(command_vel_y as f64),
+            &JsValue::from_bool(use_setpoint_ball),
         )?
         .dyn_into::<Promise>()
         .map_err(|_| JsValue::from_str("rustRoboticsMujocoStep did not return a Promise"))?;

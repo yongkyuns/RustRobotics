@@ -44,7 +44,7 @@ async function configureRustRoboticsOrt(wasmBasePath) {
   return ort;
 }
 
-export async function rustRoboticsOrtSmokeTest(modelBytes, wasmBasePath) {
+export async function rustRoboticsOrtSmokeTest(modelBytes, wasmBasePath, config = null) {
   const ort = await configureRustRoboticsOrt(wasmBasePath);
 
   const session = await ort.InferenceSession.create(modelBytes, {
@@ -58,10 +58,22 @@ export async function rustRoboticsOrtSmokeTest(modelBytes, wasmBasePath) {
   }
 
   const feeds = {};
-  feeds[inputNames[0]] = new ort.Tensor("float32", new Float32Array(117), [1, 117]);
-  feeds[inputNames[1]] = new ort.Tensor("bool", [false], [1]);
-  feeds[inputNames[2]] = new ort.Tensor("float32", new Float32Array(128), [1, 128]);
-  feeds[inputNames[3]] = new ort.Tensor("float32", new Float32Array(16), [1, 16]);
+  const commandDim = Number(config?.command_dim) || 16;
+  const inputKeys = Array.isArray(config?.input_keys) ? config.input_keys : inputNames;
+  const nameFor = (predicate) => inputNames.find(predicate) ?? inputKeys.find(predicate);
+  const policyName = nameFor((name) => name === "policy");
+  const isInitName = nameFor((name) => name === "is_init");
+  const adaptHxName = nameFor((name) => name.includes("adapt_hx"));
+  const commandName = inputNames.find(
+    (name) => name !== policyName && name !== isInitName && name !== adaptHxName,
+  );
+  if (!policyName || !isInitName || !adaptHxName || !commandName) {
+    throw new Error(`failed to resolve ONNX smoke-test inputs from ${inputNames.join(", ")}`);
+  }
+  feeds[policyName] = new ort.Tensor("float32", new Float32Array(117), [1, 117]);
+  feeds[isInitName] = new ort.Tensor("bool", [false], [1]);
+  feeds[adaptHxName] = new ort.Tensor("float32", new Float32Array(128), [1, 128]);
+  feeds[commandName] = new ort.Tensor("float32", new Float32Array(commandDim), [1, commandDim]);
 
   const outputs = await session.run(feeds);
   const outputNames = Array.from(session.outputNames);
@@ -137,6 +149,29 @@ function buildOutputNameMap(outputKeys, outputNames) {
   return mapping;
 }
 
+function buildInputNameMap(inputKeys, inputNames) {
+  const mapping = {
+    policy: null,
+    is_init: null,
+    adapt_hx: null,
+    command: null,
+  };
+  const count = Math.min(inputKeys.length, inputNames.length);
+  for (let i = 0; i < count; ++i) {
+    const key = inputKeys[i];
+    if (key === "policy") {
+      mapping.policy = inputNames[i];
+    } else if (key === "is_init") {
+      mapping.is_init = inputNames[i];
+    } else if (key.includes("adapt_hx")) {
+      mapping.adapt_hx = inputNames[i];
+    } else {
+      mapping.command = inputNames[i];
+    }
+  }
+  return mapping;
+}
+
 function stripJointSuffix(name) {
   return name.endsWith("_joint") ? name.slice(0, -6) : name;
 }
@@ -168,9 +203,9 @@ function oscillator(timeS) {
 
 function quaternionYaw(q) {
   const [w, x, y, z] = q;
-  const sinyCosp = 2.0 * (w * z + x * y);
-  const cosyCosp = 1.0 - 2.0 * (y * y + z * z);
-  return Math.atan2(sinyCosp, cosyCosp);
+  const sinzCosp = 2.0 * (x * y + z * w);
+  const coszCosp = w * w + x * x - y * y - z * z;
+  return Math.atan2(sinzCosp, coszCosp);
 }
 
 function rotateVectorByQuaternion(q, v) {
@@ -219,9 +254,11 @@ function flattenPolicyInput(runtime) {
     out.set(step, idx);
     idx += 12;
   }
-  for (const step of runtime.actionHistory) {
-    out.set(step, idx);
-    idx += 12;
+  for (let joint = 0; joint < 12; ++joint) {
+    for (let step = 0; step < runtime.actionHistory.length; ++step) {
+      out[idx] = runtime.actionHistory[step][joint];
+      idx += 1;
+    }
   }
 
   return out;
@@ -244,10 +281,10 @@ function updatePolicyInput(runtime) {
   shiftHistory(runtime.jointVelHistory, jointVel);
 }
 
-function computeCommandInput(runtime, commandVelX) {
+function computeVelocityCommandInput(runtime, commandVelX, commandVelY) {
   const qpos = runtime.data.qpos;
   const quat = [qpos[3], qpos[4], qpos[5], qpos[6]];
-  const command = rotateVectorByInverseQuaternion(quat, [commandVelX, 0.0, 0.0]);
+  const command = rotateVectorByInverseQuaternion(quat, [commandVelX, commandVelY, 0.0]);
   const yaw = quaternionYaw(quat);
   const osc = oscillator(runtime.mujocoTimeMs / 1000.0);
 
@@ -271,17 +308,81 @@ function computeCommandInput(runtime, commandVelX) {
   ]);
 }
 
-async function runPolicy(runtime, commandVelX) {
+function computeImpedanceCommandInput(runtime) {
+  const qpos = runtime.data.qpos;
+  const quat = [qpos[3], qpos[4], qpos[5], qpos[6]];
+  const basePos = [Number(qpos[0]), Number(qpos[1]), Number(qpos[2])];
+  const kp = runtime.impedanceKp ?? 24.0;
+  const kd = 1.8 * Math.sqrt(kp);
+  const osc = oscillator(runtime.mujocoTimeMs / 1000.0);
+  const setpointWorld = runtime.useSetpointBall
+    ? [runtime.commandSetpoint.x, runtime.commandSetpoint.y, 0.0]
+    : [
+        basePos[0] + runtime.commandVelX * (kd / kp),
+        basePos[1] + runtime.commandVelY * (kd / kp),
+        0.0,
+      ];
+  let setpointBody = rotateVectorByInverseQuaternion(quat, [
+    setpointWorld[0] - basePos[0],
+    setpointWorld[1] - basePos[1],
+    setpointWorld[2] - basePos[2],
+  ]);
+  const norm = Math.hypot(setpointBody[0], setpointBody[1], setpointBody[2]);
+  if (norm > 1e-6) {
+    const scale = Math.min(norm, 2.0) / norm;
+    setpointBody = [setpointBody[0] * scale, setpointBody[1] * scale, setpointBody[2] * scale];
+  }
+  const yaw = quaternionYaw(quat);
+  const mass = 1.0;
+  return new Float32Array([
+    setpointBody[0],
+    setpointBody[1],
+    -yaw,
+    kp * setpointBody[0],
+    kp * setpointBody[1],
+    kd,
+    kd,
+    kd,
+    kp * -yaw,
+    mass,
+    (kp * setpointBody[0]) / mass,
+    (kp * setpointBody[1]) / mass,
+    kd / mass,
+    kd / mass,
+    kd / mass,
+    osc[0],
+    osc[1],
+    osc[2],
+    osc[3],
+    osc[4],
+    osc[5],
+    osc[6],
+    osc[7],
+    osc[8],
+    osc[9],
+    osc[10],
+    osc[11],
+  ]);
+}
+
+function computeCommandInput(runtime, commandVelX, commandVelY) {
+  if (runtime.commandMode === "impedance") {
+    return computeImpedanceCommandInput(runtime);
+  }
+  return computeVelocityCommandInput(runtime, commandVelX, commandVelY);
+}
+
+async function runPolicy(runtime, commandVelX, commandVelY) {
   const ort = globalThis.ort;
   const policyInput = flattenPolicyInput(runtime);
-  const commandInput = computeCommandInput(runtime, commandVelX);
+  const commandInput = computeCommandInput(runtime, commandVelX, commandVelY);
   const adaptHx = new Float32Array(runtime.adaptHx);
 
   const feeds = {};
-  feeds[runtime.policyInputNames[0]] = new ort.Tensor("float32", policyInput, [1, 117]);
-  feeds[runtime.policyInputNames[1]] = new ort.Tensor("bool", [runtime.isInit], [1]);
-  feeds[runtime.policyInputNames[2]] = new ort.Tensor("float32", adaptHx, [1, 128]);
-  feeds[runtime.policyInputNames[3]] = new ort.Tensor("float32", commandInput, [1, 16]);
+  feeds[runtime.inputNameMap.policy] = new ort.Tensor("float32", policyInput, [1, 117]);
+  feeds[runtime.inputNameMap.is_init] = new ort.Tensor("bool", [runtime.isInit], [1]);
+  feeds[runtime.inputNameMap.adapt_hx] = new ort.Tensor("float32", adaptHx, [1, 128]);
+  feeds[runtime.inputNameMap.command] = new ort.Tensor("float32", commandInput, [1, runtime.commandDim]);
 
   const outputs = await runtime.ortSession.run(feeds);
   const actionTensor = outputs[runtime.actionOutputName];
@@ -418,6 +519,44 @@ function updateVisualGeomState(runtime) {
   }
 }
 
+function basePosition(runtime) {
+  const qpos = runtime.data.qpos;
+  return [Number(qpos[0]), Number(qpos[1]), Number(qpos[2])];
+}
+
+function syncCommandSetpointFromCommand(runtime) {
+  const basePos = basePosition(runtime);
+  let scale = 1.0;
+  if (runtime.commandMode === "impedance") {
+    const kp = runtime.config.stiffness;
+    const kd = 1.8 * Math.sqrt(kp);
+    scale = kd / kp;
+  }
+  runtime.commandSetpoint = {
+    x: basePos[0] + runtime.commandVelX * scale,
+    y: basePos[1] + runtime.commandVelY * scale,
+    z: COMMAND_BALL_HEIGHT,
+  };
+}
+
+function updateCommandFromSetpoint(runtime) {
+  if (!runtime.commandSetpoint) {
+    syncCommandSetpointFromCommand(runtime);
+  }
+  const basePos = basePosition(runtime);
+  let dx = runtime.commandSetpoint.x - basePos[0];
+  let dy = runtime.commandSetpoint.y - basePos[1];
+  const norm = Math.hypot(dx, dy);
+  if (norm > MAX_COMMAND_SPEED && norm > 1e-6) {
+    const scale = MAX_COMMAND_SPEED / norm;
+    dx *= scale;
+    dy *= scale;
+  }
+  runtime.commandVelX = dx;
+  runtime.commandVelY = dy;
+  runtime.commandSetpoint.z = COMMAND_BALL_HEIGHT;
+}
+
 function collectMeshAssets(runtime) {
   const meshAssets = [];
   const allVerts = runtime.model.mesh_vert;
@@ -459,6 +598,15 @@ function buildMujocoReport(runtime, includeMeshAssets = false) {
     policy_inputs: Array.from(runtime.policyInputNames),
     policy_outputs: Array.from(runtime.policyOutputNames),
     command_vel_x: runtime.commandVelX,
+    command_vel_y: runtime.commandVelY,
+    use_setpoint_ball: Boolean(runtime.useSetpointBall),
+    command_mode: runtime.commandMode ?? "velocity",
+    setpoint_preview: runtime.commandSetpoint
+      ? [runtime.commandSetpoint.x, runtime.commandSetpoint.y, runtime.commandSetpoint.z]
+      : [],
+    debug_drag_mode: runtime.debugDragMode ?? "",
+    debug_pointer_downs: Number(runtime.debugPointerDowns ?? 0),
+    debug_pointer_moves: Number(runtime.debugPointerMoves ?? 0),
     display_fps: Number(runtime.displayFps ?? 0.0),
     last_step_wall_ms: Number(runtime.lastStepWallMs ?? 0.0),
     avg_step_wall_ms: Number(runtime.avgStepWallMs ?? 0.0),
@@ -514,10 +662,14 @@ async function createRustRoboticsMujocoRuntime(
   }
 
   const outputNameMap = buildOutputNameMap(config.output_keys, Array.from(ortSession.outputNames));
+  const inputNameMap = buildInputNameMap(config.input_keys, Array.from(ortSession.inputNames));
   const actionOutputName = outputNameMap.get("action");
   const nextHxOutputName = outputNameMap.get("next.adapt_hx");
   if (!actionOutputName || !nextHxOutputName) {
     throw new Error("ONNX output mapping is missing action or next.adapt_hx");
+  }
+  if (!inputNameMap.policy || !inputNameMap.is_init || !inputNameMap.adapt_hx || !inputNameMap.command) {
+    throw new Error("ONNX input mapping is missing policy/is_init/adapt_hx/command");
   }
 
   const timestep = Number(model.opt.timestep);
@@ -533,6 +685,7 @@ async function createRustRoboticsMujocoRuntime(
     ctrlAdr,
     policyInputNames: Array.from(ortSession.inputNames),
     policyOutputNames: Array.from(ortSession.outputNames),
+    inputNameMap,
     actionOutputName,
     nextHxOutputName,
     lastActions: new Float32Array(12),
@@ -551,6 +704,14 @@ async function createRustRoboticsMujocoRuntime(
     mujocoTimeMs: 0.0,
     stepCount: 0,
     commandVelX: 0.0,
+    commandVelY: 0.0,
+    useSetpointBall: true,
+    commandMode: config.command_mode ?? "velocity",
+    commandDim: Number(config.command_dim) || 16,
+    impedanceKp: 24.0,
+    debugDragMode: "",
+    debugPointerDowns: 0,
+    debugPointerMoves: 0,
     displayFps: 0.0,
     lastFrameTimeMs: 0.0,
     lastStepWallMs: 0.0,
@@ -562,6 +723,7 @@ async function createRustRoboticsMujocoRuntime(
     lastOverlayWallMs: 0.0,
     avgOverlayWallMs: 0.0,
   };
+  syncCommandSetpointFromCommand(rustRoboticsMujocoRuntime);
   rustRoboticsMujocoRuntime.visualGeomMeta = collectVisualGeomMeta(rustRoboticsMujocoRuntime);
   rustRoboticsMujocoRuntime.visualGeomState = createVisualGeomState(rustRoboticsMujocoRuntime.visualGeomMeta);
   const initialMeshAssets = collectMeshAssets(rustRoboticsMujocoRuntime);
@@ -602,7 +764,7 @@ export async function rustRoboticsMujocoInit(
   };
 }
 
-export async function rustRoboticsMujocoStep(stepCount, commandVelX) {
+export async function rustRoboticsMujocoStep(stepCount, commandVelX, commandVelY, useSetpointBall) {
   if (!rustRoboticsMujocoRuntime) {
     throw new Error("MuJoCo runtime is not initialized");
   }
@@ -610,13 +772,22 @@ export async function rustRoboticsMujocoStep(stepCount, commandVelX) {
   const runtime = rustRoboticsMujocoRuntime;
   const steps = Math.max(1, Number(stepCount) || 1);
   runtime.commandVelX = Number(commandVelX) || 0.0;
+  runtime.commandVelY = Number(commandVelY) || 0.0;
+  runtime.useSetpointBall =
+    runtime.commandMode === "impedance" ? true : Boolean(useSetpointBall);
+  if (!runtime.useSetpointBall) {
+    syncCommandSetpointFromCommand(runtime);
+  }
   const stepStart = performance.now();
   let policyTotalMs = 0.0;
   let physicsTotalMs = 0.0;
   for (let i = 0; i < steps; ++i) {
+    if (runtime.useSetpointBall) {
+      updateCommandFromSetpoint(runtime);
+    }
     const policyStart = performance.now();
     updatePolicyInput(runtime);
-    await runPolicy(runtime, runtime.commandVelX);
+    await runPolicy(runtime, runtime.commandVelX, runtime.commandVelY);
     policyTotalMs += performance.now() - policyStart;
 
     const physicsStart = performance.now();
@@ -709,6 +880,20 @@ export function rustRoboticsMujocoResetViewportCamera() {
   requestMujocoOverlayRender();
 }
 
+export function rustRoboticsMujocoReset() {
+  if (rustRoboticsMujocoRuntime) {
+    maybeDelete(rustRoboticsMujocoRuntime.data);
+    maybeDelete(rustRoboticsMujocoRuntime.model);
+  }
+  rustRoboticsMujocoRuntime = null;
+  rustRoboticsMujocoInitPromise = null;
+  if (rustRoboticsMujocoOverlay) {
+    rustRoboticsMujocoOverlay.camera = defaultOverlayCamera();
+    rustRoboticsMujocoOverlay.cameraInitialized = false;
+    rustRoboticsMujocoOverlay.needsRender = true;
+  }
+}
+
 function ensureMujocoOverlay() {
   if (rustRoboticsMujocoOverlay) {
     return rustRoboticsMujocoOverlay;
@@ -750,6 +935,9 @@ function ensureMujocoOverlay() {
     rafHandle: 0,
     lastPointer: null,
     dragButton: null,
+    dragMode: null,
+    setpointGrabDistance: 0.0,
+    setpointDragStart: null,
     needsRender: true,
     lastRenderMs: 0,
     left: 0,
@@ -790,6 +978,50 @@ function ensureMujocoOverlay() {
     }
     overlay.lastPointer = { x: event.clientX, y: event.clientY };
     overlay.dragButton = event.button;
+    overlay.dragMode = null;
+    if (event.button === 0 && rustRoboticsMujocoRuntime) {
+      const runtime = rustRoboticsMujocoRuntime;
+      runtime.debugPointerDowns = (runtime.debugPointerDowns ?? 0) + 1;
+      if (runtime.useSetpointBall) {
+        const setpoint = [
+          runtime.commandSetpoint.x,
+          runtime.commandSetpoint.y,
+          runtime.commandSetpoint.z,
+        ];
+        overlay.setpointGrabDistance = distance3(cameraEye(overlay.camera), setpoint);
+        overlay.dragMode = "setpoint";
+        runtime.debugDragMode = "setpoint";
+        overlay.setpointDragStart = {
+          clientX: event.clientX,
+          clientY: event.clientY,
+          setpoint: {
+            x: runtime.commandSetpoint.x,
+            y: runtime.commandSetpoint.y,
+            z: runtime.commandSetpoint.z,
+          },
+        };
+        requestMujocoOverlayRender();
+      } else if (isPointerOnCommandBall(overlay, event, runtime)) {
+        const setpoint = [
+          runtime.commandSetpoint.x,
+          runtime.commandSetpoint.y,
+          runtime.commandSetpoint.z,
+        ];
+        overlay.setpointGrabDistance = distance3(cameraEye(overlay.camera), setpoint);
+        overlay.dragMode = "setpoint";
+        runtime.debugDragMode = "setpoint";
+        overlay.setpointDragStart = {
+          clientX: event.clientX,
+          clientY: event.clientY,
+          setpoint: {
+            x: runtime.commandSetpoint.x,
+            y: runtime.commandSetpoint.y,
+            z: runtime.commandSetpoint.z,
+          },
+        };
+        requestMujocoOverlayRender();
+      }
+    }
     canvas.setPointerCapture(event.pointerId);
   });
   canvas.addEventListener("pointermove", (event) => {
@@ -799,11 +1031,24 @@ function ensureMujocoOverlay() {
     const dx = event.clientX - overlay.lastPointer.x;
     const dy = event.clientY - overlay.lastPointer.y;
     overlay.lastPointer = { x: event.clientX, y: event.clientY };
+    if (rustRoboticsMujocoRuntime) {
+      rustRoboticsMujocoRuntime.debugPointerMoves =
+        (rustRoboticsMujocoRuntime.debugPointerMoves ?? 0) + 1;
+    }
 
-    if (overlay.dragButton === 0) {
+    if (overlay.dragMode === "setpoint" && rustRoboticsMujocoRuntime) {
+      rustRoboticsMujocoRuntime.debugDragMode = "setpoint";
+      updateCommandSetpointFromDragRay(overlay, event, rustRoboticsMujocoRuntime);
+    } else if (overlay.dragButton === 0) {
+      if (rustRoboticsMujocoRuntime) {
+        rustRoboticsMujocoRuntime.debugDragMode = "orbit";
+      }
       overlay.camera.azimuthDeg -= dx * 0.25;
       overlay.camera.elevationDeg = clamp(overlay.camera.elevationDeg + dy * 0.2, -89.0, 89.0);
     } else if (overlay.dragButton === 2) {
+      if (rustRoboticsMujocoRuntime) {
+        rustRoboticsMujocoRuntime.debugDragMode = "pan";
+      }
       const forward = orbitForward(overlay.camera.azimuthDeg, overlay.camera.elevationDeg);
       const right = normalize3(cross3(forward, [0.0, 0.0, 1.0]));
       const up = normalize3(cross3(right, forward));
@@ -819,6 +1064,11 @@ function ensureMujocoOverlay() {
   canvas.addEventListener("pointerup", (event) => {
     overlay.lastPointer = null;
     overlay.dragButton = null;
+    overlay.dragMode = null;
+    overlay.setpointDragStart = null;
+    if (rustRoboticsMujocoRuntime) {
+      rustRoboticsMujocoRuntime.debugDragMode = "released";
+    }
     try {
       canvas.releasePointerCapture(event.pointerId);
     } catch (_) {}
@@ -826,6 +1076,11 @@ function ensureMujocoOverlay() {
   canvas.addEventListener("pointercancel", () => {
     overlay.lastPointer = null;
     overlay.dragButton = null;
+    overlay.dragMode = null;
+    overlay.setpointDragStart = null;
+    if (rustRoboticsMujocoRuntime) {
+      rustRoboticsMujocoRuntime.debugDragMode = "cancel";
+    }
   });
 
   rustRoboticsMujocoOverlay = overlay;
@@ -896,6 +1151,7 @@ function renderMujocoOverlay(now) {
     overlay.canvas.width / Math.max(1, overlay.canvas.height),
     overlay.camera,
     overlay.diagnosticColors,
+    runtime,
   );
   paintOverlayScene(overlay.renderer, gl, scene);
   overlay.needsRender = false;
@@ -1011,7 +1267,7 @@ function paintOverlayScene(renderer, gl, scene) {
   gl.useProgram(null);
 }
 
-function buildOverlaySceneFrame(geoms, meshAssets, aspect, camera, diagnosticColors) {
+function buildOverlaySceneFrame(geoms, meshAssets, aspect, camera, diagnosticColors, runtime = null) {
   const triangles = [];
   const lines = [];
   const meshDraws = [];
@@ -1042,12 +1298,34 @@ function buildOverlaySceneFrame(geoms, meshAssets, aspect, camera, diagnosticCol
         break;
     }
   }
+  if (runtime?.commandSetpoint) {
+    appendCommandSetpointMarker(triangles, lines, runtime);
+  }
   return {
     triangles: new Float32Array(triangles),
     lines: new Float32Array(lines),
     meshDraws,
     viewProj: new Float32Array(viewProjectionMatrix(camera, Math.max(0.1, aspect))),
   };
+}
+
+function appendCommandSetpointMarker(triangles, lines, runtime) {
+  const basePos = basePosition(runtime);
+  const ballGeom = {
+    type_id: 2,
+    dataid: -1,
+    size: [COMMAND_BALL_RADIUS, 0.0, 0.0],
+    rgba: runtime.useSetpointBall ? [0.94, 0.27, 0.27, 1.0] : [0.94, 0.55, 0.27, 1.0],
+    pos: [runtime.commandSetpoint.x, runtime.commandSetpoint.y, runtime.commandSetpoint.z],
+    mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+  };
+  appendSphereGeom(triangles, ballGeom, 10, 16, false);
+  pushLine(
+    lines,
+    [basePos[0], basePos[1], COMMAND_BALL_HEIGHT],
+    [runtime.commandSetpoint.x, runtime.commandSetpoint.y, runtime.commandSetpoint.z],
+    runtime.useSetpointBall ? [0.95, 0.55, 0.55, 1.0] : [0.95, 0.72, 0.55, 1.0],
+  );
 }
 
 function appendGridLines(lines) {
@@ -1349,9 +1627,9 @@ function viewMatrix(camera) {
   const right = normalize3(cross3(forward, worldUp));
   const up = normalize3(cross3(right, forward));
   return [
-    right[0], right[1], right[2], 0.0,
-    up[0], up[1], up[2], 0.0,
-    -forward[0], -forward[1], -forward[2], 0.0,
+    right[0], up[0], -forward[0], 0.0,
+    right[1], up[1], -forward[1], 0.0,
+    right[2], up[2], -forward[2], 0.0,
     -dot3(right, eye), -dot3(up, eye), dot3(forward, eye), 1.0,
   ];
 }
@@ -1381,6 +1659,147 @@ function orbitForward(azimuthDeg, elevationDeg) {
     Math.sin(azimuth) * Math.cos(elevation),
     Math.sin(elevation),
   ]);
+}
+
+function projectPointToScreen(overlay, point) {
+  const rect = overlay.canvas.getBoundingClientRect();
+  const clip = mulMat4Vec4(viewProjectionMatrix(overlay.camera, Math.max(0.1, rect.width / Math.max(1.0, rect.height))), [
+    point[0], point[1], point[2], 1.0,
+  ]);
+  if (Math.abs(clip[3]) <= 1e-6) {
+    return null;
+  }
+  const ndcX = clip[0] / clip[3];
+  const ndcY = clip[1] / clip[3];
+  const ndcZ = clip[2] / clip[3];
+  return {
+    x: rect.left + (ndcX * 0.5 + 0.5) * rect.width,
+    y: rect.top + (1.0 - (ndcY * 0.5 + 0.5)) * rect.height,
+    z: ndcZ,
+  };
+}
+
+function isPointerOnCommandBall(overlay, event, runtime) {
+  const point = projectPointToScreen(overlay, [
+    runtime.commandSetpoint.x,
+    runtime.commandSetpoint.y,
+    runtime.commandSetpoint.z,
+  ]);
+  if (!point) {
+    return false;
+  }
+  const dx = event.clientX - point.x;
+  const dy = event.clientY - point.y;
+  return dx * dx + dy * dy <= 18.0 * 18.0;
+}
+
+function updateCommandSetpointFromPointer(overlay, event, runtime) {
+  const hit = intersectPointerWithGround(overlay, event.clientX, event.clientY, COMMAND_BALL_HEIGHT);
+  if (!hit) {
+    return;
+  }
+  runtime.commandSetpoint.x = hit[0];
+  runtime.commandSetpoint.y = hit[1];
+  runtime.commandSetpoint.z = COMMAND_BALL_HEIGHT;
+  if (runtime.useSetpointBall) {
+    updateCommandFromSetpoint(runtime);
+    runtime.lastReport = buildMujocoReport(runtime, false);
+  }
+}
+
+function updateCommandSetpointFromScreenDelta(overlay, event, runtime) {
+  const start = overlay.setpointDragStart;
+  if (!start) {
+    return;
+  }
+  const p0 = [start.setpoint.x, start.setpoint.y, COMMAND_BALL_HEIGHT];
+  const s0 = projectPointToScreen(overlay, p0);
+  const sx = projectPointToScreen(overlay, [p0[0] + 1.0, p0[1], p0[2]]);
+  const sy = projectPointToScreen(overlay, [p0[0], p0[1] + 1.0, p0[2]]);
+  if (!s0 || !sx || !sy) {
+    return;
+  }
+  const a11 = sx.x - s0.x;
+  const a21 = sx.y - s0.y;
+  const a12 = sy.x - s0.x;
+  const a22 = sy.y - s0.y;
+  const det = a11 * a22 - a12 * a21;
+  if (Math.abs(det) <= 1e-6) {
+    return;
+  }
+  const dxScreen = event.clientX - start.clientX;
+  const dyScreen = event.clientY - start.clientY;
+  const invDet = 1.0 / det;
+  const dxWorld = ( a22 * dxScreen - a12 * dyScreen) * invDet;
+  const dyWorld = (-a21 * dxScreen + a11 * dyScreen) * invDet;
+  runtime.commandSetpoint.x = start.setpoint.x + dxWorld;
+  runtime.commandSetpoint.y = start.setpoint.y + dyWorld;
+  runtime.commandSetpoint.z = COMMAND_BALL_HEIGHT;
+  if (runtime.useSetpointBall) {
+    updateCommandFromSetpoint(runtime);
+    runtime.lastReport = buildMujocoReport(runtime, false);
+  }
+}
+
+function updateCommandSetpointFromDragRay(overlay, event, runtime) {
+  const distance = Math.max(0.1, overlay.setpointGrabDistance || 0.0);
+  const point = pointOnPointerRayAtDistance(overlay, event.clientX, event.clientY, distance);
+  if (!point) {
+    return;
+  }
+  runtime.commandSetpoint.x = point[0];
+  runtime.commandSetpoint.y = point[1];
+  runtime.commandSetpoint.z = COMMAND_BALL_HEIGHT;
+  if (runtime.useSetpointBall) {
+    updateCommandFromSetpoint(runtime);
+    runtime.lastReport = buildMujocoReport(runtime, false);
+  }
+}
+
+function intersectPointerWithGround(overlay, clientX, clientY, planeZ) {
+  const { origin, direction } = pointerRay(overlay, clientX, clientY);
+  const denom = direction[2];
+  if (Math.abs(denom) <= 1e-6) {
+    return null;
+  }
+  const t = (planeZ - origin[2]) / denom;
+  if (t <= 0.0) {
+    return null;
+  }
+  return add3(origin, scale3(direction, t));
+}
+
+function pointOnPointerRayAtDistance(overlay, clientX, clientY, distance) {
+  const { origin, direction } = pointerRay(overlay, clientX, clientY);
+  return add3(origin, scale3(direction, distance));
+}
+
+function pointerRay(overlay, clientX, clientY) {
+  const rect = overlay.canvas.getBoundingClientRect();
+  const rectX = (clientX - rect.left) / Math.max(1.0, rect.width);
+  const rectY = (clientY - rect.top) / Math.max(1.0, rect.height);
+  const ndcX = rectX * 2.0 - 1.0;
+  const ndcY = 1.0 - rectY * 2.0;
+  const aspect = Math.max(0.1, rect.width / Math.max(1.0, rect.height));
+  const invViewProj = invertMat4(viewProjectionMatrix(overlay.camera, aspect));
+  if (!invViewProj) {
+    const eye = cameraEye(overlay.camera);
+    const forward = orbitForward(overlay.camera.azimuthDeg, overlay.camera.elevationDeg);
+    return { origin: eye, direction: forward };
+  }
+  const near4 = mulMat4Vec4(invViewProj, [ndcX, ndcY, -1.0, 1.0]);
+  const far4 = mulMat4Vec4(invViewProj, [ndcX, ndcY, 1.0, 1.0]);
+  const near = perspectiveDivide(near4);
+  const far = perspectiveDivide(far4);
+  if (!near || !far) {
+    const eye = cameraEye(overlay.camera);
+    const forward = orbitForward(overlay.camera.azimuthDeg, overlay.camera.elevationDeg);
+    return { origin: eye, direction: forward };
+  }
+  return {
+    origin: near,
+    direction: normalize3(sub3(far, near)),
+  };
 }
 
 function geomColor(geom) {
@@ -1545,6 +1964,10 @@ function dot3(a, b) {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
+function distance3(a, b) {
+  return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
 function cross3(a, b) {
   return [
     a[1] * b[2] - a[2] * b[1],
@@ -1587,6 +2010,67 @@ function mulMat4(a, b) {
   return out;
 }
 
+function mulMat4Vec4(m, v) {
+  return [
+    m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+    m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+    m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+    m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+  ];
+}
+
+function perspectiveDivide(v) {
+  if (Math.abs(v[3]) <= 1e-6) {
+    return null;
+  }
+  return [v[0] / v[3], v[1] / v[3], v[2] / v[3]];
+}
+
+function invertMat4(m) {
+  const out = new Array(16);
+  const m00 = m[0], m01 = m[4], m02 = m[8], m03 = m[12];
+  const m10 = m[1], m11 = m[5], m12 = m[9], m13 = m[13];
+  const m20 = m[2], m21 = m[6], m22 = m[10], m23 = m[14];
+  const m30 = m[3], m31 = m[7], m32 = m[11], m33 = m[15];
+
+  const b00 = m00 * m11 - m01 * m10;
+  const b01 = m00 * m12 - m02 * m10;
+  const b02 = m00 * m13 - m03 * m10;
+  const b03 = m01 * m12 - m02 * m11;
+  const b04 = m01 * m13 - m03 * m11;
+  const b05 = m02 * m13 - m03 * m12;
+  const b06 = m20 * m31 - m21 * m30;
+  const b07 = m20 * m32 - m22 * m30;
+  const b08 = m20 * m33 - m23 * m30;
+  const b09 = m21 * m32 - m22 * m31;
+  const b10 = m21 * m33 - m23 * m31;
+  const b11 = m22 * m33 - m23 * m32;
+
+  const det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (Math.abs(det) <= 1e-8) {
+    return null;
+  }
+  const invDet = 1.0 / det;
+
+  out[0] = (m11 * b11 - m12 * b10 + m13 * b09) * invDet;
+  out[1] = (-m10 * b11 + m12 * b08 - m13 * b07) * invDet;
+  out[2] = (m10 * b10 - m11 * b08 + m13 * b06) * invDet;
+  out[3] = (-m10 * b09 + m11 * b07 - m12 * b06) * invDet;
+  out[4] = (-m01 * b11 + m02 * b10 - m03 * b09) * invDet;
+  out[5] = (m00 * b11 - m02 * b08 + m03 * b07) * invDet;
+  out[6] = (-m00 * b10 + m01 * b08 - m03 * b06) * invDet;
+  out[7] = (m00 * b09 - m01 * b07 + m02 * b06) * invDet;
+  out[8] = (m31 * b05 - m32 * b04 + m33 * b03) * invDet;
+  out[9] = (-m30 * b05 + m32 * b02 - m33 * b01) * invDet;
+  out[10] = (m30 * b04 - m31 * b02 + m33 * b00) * invDet;
+  out[11] = (-m30 * b03 + m31 * b01 - m32 * b00) * invDet;
+  out[12] = (-m21 * b05 + m22 * b04 - m23 * b03) * invDet;
+  out[13] = (m20 * b05 - m22 * b02 + m23 * b01) * invDet;
+  out[14] = (-m20 * b04 + m21 * b02 - m23 * b00) * invDet;
+  out[15] = (m20 * b03 - m21 * b01 + m22 * b00) * invDet;
+  return out;
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -1604,6 +2088,9 @@ const IDENTITY_MAT3 = new Float32Array([
 ]);
 const WHITE_TINT = new Float32Array([1.0, 1.0, 1.0, 1.0]);
 const WHITE_COLOR = [1.0, 1.0, 1.0, 1.0];
+const COMMAND_BALL_HEIGHT = 0.05;
+const COMMAND_BALL_RADIUS = 0.06;
+const MAX_COMMAND_SPEED = 2.0;
 
 const OVERLAY_VERTEX_SHADER = `#version 300 es
 precision highp float;
