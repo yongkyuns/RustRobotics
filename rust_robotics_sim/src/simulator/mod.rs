@@ -1,10 +1,12 @@
 pub mod common;
 pub mod localization;
+pub mod mujoco;
 pub mod path_planning;
 pub mod pendulum;
 pub mod slam;
 
 use localization::ParticleFilter;
+use mujoco::MujocoPanel;
 use path_planning::{EnvironmentMode, PathPlanning};
 use pendulum::InvertedPendulum;
 use slam::SlamDemo;
@@ -85,6 +87,7 @@ where
 pub enum SimMode {
     InvertedPendulum,
     Localization,
+    Mujoco,
     PathPlanning,
     Slam,
 }
@@ -94,6 +97,7 @@ impl SimMode {
         match self {
             SimMode::InvertedPendulum => "Inverted Pendulum",
             SimMode::Localization => "Localization",
+            SimMode::Mujoco => "mujoco",
             SimMode::PathPlanning => "Path Planning",
             SimMode::Slam => "SLAM",
         }
@@ -112,6 +116,8 @@ pub struct Simulator {
     planners: Vec<PathPlanning>,
     /// Simulations for SLAM mode
     slam_demos: Vec<SlamDemo>,
+    /// Browser-hosted MuJoCo demo overlay
+    mujoco_panel: MujocoPanel,
     /// Current simulation time in seconds.
     time: f32,
     /// The speed with which to execute the simulation. This is actually a
@@ -149,6 +155,7 @@ impl Default for Simulator {
             vehicles: vec![ParticleFilter::new(1, 0.0)],
             planners: vec![PathPlanning::new(1, 0.0)],
             slam_demos: vec![SlamDemo::new(1, 0.0)],
+            mujoco_panel: MujocoPanel::default(),
             time: 0.0,
             sim_speed: 2,
             show_graph: false,
@@ -184,6 +191,9 @@ impl Simulator {
                         .iter_mut()
                         .for_each(|sim| (0..self.sim_speed).for_each(|_| sim.step(dt)));
                 }
+                SimMode::Mujoco => {
+                    self.mujoco_panel.update(self.sim_speed, self.paused);
+                }
                 SimMode::PathPlanning => {
                     self.planners
                         .iter_mut()
@@ -211,6 +221,7 @@ impl Simulator {
             SimMode::Localization => {
                 self.vehicles.iter_mut().for_each(|sim| sim.reset_state());
             }
+            SimMode::Mujoco => {}
             SimMode::PathPlanning => {
                 self.planners.iter_mut().for_each(|sim| sim.reset_state());
             }
@@ -229,6 +240,7 @@ impl Simulator {
             SimMode::Localization => {
                 self.vehicles.iter_mut().for_each(|sim| sim.reset_all());
             }
+            SimMode::Mujoco => {}
             SimMode::PathPlanning => {
                 self.planners.iter_mut().for_each(|sim| sim.reset_all());
             }
@@ -249,6 +261,7 @@ impl Simulator {
                 let id = self.vehicles.iter().map(|s| s.id()).max().unwrap_or(0) + 1;
                 self.vehicles.push(ParticleFilter::new(id, self.time));
             }
+            SimMode::Mujoco => {}
             SimMode::PathPlanning => {
                 let id = self.planners.iter().map(|s| s.id()).max().unwrap_or(0) + 1;
                 let mut new_planner = PathPlanning::new(id, self.time);
@@ -275,7 +288,7 @@ impl Simulator {
     }
 
     /// Draw the UI directly into a Ui (for embedding in CentralPanel)
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn ui(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
         // Handle space key to pause/resume simulation
         if ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) {
             self.paused = !self.paused;
@@ -309,6 +322,7 @@ impl Simulator {
             for mode in [
                 SimMode::InvertedPendulum,
                 SimMode::Localization,
+                SimMode::Mujoco,
                 SimMode::PathPlanning,
                 SimMode::Slam,
             ] {
@@ -346,10 +360,11 @@ impl Simulator {
             }
 
             // SLAM has single vehicle with multiple algorithms - no "Add" button
-            if self.mode != SimMode::Slam {
+            if self.mode != SimMode::Slam && self.mode != SimMode::Mujoco {
                 let add_label = match self.mode {
                     SimMode::InvertedPendulum => "Add Pendulum",
                     SimMode::Localization => "Add Vehicle",
+                    SimMode::Mujoco => unreachable!(),
                     SimMode::PathPlanning => "Add Planner",
                     SimMode::Slam => unreachable!(),
                 };
@@ -394,6 +409,9 @@ impl Simulator {
                 ui.horizontal(|ui| {
                     self.vehicles.retain_mut(|sim| sim.options(ui));
                 });
+            }
+            SimMode::Mujoco => {
+                self.mujoco_panel.ui(ui, frame);
             }
             SimMode::PathPlanning => {
                 // Common settings
@@ -533,6 +551,10 @@ impl Simulator {
                 SimMode::Localization | SimMode::Slam => {
                     ui.label("• Use Keyboard arrows to drive.");
                 }
+                SimMode::Mujoco => {
+                    ui.label("• The MuJoCo tab runs the native MuJoCo model and ONNX policy inside Rust.");
+                    ui.label("• If native MuJoCo GL rendering is unavailable, the tab falls back to a custom glow-based 3D renderer.");
+                }
                 _ => {}
             }
 
@@ -550,42 +572,52 @@ impl Simulator {
             ui.label("• Reset view with double-click.");
         });
 
-        // Main scene plot
-        let mut plot = Plot::new("Scene")
-            .legend(Legend::default().position(Corner::RightTop))
-            .show_x(false)
-            .show_y(false)
-            .data_aspect(1.0)
-            .allow_boxed_zoom(self.mode != SimMode::PathPlanning); // Disable box zoom for path planning to allow right-click
+        if self.mode == SimMode::Mujoco {
+            ui.separator();
+            ui.group(|ui| {
+                ui.label("MuJoCo viewport");
+                ui.label("The MuJoCo tab above owns the live simulator state and viewport.");
+                ui.label("Use drag to orbit, right-drag to pan, and mouse wheel to zoom in glow-fallback mode.");
+            });
+        } else {
+            // Main scene plot
+            let mut plot = Plot::new("Scene")
+                .legend(Legend::default().position(Corner::RightTop))
+                .show_x(false)
+                .show_y(false)
+                .data_aspect(1.0)
+                .allow_boxed_zoom(self.mode != SimMode::PathPlanning); // Disable box zoom for path planning to allow right-click
 
-        // For path planning: hide default grid and lock pan/zoom
-        if self.mode == SimMode::PathPlanning {
-            plot = plot
-                .show_grid(false)
-                .allow_drag(false)
-                .allow_scroll(false)
-                .allow_zoom(false);
-        }
+            // For path planning: hide default grid and lock pan/zoom
+            if self.mode == SimMode::PathPlanning {
+                plot = plot
+                    .show_grid(false)
+                    .allow_drag(false)
+                    .allow_scroll(false)
+                    .allow_zoom(false);
+            }
 
-        let plot_response = plot.show(ui, |plot_ui| match self.mode {
-            SimMode::InvertedPendulum => {
-                self.pendulums.iter().for_each(|sim| sim.scene(plot_ui));
-            }
-            SimMode::Localization => {
-                self.vehicles.iter().for_each(|sim| sim.scene(plot_ui));
-            }
-            SimMode::Slam => {
-                self.slam_demos.iter().for_each(|sim| sim.scene(plot_ui));
-            }
-            SimMode::PathPlanning => {
-                self.planners.iter().for_each(|sim| sim.scene(plot_ui));
-            }
-        });
+            let plot_response = plot.show(ui, |plot_ui| match self.mode {
+                SimMode::InvertedPendulum => {
+                    self.pendulums.iter().for_each(|sim| sim.scene(plot_ui));
+                }
+                SimMode::Localization => {
+                    self.vehicles.iter().for_each(|sim| sim.scene(plot_ui));
+                }
+                SimMode::Slam => {
+                    self.slam_demos.iter().for_each(|sim| sim.scene(plot_ui));
+                }
+                SimMode::PathPlanning => {
+                    self.planners.iter().for_each(|sim| sim.scene(plot_ui));
+                }
+                SimMode::Mujoco => unreachable!(),
+            });
 
-        // Handle mouse interactions for path planning
-        if self.mode == SimMode::PathPlanning {
-            for planner in &mut self.planners {
-                planner.handle_mouse(&plot_response);
+            // Handle mouse interactions for path planning
+            if self.mode == SimMode::PathPlanning {
+                for planner in &mut self.planners {
+                    planner.handle_mouse(&plot_response);
+                }
             }
         }
 
@@ -600,14 +632,14 @@ impl Simulator {
                 .show(ui.ctx(), |ui| {
                     ui.heading(format!("{} Instructions", self.mode.label()));
                     ui.separator();
-                    
+
                     match self.mode {
                         SimMode::PathPlanning => {
                             ui.label(RichText::new("How to Run").strong());
                             ui.label("1. Left-click to set Start (Green).");
                             ui.label("2. Left-click to set Goal (Red).");
                             ui.label("3. Simulation runs automatically.");
-                            
+
                             ui.add_space(5.0);
                             ui.label(RichText::new("Environment").strong());
                             ui.label("• Env: Switch between Grid (discrete) and Continuous (free space).");
@@ -618,7 +650,7 @@ impl Simulator {
                                 ui.label("• Right-click: Place circular obstacles.");
                                 ui.label("• Obs Radius: Adjust size of new obstacles.");
                             }
-                            
+
                             ui.add_space(5.0);
                             ui.label(RichText::new("Multi-Planner Comparison").strong());
                             ui.label("• Click 'Add Planner' to run multiple algorithms side-by-side.");
@@ -638,8 +670,12 @@ impl Simulator {
                             ui.label("• Watch the controller balance the pendulum.");
                             ui.label("• Use sliders to adjust parameters.");
                         }
+                        SimMode::Mujoco => {
+                            ui.label("• Use the MuJoCo tab controls to attach a demo URL.");
+                            ui.label("• The current implementation hosts the MuJoCo page in a browser overlay.");
+                        }
                     }
-                    
+
                     ui.separator();
                     if ui.button("Got it!").clicked() {
                         close_popup = true;
@@ -670,6 +706,7 @@ impl Simulator {
                             SimMode::Slam => {
                                 self.slam_demos.iter().for_each(|sim| sim.plot(plot_ui));
                             }
+                            SimMode::Mujoco => {}
                         });
                 });
         }
@@ -693,5 +730,7 @@ impl Simulator {
                     ctx.memory_ui(ui);
                 });
         }
+
+        self.mujoco_panel.set_active(self.mode == SimMode::Mujoco);
     }
 }
