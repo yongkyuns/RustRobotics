@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use eframe::egui::emath::GuiRounding;
 use rust_robotics_sim::simulator::mujoco::MujocoPanel;
 
 fn main() {
@@ -50,17 +51,54 @@ impl eframe::App for MujocoSmokeApp {
             });
         });
 
-        egui::SidePanel::left("mujoco_smoke_sidebar")
-            .resizable(false)
-            .default_width(360.0)
-            .min_width(360.0)
-            .max_width(360.0)
-            .show(ctx, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let full = ui.max_rect();
+            let sidebar_width = 360.0;
+            let gap = 12.0;
+
+            let sidebar_rect = egui::Rect::from_min_max(
+                full.min,
+                egui::pos2((full.min.x + sidebar_width).min(full.max.x), full.max.y),
+            );
+            let viewport_outer_rect = egui::Rect::from_min_max(
+                egui::pos2((sidebar_rect.max.x + gap).min(full.max.x), full.min.y),
+                full.max,
+            );
+
+            ui.scope_builder(egui::UiBuilder::new().max_rect(sidebar_rect), |ui| {
                 self.panel.ui_controls(ui);
             });
+            ui.scope_builder(egui::UiBuilder::new().max_rect(viewport_outer_rect), |ui| {
+                let frame_response = egui::Frame::canvas(ui.style())
+                    .inner_margin(egui::Margin::same(4))
+                    .show(ui, |ui| {
+                        self.panel.ui_viewport(ui, Some(frame));
+                    });
+                ui.painter().rect_stroke(
+                    frame_response.response.rect,
+                    0.0,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                    egui::StrokeKind::Inside,
+                );
+            });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.panel.ui_viewport(ui, Some(frame));
+            let divider_rect = egui::Rect::from_min_max(
+                egui::pos2(sidebar_rect.max.x, full.min.y),
+                egui::pos2((sidebar_rect.max.x + gap).min(full.max.x), full.max.y),
+            );
+            ui.painter()
+                .rect_filled(divider_rect, 0.0, ui.visuals().panel_fill);
+            let separator_x = divider_rect
+                .center()
+                .x
+                .round_to_pixel_center(ui.ctx().pixels_per_point());
+            ui.painter().line_segment(
+                [
+                    egui::pos2(separator_x, divider_rect.top()),
+                    egui::pos2(separator_x, divider_rect.bottom()),
+                ],
+                ui.visuals().widgets.noninteractive.bg_stroke,
+            );
         });
 
         ctx.request_repaint();

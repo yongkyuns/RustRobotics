@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+use egui::emath::GuiRounding;
 use egui::{
     pos2, vec2, Align2, Color32, ColorImage, FontId, Painter, PointerButton, Pos2, Rect, Sense,
     Shape, Slider, Stroke, TextEdit, TextureHandle, TextureOptions, Ui,
@@ -1391,7 +1393,7 @@ impl MujocoRuntime {
         mesh_filter: Option<usize>,
     ) -> Result<(), String> {
         let started = Instant::now();
-        let rect = ui.max_rect();
+        let rect = aligned_viewport_rect(ui);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         self.update_software_camera(ui, &response);
         self.update_visual_scene();
@@ -1454,7 +1456,7 @@ impl MujocoRuntime {
 
     fn render_software_2d(&mut self, ui: &mut Ui, desired_size: egui::Vec2) {
         let started = Instant::now();
-        let rect = ui.max_rect();
+        let rect = aligned_viewport_rect(ui);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         self.update_software_camera(ui, &response);
         self.update_visual_scene();
@@ -2050,12 +2052,16 @@ struct GlowSceneRenderer {
     triangle_vbo: Option<glow::NativeBuffer>,
     line_vao: Option<glow::NativeVertexArray>,
     line_vbo: Option<glow::NativeBuffer>,
+    present_program: Option<glow::NativeProgram>,
+    present_vao: Option<glow::NativeVertexArray>,
+    present_vbo: Option<glow::NativeBuffer>,
     offscreen_fbo: Option<glow::NativeFramebuffer>,
     offscreen_color: Option<glow::NativeTexture>,
     offscreen_depth: Option<glow::NativeRenderbuffer>,
     offscreen_size: [i32; 2],
     u_view_proj: Option<glow::NativeUniformLocation>,
     u_unlit: Option<glow::NativeUniformLocation>,
+    u_present_texture: Option<glow::NativeUniformLocation>,
     last_error: Option<String>,
     last_render_ms_ms: f32,
 }
@@ -2081,6 +2087,14 @@ impl GlowSceneRenderer {
             let line_vbo = gl
                 .create_buffer()
                 .map_err(|err| format!("Failed to create line VBO: {err}"))?;
+            let present_program =
+                create_gl_program(gl, PRESENT_VERTEX_SHADER, PRESENT_FRAGMENT_SHADER)?;
+            let present_vao = gl
+                .create_vertex_array()
+                .map_err(|err| format!("Failed to create present VAO: {err}"))?;
+            let present_vbo = gl
+                .create_buffer()
+                .map_err(|err| format!("Failed to create present VBO: {err}"))?;
             let offscreen_fbo = gl
                 .create_framebuffer()
                 .map_err(|err| format!("Failed to create offscreen FBO: {err}"))?;
@@ -2093,14 +2107,19 @@ impl GlowSceneRenderer {
 
             setup_vertex_array(gl, program, triangle_vao, triangle_vbo)?;
             setup_vertex_array(gl, program, line_vao, line_vbo)?;
+            setup_present_quad(gl, present_program, present_vao, present_vbo)?;
 
             self.u_view_proj = gl.get_uniform_location(program, "u_view_proj");
             self.u_unlit = gl.get_uniform_location(program, "u_unlit");
+            self.u_present_texture = gl.get_uniform_location(present_program, "u_texture");
             self.program = Some(program);
             self.triangle_vao = Some(triangle_vao);
             self.triangle_vbo = Some(triangle_vbo);
             self.line_vao = Some(line_vao);
             self.line_vbo = Some(line_vbo);
+            self.present_program = Some(present_program);
+            self.present_vao = Some(present_vao);
+            self.present_vbo = Some(present_vbo);
             self.offscreen_fbo = Some(offscreen_fbo);
             self.offscreen_color = Some(offscreen_color);
             self.offscreen_depth = Some(offscreen_depth);
@@ -2227,9 +2246,15 @@ impl GlowSceneRenderer {
         let program = self
             .program
             .ok_or_else(|| "Glow program is not initialized".to_string())?;
+        let present_program = self
+            .present_program
+            .ok_or_else(|| "Present program is not initialized".to_string())?;
         let fbo = self
             .offscreen_fbo
             .ok_or_else(|| "Offscreen FBO is not initialized".to_string())?;
+        let offscreen_color = self
+            .offscreen_color
+            .ok_or_else(|| "Offscreen color texture is not initialized".to_string())?;
         self.ensure_offscreen_target(gl, viewport.width_px, viewport.height_px)?;
 
         unsafe {
@@ -2282,8 +2307,13 @@ impl GlowSceneRenderer {
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.use_program(None);
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.viewport(
+                viewport.left_px,
+                viewport.from_bottom_px,
+                viewport.width_px,
+                viewport.height_px,
+            );
             gl.enable(glow::SCISSOR_TEST);
             gl.scissor(
                 clip.left_px,
@@ -2291,22 +2321,21 @@ impl GlowSceneRenderer {
                 clip.width_px,
                 clip.height_px,
             );
-            gl.blit_framebuffer(
-                0,
-                0,
-                viewport.width_px,
-                viewport.height_px,
-                viewport.left_px,
-                viewport.from_bottom_px,
-                viewport.left_px + viewport.width_px,
-                viewport.from_bottom_px + viewport.height_px,
-                glow::COLOR_BUFFER_BIT,
-                glow::NEAREST,
-            );
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
-            gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.use_program(Some(present_program));
+            if let Some(location) = self.u_present_texture.as_ref() {
+                gl.uniform_1_i32(Some(location), 0);
+            }
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(offscreen_color));
+            gl.bind_vertex_array(self.present_vao);
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            gl.bind_vertex_array(None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.use_program(None);
+            gl.disable(glow::SCISSOR_TEST);
             gl.enable(glow::BLEND);
         }
 
@@ -2413,6 +2442,19 @@ fn vertex_bounds(vertices: &[GlVertex]) -> ([f32; 3], [f32; 3]) {
 #[cfg(not(target_arch = "wasm32"))]
 fn fmt_duration(duration: Duration) -> String {
     format!("{:.2} ms", duration.as_secs_f64() * 1000.0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn aligned_viewport_rect(ui: &Ui) -> Rect {
+    let pixels_per_point = ui.ctx().pixels_per_point().max(1.0);
+    let pixel = 1.0 / pixels_per_point;
+    let mut rect = ui
+        .available_rect_before_wrap()
+        .shrink(pixel)
+        .round_to_pixels(pixels_per_point);
+    rect.min.x += pixel;
+    rect = rect.round_to_pixels(pixels_per_point);
+    rect
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3151,6 +3193,41 @@ fn setup_vertex_array(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn setup_present_quad(
+    gl: &glow::Context,
+    program: glow::NativeProgram,
+    vao: glow::NativeVertexArray,
+    vbo: glow::NativeBuffer,
+) -> Result<(), String> {
+    const QUAD: [f32; 16] = [
+        -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+    ];
+
+    unsafe {
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, slice_as_u8(&QUAD), glow::STATIC_DRAW);
+
+        let position = gl
+            .get_attrib_location(program, "a_pos")
+            .ok_or_else(|| "Present shader is missing a_pos attribute".to_string())?;
+        let uv = gl
+            .get_attrib_location(program, "a_uv")
+            .ok_or_else(|| "Present shader is missing a_uv attribute".to_string())?;
+
+        gl.enable_vertex_attrib_array(position);
+        gl.vertex_attrib_pointer_f32(position, 2, glow::FLOAT, false, 16, 0);
+        gl.enable_vertex_attrib_array(uv);
+        gl.vertex_attrib_pointer_f32(uv, 2, glow::FLOAT, false, 16, 8);
+
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn slice_as_u8<T>(slice: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
@@ -3183,6 +3260,29 @@ void main() {
     vec3 light_dir = normalize(vec3(0.35, 0.45, 0.82));
     float lit = (u_unlit != 0) ? 1.0 : (0.22 + 0.78 * max(dot(n, light_dir), 0.0));
     out_color = vec4(v_color.rgb * lit, v_color.a);
+}
+"#;
+
+#[cfg(not(target_arch = "wasm32"))]
+const PRESENT_VERTEX_SHADER: &str = r#"#version 150 core
+in vec2 a_pos;
+in vec2 a_uv;
+out vec2 v_uv;
+
+void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+    v_uv = a_uv;
+}
+"#;
+
+#[cfg(not(target_arch = "wasm32"))]
+const PRESENT_FRAGMENT_SHADER: &str = r#"#version 150 core
+uniform sampler2D u_texture;
+in vec2 v_uv;
+out vec4 out_color;
+
+void main() {
+    out_color = texture(u_texture, v_uv);
 }
 "#;
 
