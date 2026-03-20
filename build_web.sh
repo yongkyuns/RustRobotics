@@ -42,6 +42,24 @@ export RUSTFLAGS=--cfg=web_sys_unstable_apis
 
 # Clear output from old stuff:
 rm -f "docs/${CRATE_NAME_SNAKE_CASE}_bg.wasm"
+mkdir -p "docs/vendor/onnxruntime-web/dist"
+mkdir -p "docs/vendor/mujoco"
+mkdir -p "docs/vendor/mujoco/mt"
+
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort.wasm.min.js" \
+  "docs/vendor/onnxruntime-web/dist/ort.wasm.min.js"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs" \
+  "docs/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm" \
+  "docs/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm"
+cp "rust_robotics_sim/web/vendor/mujoco/mujoco.js" \
+  "docs/vendor/mujoco/mujoco.js"
+cp "rust_robotics_sim/web/vendor/mujoco/mujoco.wasm" \
+  "docs/vendor/mujoco/mujoco.wasm"
+cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.js" \
+  "docs/vendor/mujoco/mt/mujoco.js"
+cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.wasm" \
+  "docs/vendor/mujoco/mt/mujoco.wasm"
 
 echo "Building rust…"
 BUILD=release

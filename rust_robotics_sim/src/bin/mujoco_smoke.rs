@@ -1,10 +1,14 @@
 #![warn(clippy::all, rust_2018_idioms)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
+#[cfg(not(target_arch = "wasm32"))]
 use eframe::egui::emath::GuiRounding;
+#[cfg(not(target_arch = "wasm32"))]
 use rust_robotics_sim::simulator::mujoco::MujocoPanel;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     tracing_subscriber::fmt::init();
 
@@ -20,12 +24,17 @@ fn main() {
     );
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 struct MujocoSmokeApp {
     panel: MujocoPanel,
     paused: bool,
     sim_speed: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for MujocoSmokeApp {
     fn default() -> Self {
         let mut panel = MujocoPanel::default();
@@ -38,6 +47,7 @@ impl Default for MujocoSmokeApp {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl eframe::App for MujocoSmokeApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.panel.update(self.sim_speed, self.paused);
