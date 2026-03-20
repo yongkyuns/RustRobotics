@@ -2,6 +2,7 @@ let rustRoboticsOrtLoadPromise = null;
 let rustRoboticsMujocoModulePromise = null;
 let rustRoboticsMujocoRuntime = null;
 let rustRoboticsMujocoInitPromise = null;
+let rustRoboticsMujocoOverlay = null;
 
 function ensureRustRoboticsOrtLoaded() {
   if (globalThis.ort) {
@@ -395,7 +396,6 @@ function buildMujocoReport(runtime, includeMeshAssets = false) {
     policy_inputs: Array.from(runtime.policyInputNames),
     policy_outputs: Array.from(runtime.policyOutputNames),
     command_vel_x: runtime.commandVelX,
-    geoms: collectGeomSnapshots(runtime),
   };
   if (includeMeshAssets) {
     report.mesh_assets = collectMeshAssets(runtime);
@@ -480,6 +480,14 @@ async function createRustRoboticsMujocoRuntime(
     stepCount: 0,
     commandVelX: 0.0,
   };
+  const initialMeshAssets = collectMeshAssets(rustRoboticsMujocoRuntime);
+  rustRoboticsMujocoRuntime.meshAssets = convertBrowserMeshAssets(initialMeshAssets);
+  const initialReport = buildMujocoReport(rustRoboticsMujocoRuntime, true);
+  rustRoboticsMujocoRuntime.lastReport = {
+    ...initialReport,
+    mesh_assets: [],
+  };
+  requestMujocoOverlayRender();
   return rustRoboticsMujocoRuntime;
 }
 
@@ -504,7 +512,10 @@ export async function rustRoboticsMujocoInit(
     });
   }
   const runtime = await rustRoboticsMujocoInitPromise;
-  return buildMujocoReport(runtime, true);
+  return {
+    ...runtime.lastReport,
+    mesh_assets: collectMeshAssets(runtime),
+  };
 }
 
 export async function rustRoboticsMujocoStep(stepCount, commandVelX) {
@@ -525,5 +536,844 @@ export async function rustRoboticsMujocoStep(stepCount, commandVelX) {
     }
   }
   runtime.stepCount += steps;
-  return buildMujocoReport(runtime, false);
+  runtime.lastReport = buildMujocoReport(runtime, false);
+  requestMujocoOverlayRender();
+  return runtime.lastReport;
 }
+
+export function rustRoboticsMujocoConfigureViewport(config) {
+  const overlay = ensureMujocoOverlay();
+  const visible = Boolean(config?.visible);
+  const diagnosticColors = Boolean(config?.diagnostic_colors);
+  const left = Math.max(0, Number(config?.left) || 0);
+  const top = Math.max(0, Number(config?.top) || 0);
+  const width = Math.max(2, Number(config?.width) || 2);
+  const height = Math.max(2, Number(config?.height) || 2);
+  const pixelsPerPoint = Math.max(1, Number(config?.pixels_per_point) || 1);
+  const widthPx = Math.max(2, Math.round(width * pixelsPerPoint));
+  const heightPx = Math.max(2, Math.round(height * pixelsPerPoint));
+  const changed =
+    overlay.visible !== visible ||
+    overlay.diagnosticColors !== diagnosticColors ||
+    overlay.left !== left ||
+    overlay.top !== top ||
+    overlay.width !== width ||
+    overlay.height !== height ||
+    overlay.widthPx !== widthPx ||
+    overlay.heightPx !== heightPx;
+
+  overlay.visible = visible;
+  overlay.diagnosticColors = diagnosticColors;
+
+  if (!overlay.visible) {
+    overlay.canvas.style.display = "none";
+    return;
+  }
+  overlay.left = left;
+  overlay.top = top;
+  overlay.width = width;
+  overlay.height = height;
+  overlay.widthPx = widthPx;
+  overlay.heightPx = heightPx;
+
+  overlay.canvas.style.display = "block";
+  overlay.canvas.style.left = `${left}px`;
+  overlay.canvas.style.top = `${top}px`;
+  overlay.canvas.style.width = `${width}px`;
+  overlay.canvas.style.height = `${height}px`;
+  if (overlay.canvas.width !== widthPx) {
+    overlay.canvas.width = widthPx;
+  }
+  if (overlay.canvas.height !== heightPx) {
+    overlay.canvas.height = heightPx;
+  }
+
+  if (!overlay.cameraInitialized && rustRoboticsMujocoRuntime) {
+    fitOverlayCameraToGeoms(overlay.camera, collectGeomSnapshots(rustRoboticsMujocoRuntime));
+    overlay.cameraInitialized = true;
+  }
+
+  if (changed) {
+    requestMujocoOverlayRender();
+  }
+}
+
+export function rustRoboticsMujocoResetViewportCamera() {
+  const overlay = ensureMujocoOverlay();
+  overlay.camera = defaultOverlayCamera();
+  overlay.cameraInitialized = false;
+  if (rustRoboticsMujocoRuntime) {
+    fitOverlayCameraToGeoms(overlay.camera, collectGeomSnapshots(rustRoboticsMujocoRuntime));
+    overlay.cameraInitialized = true;
+  }
+  requestMujocoOverlayRender();
+}
+
+function ensureMujocoOverlay() {
+  if (rustRoboticsMujocoOverlay) {
+    return rustRoboticsMujocoOverlay;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.id = "rust-robotics-mujoco-overlay";
+  Object.assign(canvas.style, {
+    position: "absolute",
+    display: "none",
+    pointerEvents: "auto",
+    zIndex: "20",
+    background: "#12161c",
+    borderRadius: "6px",
+    touchAction: "none",
+  });
+  document.body.appendChild(canvas);
+
+  const gl = canvas.getContext("webgl2", {
+    alpha: false,
+    antialias: true,
+    depth: true,
+    stencil: false,
+    preserveDrawingBuffer: false,
+  });
+  if (!gl) {
+    throw new Error("Failed to create WebGL2 context for MuJoCo overlay");
+  }
+
+  const renderer = createOverlayRenderer(gl);
+  const overlay = {
+    canvas,
+    gl,
+    renderer,
+    visible: false,
+    diagnosticColors: false,
+    camera: defaultOverlayCamera(),
+    cameraInitialized: false,
+    rafHandle: 0,
+    lastPointer: null,
+    dragButton: null,
+    needsRender: true,
+    lastRenderMs: 0,
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+    widthPx: 0,
+    heightPx: 0,
+  };
+
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  canvas.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    overlay.camera = defaultOverlayCamera();
+    overlay.cameraInitialized = false;
+    if (rustRoboticsMujocoRuntime) {
+      fitOverlayCameraToGeoms(overlay.camera, collectGeomSnapshots(rustRoboticsMujocoRuntime));
+      overlay.cameraInitialized = true;
+    }
+    requestMujocoOverlayRender();
+  });
+  canvas.addEventListener(
+    "wheel",
+    (event) => {
+      if (!overlay.visible) {
+        return;
+      }
+      event.preventDefault();
+      const zoom = clamp(1.0 - event.deltaY * 0.0015, 0.8, 1.25);
+      overlay.camera.distance = clamp(overlay.camera.distance * zoom, 0.35, 40.0);
+      requestMujocoOverlayRender();
+    },
+    { passive: false },
+  );
+  canvas.addEventListener("pointerdown", (event) => {
+    if (!overlay.visible) {
+      return;
+    }
+    overlay.lastPointer = { x: event.clientX, y: event.clientY };
+    overlay.dragButton = event.button;
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!overlay.visible || overlay.lastPointer == null) {
+      return;
+    }
+    const dx = event.clientX - overlay.lastPointer.x;
+    const dy = event.clientY - overlay.lastPointer.y;
+    overlay.lastPointer = { x: event.clientX, y: event.clientY };
+
+    if (overlay.dragButton === 0) {
+      overlay.camera.azimuthDeg -= dx * 0.25;
+      overlay.camera.elevationDeg = clamp(overlay.camera.elevationDeg + dy * 0.2, -89.0, 89.0);
+    } else if (overlay.dragButton === 2) {
+      const forward = orbitForward(overlay.camera.azimuthDeg, overlay.camera.elevationDeg);
+      const right = normalize3(cross3(forward, [0.0, 0.0, 1.0]));
+      const up = normalize3(cross3(right, forward));
+      const panScale = overlay.camera.distance * 0.0025;
+      overlay.camera.target = sub3(
+        overlay.camera.target,
+        scale3(add3(scale3(right, dx), scale3(up, dy)), panScale),
+      );
+    }
+
+    requestMujocoOverlayRender();
+  });
+  canvas.addEventListener("pointerup", (event) => {
+    overlay.lastPointer = null;
+    overlay.dragButton = null;
+    try {
+      canvas.releasePointerCapture(event.pointerId);
+    } catch (_) {}
+  });
+  canvas.addEventListener("pointercancel", () => {
+    overlay.lastPointer = null;
+    overlay.dragButton = null;
+  });
+
+  rustRoboticsMujocoOverlay = overlay;
+  return overlay;
+}
+
+function ensureMujocoOverlayLoop() {
+  const overlay = ensureMujocoOverlay();
+  if (overlay.rafHandle !== 0) {
+    return;
+  }
+
+  const tick = (now) => {
+    overlay.rafHandle = 0;
+    if (!overlay.visible) {
+      return;
+    }
+    if (!overlay.needsRender) {
+      return;
+    }
+    const minFrameMs = 1000.0 / 30.0;
+    if (now - overlay.lastRenderMs < minFrameMs) {
+      overlay.rafHandle = window.requestAnimationFrame(tick);
+      return;
+    }
+    renderMujocoOverlay(now);
+    if (overlay.needsRender) {
+      overlay.rafHandle = window.requestAnimationFrame(tick);
+    }
+  };
+
+  overlay.rafHandle = window.requestAnimationFrame(tick);
+}
+
+function requestMujocoOverlayRender() {
+  if (rustRoboticsMujocoOverlay) {
+    rustRoboticsMujocoOverlay.needsRender = true;
+    ensureMujocoOverlayLoop();
+  }
+}
+
+function renderMujocoOverlay(now) {
+  const overlay = ensureMujocoOverlay();
+  if (!overlay.visible || !overlay.needsRender) {
+    return;
+  }
+  const runtime = rustRoboticsMujocoRuntime;
+  const gl = overlay.gl;
+  gl.viewport(0, 0, overlay.canvas.width, overlay.canvas.height);
+  gl.clearColor(0.07, 0.09, 0.12, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  if (!runtime?.lastReport || !runtime.meshAssets?.length) {
+    return;
+  }
+
+  const geoms = collectGeomSnapshots(runtime);
+
+  if (!overlay.cameraInitialized && geoms.length) {
+    fitOverlayCameraToGeoms(overlay.camera, geoms);
+    overlay.cameraInitialized = true;
+  }
+
+  const scene = buildOverlaySceneFrame(
+    geoms,
+    runtime.meshAssets,
+    overlay.canvas.width / Math.max(1, overlay.canvas.height),
+    overlay.camera,
+    overlay.diagnosticColors,
+  );
+  paintOverlayScene(overlay.renderer, gl, scene);
+  overlay.needsRender = false;
+  overlay.lastRenderMs = now ?? performance.now();
+}
+
+function createOverlayRenderer(gl) {
+  const program = createWebGlProgram(gl, OVERLAY_VERTEX_SHADER, OVERLAY_FRAGMENT_SHADER);
+  const triangleVao = gl.createVertexArray();
+  const triangleVbo = gl.createBuffer();
+  const lineVao = gl.createVertexArray();
+  const lineVbo = gl.createBuffer();
+  const uViewProj = gl.getUniformLocation(program, "u_view_proj");
+  const uUnlit = gl.getUniformLocation(program, "u_unlit");
+
+  setupOverlayVertexArray(gl, triangleVao, triangleVbo);
+  setupOverlayVertexArray(gl, lineVao, lineVbo);
+
+  return {
+    program,
+    triangleVao,
+    triangleVbo,
+    lineVao,
+    lineVbo,
+    uViewProj,
+    uUnlit,
+  };
+}
+
+function setupOverlayVertexArray(gl, vao, vbo) {
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  const stride = 10 * 4;
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 3 * 4);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 4, gl.FLOAT, false, stride, 6 * 4);
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+}
+
+function paintOverlayScene(renderer, gl, scene) {
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.useProgram(renderer.program);
+  gl.uniformMatrix4fv(renderer.uViewProj, false, scene.viewProj);
+
+  if (scene.triangles.length > 0) {
+    gl.uniform1i(renderer.uUnlit, 0);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.bindVertexArray(renderer.triangleVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, renderer.triangleVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, scene.triangles, gl.DYNAMIC_DRAW);
+    gl.drawArrays(gl.TRIANGLES, 0, scene.triangles.length / 10);
+    gl.disable(gl.CULL_FACE);
+  }
+
+  if (scene.lines.length > 0) {
+    gl.uniform1i(renderer.uUnlit, 1);
+    gl.bindVertexArray(renderer.lineVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, renderer.lineVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, scene.lines, gl.DYNAMIC_DRAW);
+    gl.drawArrays(gl.LINES, 0, scene.lines.length / 10);
+  }
+
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  gl.useProgram(null);
+}
+
+function buildOverlaySceneFrame(geoms, meshAssets, aspect, camera, diagnosticColors) {
+  const triangles = [];
+  const lines = [];
+  appendGridLines(lines);
+  for (const geom of geoms) {
+    switch (geom.type_id) {
+      case 0:
+        break;
+      case 2:
+        appendSphereGeom(triangles, geom, 12, 20, diagnosticColors);
+        break;
+      case 3:
+        appendCapsuleGeom(triangles, geom, 10, 18, diagnosticColors);
+        break;
+      case 5:
+        appendCylinderGeom(triangles, geom, 18, diagnosticColors);
+        break;
+      case 6:
+        appendBoxGeom(triangles, geom, diagnosticColors);
+        break;
+      case 7:
+        appendMeshGeom(triangles, geom, meshAssets, diagnosticColors);
+        break;
+      case 9:
+        appendLineGeom(lines, geom, diagnosticColors);
+        break;
+      default:
+        break;
+    }
+  }
+  return {
+    triangles: new Float32Array(triangles),
+    lines: new Float32Array(lines),
+    viewProj: new Float32Array(viewProjectionMatrix(camera, Math.max(0.1, aspect))),
+  };
+}
+
+function appendGridLines(lines) {
+  const color = [0.22, 0.28, 0.34, 1.0];
+  for (let i = -16; i <= 16; ++i) {
+    const offset = i * 0.25;
+    pushLine(lines, [-4.0, offset, 0.0], [4.0, offset, 0.0], color);
+    pushLine(lines, [offset, -4.0, 0.0], [offset, 4.0, 0.0], color);
+  }
+}
+
+function appendLineGeom(lines, geom, diagnosticColors) {
+  const axes = geomAxes(geom);
+  const half = scale3(axes[2], Math.max(geom.size[1], 0.02));
+  const a = sub3(geom.pos, half);
+  const b = add3(geom.pos, half);
+  pushLine(lines, a, b, displayGeomColor(geom, diagnosticColors));
+}
+
+function appendBoxGeom(triangles, geom, diagnosticColors) {
+  const axes = geomAxes(geom);
+  const [sx, sy, sz] = geom.size;
+  const corners = [
+    transformGeomPoint(geom, [sx, sy, sz]),
+    transformGeomPoint(geom, [sx, sy, -sz]),
+    transformGeomPoint(geom, [sx, -sy, sz]),
+    transformGeomPoint(geom, [sx, -sy, -sz]),
+    transformGeomPoint(geom, [-sx, sy, sz]),
+    transformGeomPoint(geom, [-sx, sy, -sz]),
+    transformGeomPoint(geom, [-sx, -sy, sz]),
+    transformGeomPoint(geom, [-sx, -sy, -sz]),
+  ];
+  const color = displayGeomColor(geom, diagnosticColors);
+  const faces = [
+    [[0, 2, 3, 1], axes[0]],
+    [[4, 5, 7, 6], scale3(axes[0], -1.0)],
+    [[0, 1, 5, 4], axes[1]],
+    [[2, 6, 7, 3], scale3(axes[1], -1.0)],
+    [[0, 4, 6, 2], axes[2]],
+    [[1, 3, 7, 5], scale3(axes[2], -1.0)],
+  ];
+  for (const [indices, normal] of faces) {
+    const n = normalize3(normal);
+    pushTriangle(triangles, corners[indices[0]], corners[indices[1]], corners[indices[2]], n, color);
+    pushTriangle(triangles, corners[indices[0]], corners[indices[2]], corners[indices[3]], n, color);
+  }
+}
+
+function appendCylinderGeom(triangles, geom, segments, diagnosticColors) {
+  const color = displayGeomColor(geom, diagnosticColors);
+  const half = Math.max(geom.size[1], 0.01);
+  const radius = Math.max(geom.size[0], 0.01);
+  for (let i = 0; i < segments; ++i) {
+    const a0 = (i / segments) * Math.PI * 2.0;
+    const a1 = ((i + 1) / segments) * Math.PI * 2.0;
+    const p0 = [radius * Math.cos(a0), radius * Math.sin(a0), -half];
+    const p1 = [radius * Math.cos(a1), radius * Math.sin(a1), -half];
+    const p2 = [radius * Math.cos(a1), radius * Math.sin(a1), half];
+    const p3 = [radius * Math.cos(a0), radius * Math.sin(a0), half];
+
+    const w0 = transformGeomPoint(geom, p0);
+    const w1 = transformGeomPoint(geom, p1);
+    const w2 = transformGeomPoint(geom, p2);
+    const w3 = transformGeomPoint(geom, p3);
+    const n0 = transformGeomVector(geom, normalize3([Math.cos(a0), Math.sin(a0), 0.0]));
+    const n1 = transformGeomVector(geom, normalize3([Math.cos(a1), Math.sin(a1), 0.0]));
+    const nMid = normalize3(add3(n0, n1));
+
+    pushTriangle(triangles, w0, w1, w2, nMid, color);
+    pushTriangle(triangles, w0, w2, w3, nMid, color);
+
+    const topCenter = transformGeomPoint(geom, [0.0, 0.0, half]);
+    const bottomCenter = transformGeomPoint(geom, [0.0, 0.0, -half]);
+    pushTriangle(triangles, topCenter, w3, w2, transformGeomVector(geom, [0.0, 0.0, 1.0]), color);
+    pushTriangle(triangles, bottomCenter, w1, w0, transformGeomVector(geom, [0.0, 0.0, -1.0]), color);
+  }
+}
+
+function appendCapsuleGeom(triangles, geom, hemiRings, segments, diagnosticColors) {
+  appendCylinderGeom(triangles, geom, segments, diagnosticColors);
+  const radius = Math.max(geom.size[0], 0.01);
+  const half = Math.max(geom.size[1], 0.01);
+  const color = displayGeomColor(geom, diagnosticColors);
+  for (const hemisphere of [-1.0, 1.0]) {
+    for (let ring = 0; ring < hemiRings; ++ring) {
+      const v0 = (ring / hemiRings) * (Math.PI / 2.0);
+      const v1 = ((ring + 1) / hemiRings) * (Math.PI / 2.0);
+      const z0 = hemisphere * (half + radius * Math.sin(v0));
+      const z1 = hemisphere * (half + radius * Math.sin(v1));
+      const r0 = radius * Math.cos(v0);
+      const r1 = radius * Math.cos(v1);
+
+      for (let seg = 0; seg < segments; ++seg) {
+        const a0 = (seg / segments) * Math.PI * 2.0;
+        const a1 = ((seg + 1) / segments) * Math.PI * 2.0;
+        const p00 = [r0 * Math.cos(a0), r0 * Math.sin(a0), z0];
+        const p01 = [r0 * Math.cos(a1), r0 * Math.sin(a1), z0];
+        const p10 = [r1 * Math.cos(a0), r1 * Math.sin(a0), z1];
+        const p11 = [r1 * Math.cos(a1), r1 * Math.sin(a1), z1];
+        const n00 = transformGeomVector(geom, normalize3([p00[0], p00[1], hemisphere * (p00[2] - hemisphere * half)]));
+        const n01 = transformGeomVector(geom, normalize3([p01[0], p01[1], hemisphere * (p01[2] - hemisphere * half)]));
+        const n10 = transformGeomVector(geom, normalize3([p10[0], p10[1], hemisphere * (p10[2] - hemisphere * half)]));
+        const n11 = transformGeomVector(geom, normalize3([p11[0], p11[1], hemisphere * (p11[2] - hemisphere * half)]));
+
+        pushTriangle(
+          triangles,
+          transformGeomPoint(geom, p00),
+          transformGeomPoint(geom, p01),
+          transformGeomPoint(geom, p11),
+          normalize3(add3(add3(n00, n01), n11)),
+          color,
+        );
+        pushTriangle(
+          triangles,
+          transformGeomPoint(geom, p00),
+          transformGeomPoint(geom, p11),
+          transformGeomPoint(geom, p10),
+          normalize3(add3(add3(n00, n11), n10)),
+          color,
+        );
+      }
+    }
+  }
+}
+
+function appendSphereGeom(triangles, geom, rings, segments, diagnosticColors) {
+  const radius = Math.max(geom.size[0], 0.01);
+  const color = displayGeomColor(geom, diagnosticColors);
+  for (let ring = 0; ring < rings; ++ring) {
+    const v0 = (ring / rings) * Math.PI - Math.PI / 2.0;
+    const v1 = ((ring + 1) / rings) * Math.PI - Math.PI / 2.0;
+    const z0 = radius * Math.sin(v0);
+    const z1 = radius * Math.sin(v1);
+    const r0 = radius * Math.cos(v0);
+    const r1 = radius * Math.cos(v1);
+    for (let seg = 0; seg < segments; ++seg) {
+      const a0 = (seg / segments) * Math.PI * 2.0;
+      const a1 = ((seg + 1) / segments) * Math.PI * 2.0;
+      const p00 = [r0 * Math.cos(a0), r0 * Math.sin(a0), z0];
+      const p01 = [r0 * Math.cos(a1), r0 * Math.sin(a1), z0];
+      const p10 = [r1 * Math.cos(a0), r1 * Math.sin(a0), z1];
+      const p11 = [r1 * Math.cos(a1), r1 * Math.sin(a1), z1];
+      pushTriangle(
+        triangles,
+        transformGeomPoint(geom, p00),
+        transformGeomPoint(geom, p01),
+        transformGeomPoint(geom, p11),
+        normalize3(transformGeomVector(geom, normalize3(add3(add3(p00, p01), p11)))),
+        color,
+      );
+      pushTriangle(
+        triangles,
+        transformGeomPoint(geom, p00),
+        transformGeomPoint(geom, p11),
+        transformGeomPoint(geom, p10),
+        normalize3(transformGeomVector(geom, normalize3(add3(add3(p00, p11), p10)))),
+        color,
+      );
+    }
+  }
+}
+
+function appendMeshGeom(triangles, geom, meshAssets, diagnosticColors) {
+  const meshId = Math.max(0, geom.dataid | 0);
+  const mesh = meshAssets[meshId];
+  if (!mesh) {
+    return;
+  }
+  const color = displayGeomColor(geom, diagnosticColors);
+  for (const vertex of mesh.triangles) {
+    pushVertex(
+      triangles,
+      transformGeomPoint(geom, vertex.position),
+      transformGeomVector(geom, vertex.normal),
+      color,
+    );
+  }
+}
+
+function convertBrowserMeshAssets(meshes) {
+  return meshes.map((mesh) => {
+    const triangles = [];
+    const vertnum = Math.floor(mesh.positions.length / 3);
+    for (let i = 0; i + 2 < mesh.faces.length; i += 3) {
+      const ia = mesh.faces[i];
+      const ib = mesh.faces[i + 1];
+      const ic = mesh.faces[i + 2];
+      if (ia >= vertnum || ib >= vertnum || ic >= vertnum) {
+        continue;
+      }
+      const a = readVec3(mesh.positions, ia);
+      const b = readVec3(mesh.positions, ib);
+      const c = readVec3(mesh.positions, ic);
+      const faceNormal = triangleNormal(a, b, c);
+      triangles.push({
+        position: a,
+        normal: mesh.normals.length >= (ia + 1) * 3 ? normalize3(readVec3(mesh.normals, ia)) : faceNormal,
+      });
+      triangles.push({
+        position: b,
+        normal: mesh.normals.length >= (ib + 1) * 3 ? normalize3(readVec3(mesh.normals, ib)) : faceNormal,
+      });
+      triangles.push({
+        position: c,
+        normal: mesh.normals.length >= (ic + 1) * 3 ? normalize3(readVec3(mesh.normals, ic)) : faceNormal,
+      });
+    }
+    return { triangles };
+  });
+}
+
+function readVec3(array, index) {
+  return [array[index * 3], array[index * 3 + 1], array[index * 3 + 2]];
+}
+
+function defaultOverlayCamera() {
+  return {
+    azimuthDeg: 135.0,
+    elevationDeg: -20.0,
+    distance: 2.2,
+    target: [0.0, 0.0, 0.35],
+  };
+}
+
+function fitOverlayCameraToGeoms(camera, geoms) {
+  if (!geoms?.length) {
+    return;
+  }
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const geom of geoms) {
+    const radius = Math.max(0.05, geom.size[0], geom.size[1], geom.size[2]);
+    for (let axis = 0; axis < 3; ++axis) {
+      min[axis] = Math.min(min[axis], geom.pos[axis] - radius);
+      max[axis] = Math.max(max[axis], geom.pos[axis] + radius);
+    }
+  }
+  camera.target = [
+    (min[0] + max[0]) * 0.5,
+    (min[1] + max[1]) * 0.5,
+    (min[2] + max[2]) * 0.5,
+  ];
+  const extent = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2], 0.5);
+  camera.distance = Math.max(extent * 2.8, 1.5);
+}
+
+function viewProjectionMatrix(camera, aspect) {
+  return mulMat4(projectionMatrix(aspect), viewMatrix(camera));
+}
+
+function viewMatrix(camera) {
+  const eye = cameraEye(camera);
+  const forward = normalize3(sub3(camera.target, eye));
+  const worldUp = [0.0, 0.0, 1.0];
+  const right = normalize3(cross3(forward, worldUp));
+  const up = normalize3(cross3(right, forward));
+  return [
+    right[0], right[1], right[2], 0.0,
+    up[0], up[1], up[2], 0.0,
+    -forward[0], -forward[1], -forward[2], 0.0,
+    -dot3(right, eye), -dot3(up, eye), dot3(forward, eye), 1.0,
+  ];
+}
+
+function projectionMatrix(aspect) {
+  const fovY = 45.0 * Math.PI / 180.0;
+  const near = 0.02;
+  const far = 50.0;
+  const f = 1.0 / Math.tan(fovY * 0.5);
+  return [
+    f / aspect, 0.0, 0.0, 0.0,
+    0.0, f, 0.0, 0.0,
+    0.0, 0.0, -((far + near) / (far - near)), -1.0,
+    0.0, 0.0, -((2.0 * far * near) / (far - near)), 0.0,
+  ];
+}
+
+function cameraEye(camera) {
+  return sub3(camera.target, scale3(orbitForward(camera.azimuthDeg, camera.elevationDeg), camera.distance));
+}
+
+function orbitForward(azimuthDeg, elevationDeg) {
+  const azimuth = azimuthDeg * Math.PI / 180.0;
+  const elevation = elevationDeg * Math.PI / 180.0;
+  return normalize3([
+    Math.cos(azimuth) * Math.cos(elevation),
+    Math.sin(azimuth) * Math.cos(elevation),
+    Math.sin(elevation),
+  ]);
+}
+
+function geomColor(geom) {
+  return [geom.rgba[0], geom.rgba[1], geom.rgba[2], 1.0];
+}
+
+function displayGeomColor(geom, diagnosticColors) {
+  return diagnosticColors ? diagnosticGeomColor(geom) : geomColor(geom);
+}
+
+function diagnosticGeomColor(geom) {
+  const seed =
+    (((geom.dataid >>> 0) * 0x9e3779b9) >>> 0) +
+    ((((geom.type_id >>> 0) * 0x85ebca6b) >>> 0) >>> 0);
+  const hue = seed % 360;
+  return hsvToRgb(hue, 0.72, 0.92);
+}
+
+function hsvToRgb(h, s, v) {
+  const c = v * s;
+  const x = c * (1.0 - Math.abs(((h / 60.0) % 2.0) - 1.0));
+  const m = v - c;
+  let rgb;
+  if (h < 60.0) rgb = [c, x, 0.0];
+  else if (h < 120.0) rgb = [x, c, 0.0];
+  else if (h < 180.0) rgb = [0.0, c, x];
+  else if (h < 240.0) rgb = [0.0, x, c];
+  else if (h < 300.0) rgb = [x, 0.0, c];
+  else rgb = [c, 0.0, x];
+  return [rgb[0] + m, rgb[1] + m, rgb[2] + m, 1.0];
+}
+
+function geomAxes(geom) {
+  return [
+    [geom.mat[0], geom.mat[3], geom.mat[6]],
+    [geom.mat[1], geom.mat[4], geom.mat[7]],
+    [geom.mat[2], geom.mat[5], geom.mat[8]],
+  ];
+}
+
+function transformGeomPoint(geom, local) {
+  return [
+    geom.pos[0] + geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],
+    geom.pos[1] + geom.mat[3] * local[0] + geom.mat[4] * local[1] + geom.mat[5] * local[2],
+    geom.pos[2] + geom.mat[6] * local[0] + geom.mat[7] * local[1] + geom.mat[8] * local[2],
+  ];
+}
+
+function transformGeomVector(geom, local) {
+  return normalize3([
+    geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],
+    geom.mat[3] * local[0] + geom.mat[4] * local[1] + geom.mat[5] * local[2],
+    geom.mat[6] * local[0] + geom.mat[7] * local[1] + geom.mat[8] * local[2],
+  ]);
+}
+
+function pushVertex(out, position, normal, color) {
+  out.push(
+    position[0], position[1], position[2],
+    normal[0], normal[1], normal[2],
+    color[0], color[1], color[2], color[3],
+  );
+}
+
+function pushTriangle(out, a, b, c, normal, color) {
+  pushVertex(out, a, normal, color);
+  pushVertex(out, b, normal, color);
+  pushVertex(out, c, normal, color);
+}
+
+function pushLine(out, a, b, color) {
+  const normal = [0.0, 0.0, 1.0];
+  pushVertex(out, a, normal, color);
+  pushVertex(out, b, normal, color);
+}
+
+function triangleNormal(a, b, c) {
+  return normalize3(cross3(sub3(b, a), sub3(c, a)));
+}
+
+function createWebGlProgram(gl, vertexSource, fragmentSource) {
+  const vertex = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vertex, vertexSource);
+  gl.compileShader(vertex);
+  if (!gl.getShaderParameter(vertex, gl.COMPILE_STATUS)) {
+    throw new Error(`vertex shader compile failed: ${gl.getShaderInfoLog(vertex)}`);
+  }
+  const fragment = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fragment, fragmentSource);
+  gl.compileShader(fragment);
+  if (!gl.getShaderParameter(fragment, gl.COMPILE_STATUS)) {
+    throw new Error(`fragment shader compile failed: ${gl.getShaderInfoLog(fragment)}`);
+  }
+  const program = gl.createProgram();
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  gl.deleteShader(vertex);
+  gl.deleteShader(fragment);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(`program link failed: ${gl.getProgramInfoLog(program)}`);
+  }
+  return program;
+}
+
+function add3(a, b) {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
+
+function sub3(a, b) {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function scale3(v, scalar) {
+  return [v[0] * scalar, v[1] * scalar, v[2] * scalar];
+}
+
+function dot3(a, b) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function cross3(a, b) {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function normalize3(v) {
+  const len = Math.hypot(v[0], v[1], v[2]);
+  if (len <= 1e-6) {
+    return [0.0, 0.0, 1.0];
+  }
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+function mulMat4(a, b) {
+  const out = new Array(16).fill(0.0);
+  for (let col = 0; col < 4; ++col) {
+    for (let row = 0; row < 4; ++row) {
+      for (let i = 0; i < 4; ++i) {
+        out[col * 4 + row] += a[i * 4 + row] * b[col * 4 + i];
+      }
+    }
+  }
+  return out;
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+const OVERLAY_VERTEX_SHADER = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec4 a_color;
+uniform mat4 u_view_proj;
+out vec3 v_normal;
+out vec4 v_color;
+void main() {
+  v_normal = a_normal;
+  v_color = a_color;
+  gl_Position = u_view_proj * vec4(a_pos, 1.0);
+}`;
+
+const OVERLAY_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+uniform bool u_unlit;
+in vec3 v_normal;
+in vec4 v_color;
+out vec4 out_color;
+void main() {
+  if (u_unlit) {
+    out_color = v_color;
+    return;
+  }
+  vec3 light_dir = normalize(vec3(0.35, 0.45, 0.82));
+  float diffuse = max(dot(normalize(v_normal), light_dir), 0.0);
+  float lighting = 0.28 + 0.72 * diffuse;
+  out_color = vec4(v_color.rgb * lighting, v_color.a);
+}`;

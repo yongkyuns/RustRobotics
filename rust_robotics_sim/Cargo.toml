@@ -13,6 +13,9 @@ path = "src/main.rs"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["web_glow_viewport"]
+web_glow_viewport = []
 
 [dependencies]
 rust_robotics_algo = {version="0.1", path="../rust_robotics_algo"}
@@ -20,7 +23,6 @@ rand = "0.8"
 chrono = { version = "0.4", features = ["js-sys", "wasmbind"] }
 egui = "0.32.3"
 egui_plot = "0.33.0"
-eframe = { version = "0.32.3", features = ["persistence", "glow"] }
 serde = { version = "1", features = ["derive"] } # You only need this if you want app persistence
 serde_json = "1"
 wasm-bindgen-futures = "0.4.58"
@@ -33,6 +35,7 @@ libloading = "0.8"
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tracing-subscriber = "0.3"
+eframe = { version = "0.32.3", features = ["persistence", "glow"] }
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -41,6 +44,9 @@ tracing-wasm = "0.2"
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3.85"
 getrandom = { version = "0.3", features = ["wasm_js"] }
+eframe = { version = "0.32.3", default-features = false, features = ["persistence", "wgpu", "default_fonts", "web_screen_reader"] }
+egui-wgpu = { version = "0.32.3", default-features = false, features = ["fragile-send-sync-non-atomic-wasm"] }
+wgpu = { version = "25.0.0", default-features = false, features = ["webgpu"] }
 
 [build-dependencies]
 bindgen = "0.71"

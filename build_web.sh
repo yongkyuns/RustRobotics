@@ -69,7 +69,7 @@ cp "rust_robotics_sim/web/mujoco_runtime.js" \
 
 echo "Building rust…"
 BUILD=release
-cargo build -p "${CRATE_NAME}" --release --lib --target wasm32-unknown-unknown
+cargo build -p "${CRATE_NAME}" --release --lib --target wasm32-unknown-unknown --no-default-features
 
 # Get the output directory (in the workspace it is in another location)
 TARGET=$(cargo metadata --format-version=1 | jq --raw-output .target_directory)
