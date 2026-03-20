@@ -259,6 +259,10 @@ impl InvertedPendulum {
     pub fn rod_angle(&self) -> f32 {
         self.state[2]
     }
+
+    pub fn model(&self) -> &Model {
+        &self.model
+    }
 }
 
 impl Simulate for InvertedPendulum {
