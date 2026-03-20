@@ -111,6 +111,10 @@ impl Default for NativeMujocoBackend {
 
 impl NativeMujocoBackend {
     pub fn update(&mut self, sim_speed: usize, paused: bool) {
+        if !self.active {
+            return;
+        }
+
         if paused {
             return;
         }

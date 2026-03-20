@@ -45,6 +45,10 @@ rm -f "docs/${CRATE_NAME_SNAKE_CASE}_bg.wasm"
 mkdir -p "docs/vendor/onnxruntime-web/dist"
 mkdir -p "docs/vendor/mujoco"
 mkdir -p "docs/vendor/mujoco/mt"
+mkdir -p "docs/assets/mujoco"
+
+rm -rf "docs/assets/mujoco/go2"
+cp -R "rust_robotics_sim/assets/mujoco/go2" "docs/assets/mujoco/"
 
 cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort.wasm.min.js" \
   "docs/vendor/onnxruntime-web/dist/ort.wasm.min.js"
@@ -60,6 +64,8 @@ cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.js" \
   "docs/vendor/mujoco/mt/mujoco.js"
 cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.wasm" \
   "docs/vendor/mujoco/mt/mujoco.wasm"
+cp "rust_robotics_sim/web/mujoco_runtime.js" \
+  "docs/mujoco_runtime.js"
 
 echo "Building rust…"
 BUILD=release

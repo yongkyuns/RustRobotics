@@ -14,6 +14,7 @@ use slam::SlamDemo;
 use egui::*;
 use egui_plot::{Corner, Legend, Plot, PlotUi};
 use std::collections::HashSet;
+use web_time::Instant;
 
 /// Base trait to make simulation work within `rust robotics`.
 ///
@@ -145,6 +146,10 @@ pub struct Simulator {
     visited_modes: HashSet<SimMode>,
     /// Whether to show the help popup
     show_help_popup: bool,
+    /// Last wall-clock tick used for fixed-step simulation pacing.
+    last_tick: Option<Instant>,
+    /// Accumulator for non-MuJoCo fixed-step simulation.
+    sim_accumulator: f32,
 }
 
 impl Default for Simulator {
@@ -169,6 +174,8 @@ impl Default for Simulator {
             continuous_obstacle_radius: 1.0,
             visited_modes: HashSet::new(),
             show_help_popup: false,
+            last_tick: None,
+            sim_accumulator: 0.0,
         }
     }
 }
@@ -176,35 +183,56 @@ impl Default for Simulator {
 impl Simulator {
     /// Update the simulation for a single time step
     pub fn update(&mut self) {
+        self.mujoco_panel.set_active(self.mode == SimMode::Mujoco);
+        let now = Instant::now();
+        let elapsed = self
+            .last_tick
+            .replace(now)
+            .map(|last| (now - last).as_secs_f32())
+            .unwrap_or(0.0)
+            .min(0.1);
+
         if !self.paused {
             let dt = 0.01;
-            self.time += dt * self.sim_speed as f32;
-
             match self.mode {
                 SimMode::InvertedPendulum => {
-                    self.pendulums
-                        .iter_mut()
-                        .for_each(|sim| (0..self.sim_speed).for_each(|_| sim.step(dt)));
+                    self.step_fixed_dt(elapsed, dt, |sim, dt| {
+                        sim.pendulums.iter_mut().for_each(|pendulum| pendulum.step(dt));
+                    });
                 }
                 SimMode::Localization => {
-                    self.vehicles
-                        .iter_mut()
-                        .for_each(|sim| (0..self.sim_speed).for_each(|_| sim.step(dt)));
+                    self.step_fixed_dt(elapsed, dt, |sim, dt| {
+                        sim.vehicles.iter_mut().for_each(|vehicle| vehicle.step(dt));
+                    });
                 }
                 SimMode::Mujoco => {
+                    self.time += dt * self.sim_speed as f32;
                     self.mujoco_panel.update(self.sim_speed, self.paused);
                 }
                 SimMode::PathPlanning => {
-                    self.planners
-                        .iter_mut()
-                        .for_each(|sim| (0..self.sim_speed).for_each(|_| sim.step(dt)));
+                    self.step_fixed_dt(elapsed, dt, |sim, dt| {
+                        sim.planners.iter_mut().for_each(|planner| planner.step(dt));
+                    });
                 }
                 SimMode::Slam => {
-                    self.slam_demos
-                        .iter_mut()
-                        .for_each(|sim| (0..self.sim_speed).for_each(|_| sim.step(dt)));
+                    self.step_fixed_dt(elapsed, dt, |sim, dt| {
+                        sim.slam_demos.iter_mut().for_each(|slam| slam.step(dt));
+                    });
                 }
             }
+        }
+    }
+
+    fn step_fixed_dt<F>(&mut self, elapsed: f32, dt: f32, mut step_once: F)
+    where
+        F: FnMut(&mut Self, f32),
+    {
+        self.sim_accumulator =
+            (self.sim_accumulator + elapsed * self.sim_speed as f32).min(dt * 32.0);
+        while self.sim_accumulator >= dt {
+            step_once(self, dt);
+            self.time += dt;
+            self.sim_accumulator -= dt;
         }
     }
 
@@ -289,6 +317,8 @@ impl Simulator {
 
     /// Draw the UI directly into a Ui (for embedding in CentralPanel)
     pub fn ui(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
+        self.mujoco_panel.set_active(self.mode == SimMode::Mujoco);
+
         // Handle space key to pause/resume simulation
         if ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) {
             self.paused = !self.paused;
@@ -332,6 +362,8 @@ impl Simulator {
                 {
                     self.mode = mode;
                     self.time = 0.0;
+                    self.sim_accumulator = 0.0;
+                    self.last_tick = None;
                 }
             }
         });
@@ -341,6 +373,8 @@ impl Simulator {
             self.visited_modes.insert(self.mode);
             self.show_help_popup = true;
         }
+
+        self.mujoco_panel.set_active(self.mode == SimMode::Mujoco);
 
         ui.separator();
 
@@ -730,7 +764,5 @@ impl Simulator {
                     ctx.memory_ui(ui);
                 });
         }
-
-        self.mujoco_panel.set_active(self.mode == SimMode::Mujoco);
     }
 }

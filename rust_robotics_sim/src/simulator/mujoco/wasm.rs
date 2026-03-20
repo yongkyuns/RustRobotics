@@ -2,96 +2,47 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     rc::Rc,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 
 use eframe::{egui_glow, emath::GuiRounding, glow};
-use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Ui, pos2, vec2};
+use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Sense, Ui};
 use glow::HasContext;
-use js_sys::{Function, Promise, Reflect, Uint8Array};
+use js_sys::{ArrayBuffer, Function, Promise, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::{JsCast, prelude::*};
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-static BROWSER_ASSETS: OnceLock<Result<BrowserAssetBundle, String>> = OnceLock::new();
-
-const SCENE_XML: &str = include_str!("../../../assets/mujoco/go2/scene.xml");
-const GO2_XML: &str = include_str!("../../../assets/mujoco/go2/go2.xml");
-const ASSET_META_JSON: &str = include_str!("../../../assets/mujoco/go2/asset_meta.json");
-const POLICY_JSON: &str = include_str!("../../../assets/mujoco/go2/robust.json");
-const POLICY_ONNX: &[u8] = include_bytes!("../../../assets/mujoco/go2/robust.onnx");
-
-const OBJ_ASSETS: &[(&str, &[u8])] = &[
-    (
-        "assets/base_0.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/base_0.obj"),
-    ),
-    (
-        "assets/base_1.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/base_1.obj"),
-    ),
-    (
-        "assets/base_2.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/base_2.obj"),
-    ),
-    (
-        "assets/base_3.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/base_3.obj"),
-    ),
-    (
-        "assets/base_4.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/base_4.obj"),
-    ),
-    (
-        "assets/hip_0.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/hip_0.obj"),
-    ),
-    (
-        "assets/hip_1.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/hip_1.obj"),
-    ),
-    (
-        "assets/thigh_0.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/thigh_0.obj"),
-    ),
-    (
-        "assets/thigh_1.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/thigh_1.obj"),
-    ),
-    (
-        "assets/thigh_mirror_0.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/thigh_mirror_0.obj"),
-    ),
-    (
-        "assets/thigh_mirror_1.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/thigh_mirror_1.obj"),
-    ),
-    (
-        "assets/calf_0.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/calf_0.obj"),
-    ),
-    (
-        "assets/calf_1.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/calf_1.obj"),
-    ),
-    (
-        "assets/calf_mirror_0.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/calf_mirror_0.obj"),
-    ),
-    (
-        "assets/calf_mirror_1.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/calf_mirror_1.obj"),
-    ),
-    (
-        "assets/foot.obj",
-        include_bytes!("../../../assets/mujoco/go2/assets/foot.obj"),
-    ),
+const BROWSER_ASSET_BASE_PATH: &str = "assets/mujoco/go2/";
+const BROWSER_ASSET_FILES: &[&str] = &[
+    "scene.xml",
+    "go2.xml",
+    "asset_meta.json",
+    "robust.json",
+    "robust.onnx",
+    "assets/base_0.obj",
+    "assets/base_1.obj",
+    "assets/base_2.obj",
+    "assets/base_3.obj",
+    "assets/base_4.obj",
+    "assets/hip_0.obj",
+    "assets/hip_1.obj",
+    "assets/thigh_0.obj",
+    "assets/thigh_1.obj",
+    "assets/thigh_mirror_0.obj",
+    "assets/thigh_mirror_1.obj",
+    "assets/calf_0.obj",
+    "assets/calf_1.obj",
+    "assets/calf_mirror_0.obj",
+    "assets/calf_mirror_1.obj",
+    "assets/foot.obj",
 ];
 
 pub(super) struct WasmMujocoBackend {
     active: bool,
     command_vel_x: f32,
     diagnostic_colors: bool,
+    asset_state: Rc<RefCell<BrowserAssetState>>,
     ort_state: Rc<RefCell<BrowserOrtState>>,
     mujoco_state: Rc<RefCell<BrowserMujocoState>>,
     mujoco_step_in_flight: Rc<RefCell<bool>>,
@@ -108,6 +59,7 @@ impl Default for WasmMujocoBackend {
             active: false,
             command_vel_x: 0.0,
             diagnostic_colors: false,
+            asset_state: Rc::new(RefCell::new(BrowserAssetState::Idle)),
             ort_state: Rc::new(RefCell::new(BrowserOrtState::Idle)),
             mujoco_state: Rc::new(RefCell::new(BrowserMujocoState::Idle)),
             mujoco_step_in_flight: Rc::new(RefCell::new(false)),
@@ -164,12 +116,28 @@ struct AssetMeta {
 }
 
 struct BrowserAssetBundle {
-    files: BTreeMap<&'static str, &'static [u8]>,
+    files: BTreeMap<String, Vec<u8>>,
     scene_include: String,
     meshdir: String,
     mesh_files: Vec<String>,
     policy: PolicyFile,
     asset_meta: AssetMeta,
+}
+
+#[derive(Default)]
+enum BrowserAssetState {
+    #[default]
+    Idle,
+    Loading,
+    Ready(Rc<BrowserAssetBundle>),
+    Error(String),
+}
+
+enum BrowserAssetUiState {
+    Idle,
+    Loading,
+    Ready(Rc<BrowserAssetBundle>),
+    Error(String),
 }
 
 #[derive(Default)]
@@ -219,6 +187,12 @@ struct BrowserMujocoReport {
     policy_inputs: Vec<String>,
     policy_outputs: Vec<String>,
     command_vel_x: f32,
+    #[serde(default)]
+    display_fps: f32,
+    #[serde(default)]
+    last_step_wall_ms: f32,
+    #[serde(default)]
+    avg_step_wall_ms: f32,
     geoms: Vec<BrowserGeomSnapshot>,
     #[serde(default)]
     mesh_assets: Vec<BrowserMeshAssetSnapshot>,
@@ -337,12 +311,13 @@ impl WasmMujocoBackend {
             return;
         }
 
-        let Ok(bundle) = Self::browser_assets() else {
+        self.ensure_browser_assets_started();
+        let Some(bundle) = self.browser_assets_ready() else {
             return;
         };
 
-        self.ensure_ort_smoke_test_started(bundle);
-        self.ensure_mujoco_runtime_started(bundle);
+        self.ensure_ort_smoke_test_started(bundle.as_ref());
+        self.ensure_mujoco_runtime_started(bundle.as_ref());
 
         if paused {
             return;
@@ -396,20 +371,45 @@ impl WasmMujocoBackend {
                 }
                 ui.separator();
 
-                match Self::browser_assets() {
-                    Ok(bundle) => {
+                if self.active {
+                    self.ensure_browser_assets_started();
+                }
+
+                let asset_state_kind = {
+                    let state = self.asset_state.borrow();
+                    match &*state {
+                        BrowserAssetState::Idle => BrowserAssetUiState::Idle,
+                        BrowserAssetState::Loading => BrowserAssetUiState::Loading,
+                        BrowserAssetState::Ready(bundle) => {
+                            BrowserAssetUiState::Ready(Rc::clone(bundle))
+                        }
+                        BrowserAssetState::Error(err) => BrowserAssetUiState::Error(err.clone()),
+                    }
+                };
+
+                match asset_state_kind {
+                    BrowserAssetUiState::Idle => {
+                        ui.label("Browser asset bundle: idle");
+                    }
+                    BrowserAssetUiState::Loading => {
+                        ui.label("Browser asset bundle: loading...");
                         if self.active {
-                            self.ensure_ort_smoke_test_started(bundle);
-                            self.ensure_mujoco_runtime_started(bundle);
                             ui.ctx().request_repaint();
                         }
-                        self.ui_asset_report(ui, bundle);
+                    }
+                    BrowserAssetUiState::Ready(bundle) => {
+                        if self.active {
+                            self.ensure_ort_smoke_test_started(bundle.as_ref());
+                            self.ensure_mujoco_runtime_started(bundle.as_ref());
+                            ui.ctx().request_repaint();
+                        }
+                        self.ui_asset_report(ui, bundle.as_ref());
                         ui.separator();
                         self.ui_ort_report(ui);
                         ui.separator();
                         self.ui_mujoco_report(ui);
                     }
-                    Err(err) => {
+                    BrowserAssetUiState::Error(err) => {
                         ui.colored_label(Color32::LIGHT_RED, format!("Asset bundle error: {err}"));
                     }
                 }
@@ -439,20 +439,36 @@ impl WasmMujocoBackend {
         self.active = active;
     }
 
-    fn browser_assets() -> Result<&'static BrowserAssetBundle, String> {
-        BROWSER_ASSETS
-            .get_or_init(BrowserAssetBundle::load)
-            .as_ref()
-            .map_err(|err| err.clone())
+    fn ensure_browser_assets_started(&mut self) {
+        if !matches!(*self.asset_state.borrow(), BrowserAssetState::Idle) {
+            return;
+        }
+
+        *self.asset_state.borrow_mut() = BrowserAssetState::Loading;
+        let state = Rc::clone(&self.asset_state);
+        spawn_local(async move {
+            let result = BrowserAssetBundle::load_from_server().await.map(Rc::new);
+            *state.borrow_mut() = match result {
+                Ok(bundle) => BrowserAssetState::Ready(bundle),
+                Err(err) => BrowserAssetState::Error(err),
+            };
+        });
+    }
+
+    fn browser_assets_ready(&self) -> Option<Rc<BrowserAssetBundle>> {
+        match &*self.asset_state.borrow() {
+            BrowserAssetState::Ready(bundle) => Some(Rc::clone(bundle)),
+            _ => None,
+        }
     }
 
     fn ui_asset_report(&self, ui: &mut Ui, bundle: &BrowserAssetBundle) {
         ui.label(
-            RichText::new("Embedded browser asset bundle")
+            RichText::new("Browser asset bundle")
                 .strong()
                 .color(Color32::LIGHT_GREEN),
         );
-        ui.label(format!("Files: {} embedded assets", bundle.files.len()));
+        ui.label(format!("Files: {} fetched assets", bundle.files.len()));
         ui.label(format!("Scene include: {}", bundle.scene_include));
         ui.label(format!(
             "Meshes: {} files under {}",
@@ -463,7 +479,11 @@ impl WasmMujocoBackend {
             "Policy: {} outputs, {:?} input groups, ONNX {}",
             bundle.policy.onnx.meta.out_keys.len(),
             bundle.policy.onnx.meta.in_shapes,
-            format_bytes(bundle.files["robust.onnx"].len())
+            bundle
+                .files
+                .get("robust.onnx")
+                .map(|bytes| format_bytes(bytes.len()))
+                .unwrap_or_else(|| "missing".to_string())
         ));
         let preview_outputs = bundle
             .policy
@@ -514,7 +534,13 @@ impl WasmMujocoBackend {
                 ui.label(format!("Model inputs: {}", report.input_names.join(", ")));
                 ui.label(format!(
                     "Model outputs: {}",
-                    report.output_names.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                    report
+                        .output_names
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
                 egui::CollapsingHeader::new("Output summary")
                     .default_open(true)
@@ -540,7 +566,11 @@ impl WasmMujocoBackend {
 
         *self.ort_state.borrow_mut() = BrowserOrtState::Loading;
         let state = Rc::clone(&self.ort_state);
-        let model_bytes = bundle.files["robust.onnx"].to_vec();
+        let Some(model_bytes) = bundle.files.get("robust.onnx").cloned() else {
+            *self.ort_state.borrow_mut() =
+                BrowserOrtState::Error("Browser asset bundle missing robust.onnx".to_string());
+            return;
+        };
         let wasm_base_path = "./vendor/onnxruntime-web/dist/";
 
         spawn_local(async move {
@@ -581,7 +611,14 @@ impl WasmMujocoBackend {
                     "Live state: sim_time={:.4}s step_count={} cmd_vx={:+.2}",
                     report.sim_time, report.step_count, report.command_vel_x
                 ));
-                ui.label(format!("Policy inputs: {}", report.policy_inputs.join(", ")));
+                ui.label(format!(
+                    "Display: {:.1} FPS | step: {:.2} ms last, {:.2} ms avg",
+                    report.display_fps, report.last_step_wall_ms, report.avg_step_wall_ms
+                ));
+                ui.label(format!(
+                    "Policy inputs: {}",
+                    report.policy_inputs.join(", ")
+                ));
                 ui.label(format!(
                     "Policy outputs: {}",
                     report
@@ -614,14 +651,21 @@ impl WasmMujocoBackend {
             .files
             .iter()
             .filter_map(|(path, bytes)| {
-                if matches!(*path, "asset_meta.json" | "robust.json" | "robust.onnx") {
+                if matches!(
+                    path.as_str(),
+                    "asset_meta.json" | "robust.json" | "robust.onnx"
+                ) {
                     None
                 } else {
-                    Some(((*path).to_string(), (*bytes).to_vec()))
+                    Some((path.clone(), bytes.clone()))
                 }
             })
             .collect::<Vec<_>>();
-        let policy_bytes = bundle.files["robust.onnx"].to_vec();
+        let Some(policy_bytes) = bundle.files.get("robust.onnx").cloned() else {
+            *self.mujoco_state.borrow_mut() =
+                BrowserMujocoState::Error("Browser asset bundle missing robust.onnx".to_string());
+            return;
+        };
         let mujoco_wasm_base_path = "./vendor/mujoco/mt/";
         let ort_wasm_base_path = "./vendor/onnxruntime-web/dist/";
         let config = BrowserMujocoConfig {
@@ -705,7 +749,8 @@ impl WasmMujocoBackend {
         let report = match &*state_binding {
             BrowserMujocoState::Ready(report) => report.clone(),
             BrowserMujocoState::Idle => {
-                ui.painter().rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+                ui.painter()
+                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
                 ui.painter().text(
                     rect.center(),
                     Align2::CENTER_CENTER,
@@ -716,7 +761,8 @@ impl WasmMujocoBackend {
                 return;
             }
             BrowserMujocoState::Loading => {
-                ui.painter().rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+                ui.painter()
+                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
                 ui.painter().text(
                     rect.center(),
                     Align2::CENTER_CENTER,
@@ -727,7 +773,8 @@ impl WasmMujocoBackend {
                 return;
             }
             BrowserMujocoState::Error(err) => {
-                ui.painter().rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+                ui.painter()
+                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
                 ui.painter().text(
                     rect.center(),
                     Align2::CENTER_CENTER,
@@ -742,7 +789,8 @@ impl WasmMujocoBackend {
 
         let mesh_assets = self.compiled_mesh_assets.borrow().clone();
         if mesh_assets.is_empty() {
-            ui.painter().rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+            ui.painter()
+                .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -757,9 +805,11 @@ impl WasmMujocoBackend {
             self.fit_camera_to_report(&report);
             self.camera_initialized = true;
         }
-
-        let scene =
-            self.build_gl_scene_frame(&report, mesh_assets.as_slice(), rect.width() / rect.height());
+        let scene = self.build_gl_scene_frame(
+            &report,
+            mesh_assets.as_slice(),
+            rect.width() / rect.height(),
+        );
         if let Ok(mut scene_state) = self.glow_scene.lock() {
             *scene_state = scene;
         }
@@ -834,39 +884,6 @@ impl WasmMujocoBackend {
         self.camera.distance = (extent * 2.8).max(1.5);
     }
 
-    fn update_camera(&mut self, ui: &Ui, response: &egui::Response) {
-        if response.double_clicked() {
-            self.camera = BrowserOrbitCamera::default();
-            self.camera_initialized = false;
-        }
-
-        if response.dragged_by(egui::PointerButton::Primary) {
-            let delta = response.drag_delta();
-            self.camera.azimuth_deg -= delta.x * 0.25;
-            self.camera.elevation_deg =
-                (self.camera.elevation_deg + delta.y * 0.2).clamp(-89.0, 89.0);
-        }
-
-        if response.dragged_by(egui::PointerButton::Secondary) {
-            let delta = response.drag_delta();
-            let forward = orbit_forward(self.camera.azimuth_deg, self.camera.elevation_deg);
-            let right = normalize3(cross3(forward, [0.0, 0.0, 1.0]));
-            let up = normalize3(cross3(right, forward));
-            let pan_scale = self.camera.distance * 0.0025;
-            for axis in 0..3 {
-                self.camera.target[axis] -= (right[axis] * delta.x + up[axis] * delta.y) * pan_scale;
-            }
-        }
-
-        if response.hovered() {
-            let scroll_y = ui.input(|input| input.raw_scroll_delta.y);
-            if scroll_y.abs() > f32::EPSILON {
-                let zoom = (1.0 - scroll_y * 0.0015).clamp(0.8, 1.25);
-                self.camera.distance = (self.camera.distance * zoom).clamp(0.35, 40.0);
-            }
-        }
-    }
-
     fn build_gl_scene_frame(
         &self,
         report: &BrowserMujocoReport,
@@ -904,6 +921,40 @@ impl WasmMujocoBackend {
         frame
     }
 
+    fn update_camera(&mut self, ui: &Ui, response: &egui::Response) {
+        if response.double_clicked() {
+            self.camera = BrowserOrbitCamera::default();
+            self.camera_initialized = false;
+        }
+
+        if response.dragged_by(egui::PointerButton::Primary) {
+            let delta = response.drag_delta();
+            self.camera.azimuth_deg -= delta.x * 0.25;
+            self.camera.elevation_deg =
+                (self.camera.elevation_deg + delta.y * 0.2).clamp(-89.0, 89.0);
+        }
+
+        if response.dragged_by(egui::PointerButton::Secondary) {
+            let delta = response.drag_delta();
+            let forward = orbit_forward(self.camera.azimuth_deg, self.camera.elevation_deg);
+            let right = normalize3(cross3(forward, [0.0, 0.0, 1.0]));
+            let up = normalize3(cross3(right, forward));
+            let pan_scale = self.camera.distance * 0.0025;
+            for axis in 0..3 {
+                self.camera.target[axis] -=
+                    (right[axis] * delta.x + up[axis] * delta.y) * pan_scale;
+            }
+        }
+
+        if response.hovered() {
+            let scroll_y = ui.input(|input| input.raw_scroll_delta.y);
+            if scroll_y.abs() > f32::EPSILON {
+                let zoom = (1.0 - scroll_y * 0.0015).clamp(0.8, 1.25);
+                self.camera.distance = (self.camera.distance * zoom).clamp(0.35, 40.0);
+            }
+        }
+    }
+
     fn render_software_2d(
         &self,
         ui: &mut Ui,
@@ -927,27 +978,48 @@ impl WasmMujocoBackend {
 }
 
 impl BrowserAssetBundle {
-    fn load() -> Result<Self, String> {
+    async fn load_from_server() -> Result<Self, String> {
         let mut files = BTreeMap::new();
-        files.insert("scene.xml", SCENE_XML.as_bytes());
-        files.insert("go2.xml", GO2_XML.as_bytes());
-        files.insert("asset_meta.json", ASSET_META_JSON.as_bytes());
-        files.insert("robust.json", POLICY_JSON.as_bytes());
-        files.insert("robust.onnx", POLICY_ONNX);
-        for (path, bytes) in OBJ_ASSETS {
-            files.insert(*path, *bytes);
+        for path in BROWSER_ASSET_FILES {
+            let bytes = fetch_browser_asset_bytes(path).await?;
+            files.insert((*path).to_string(), bytes);
         }
 
-        let scene_include = single_xml_attribute(SCENE_XML, "include", "file")
+        let scene_xml = std::str::from_utf8(
+            files
+                .get("scene.xml")
+                .ok_or_else(|| "Missing fetched scene.xml".to_string())?,
+        )
+        .map_err(|err| format!("scene.xml is not valid UTF-8: {err}"))?;
+        let go2_xml = std::str::from_utf8(
+            files
+                .get("go2.xml")
+                .ok_or_else(|| "Missing fetched go2.xml".to_string())?,
+        )
+        .map_err(|err| format!("go2.xml is not valid UTF-8: {err}"))?;
+        let policy_json = std::str::from_utf8(
+            files
+                .get("robust.json")
+                .ok_or_else(|| "Missing fetched robust.json".to_string())?,
+        )
+        .map_err(|err| format!("robust.json is not valid UTF-8: {err}"))?;
+        let asset_meta_json = std::str::from_utf8(
+            files
+                .get("asset_meta.json")
+                .ok_or_else(|| "Missing fetched asset_meta.json".to_string())?,
+        )
+        .map_err(|err| format!("asset_meta.json is not valid UTF-8: {err}"))?;
+
+        let scene_include = single_xml_attribute(scene_xml, "include", "file")
             .ok_or_else(|| "scene.xml missing <include file=\"...\">".to_string())?;
         if !files.contains_key(scene_include.as_str()) {
             return Err(format!("scene.xml includes missing file {}", scene_include));
         }
 
-        let meshdir = single_xml_attribute(GO2_XML, "compiler", "meshdir")
+        let meshdir = single_xml_attribute(go2_xml, "compiler", "meshdir")
             .ok_or_else(|| "go2.xml missing <compiler meshdir=\"...\">".to_string())?;
 
-        let mesh_files = xml_attribute_values(GO2_XML, "mesh", "file");
+        let mesh_files = xml_attribute_values(go2_xml, "mesh", "file");
         if mesh_files.is_empty() {
             return Err("go2.xml contains no mesh assets".to_string());
         }
@@ -961,12 +1033,12 @@ impl BrowserAssetBundle {
             }
         }
 
-        let policy: PolicyFile = serde_json::from_str(POLICY_JSON)
-            .map_err(|err| format!("Failed to parse embedded robust.json: {err}"))?;
+        let policy: PolicyFile = serde_json::from_str(policy_json)
+            .map_err(|err| format!("Failed to parse fetched robust.json: {err}"))?;
         let onnx_path = normalize_rel_path(&policy.onnx.path);
         if !files.contains_key(onnx_path.as_str()) {
             return Err(format!(
-                "Policy config points to missing embedded ONNX file {}",
+                "Policy config points to missing fetched ONNX file {}",
                 onnx_path
             ));
         }
@@ -977,8 +1049,8 @@ impl BrowserAssetBundle {
             return Err("Policy metadata is missing output keys".to_string());
         }
 
-        let asset_meta: AssetMeta = serde_json::from_str(ASSET_META_JSON)
-            .map_err(|err| format!("Failed to parse embedded asset_meta.json: {err}"))?;
+        let asset_meta: AssetMeta = serde_json::from_str(asset_meta_json)
+            .map_err(|err| format!("Failed to parse fetched asset_meta.json: {err}"))?;
         if asset_meta.joint_names_isaac.len() != 12 {
             return Err(format!(
                 "Expected 12 joints in asset metadata, found {}",
@@ -1001,7 +1073,34 @@ impl BrowserAssetBundle {
             asset_meta,
         })
     }
+}
 
+async fn fetch_browser_asset_bytes(path: &str) -> Result<Vec<u8>, String> {
+    let window = web_sys::window().ok_or_else(|| "window is unavailable".to_string())?;
+    let asset_url = format!("{BROWSER_ASSET_BASE_PATH}{path}");
+    let response_value = JsFuture::from(window.fetch_with_str(&asset_url))
+        .await
+        .map_err(js_error_to_string)?;
+    let response = response_value
+        .dyn_into::<web_sys::Response>()
+        .map_err(|_| format!("Fetch for {asset_url} did not return a Response"))?;
+    if !response.ok() {
+        return Err(format!(
+            "Failed to fetch {asset_url}: HTTP {}",
+            response.status()
+        ));
+    }
+
+    let array_buffer = JsFuture::from(
+        response
+            .array_buffer()
+            .map_err(|err| format!("Failed to read array buffer for {asset_url}: {err:?}"))?,
+    )
+    .await
+    .map_err(js_error_to_string)?
+    .dyn_into::<ArrayBuffer>()
+    .map_err(|_| format!("array_buffer() for {asset_url} did not return an ArrayBuffer"))?;
+    Ok(Uint8Array::new(&array_buffer).to_vec())
 }
 
 fn single_xml_attribute(xml: &str, tag: &str, attr: &str) -> Option<String> {
@@ -1066,9 +1165,7 @@ fn format_bytes(byte_count: usize) -> String {
 }
 
 fn js_error_to_string(value: JsValue) -> String {
-    value
-        .as_string()
-        .unwrap_or_else(|| format!("{value:?}"))
+    value.as_string().unwrap_or_else(|| format!("{value:?}"))
 }
 
 async fn ort_smoke_test(model_bytes: &[u8], wasm_base_path: &str) -> Result<JsValue, JsValue> {
@@ -1135,9 +1232,12 @@ async fn mujoco_init(
 
 async fn mujoco_step(step_count: usize, command_vel_x: f32) -> Result<JsValue, JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is unavailable"))?;
-    let function = Reflect::get(window.as_ref(), &JsValue::from_str("rustRoboticsMujocoStep"))?
-        .dyn_into::<Function>()
-        .map_err(|_| JsValue::from_str("rustRoboticsMujocoStep is not a function"))?;
+    let function = Reflect::get(
+        window.as_ref(),
+        &JsValue::from_str("rustRoboticsMujocoStep"),
+    )?
+    .dyn_into::<Function>()
+    .map_err(|_| JsValue::from_str("rustRoboticsMujocoStep is not a function"))?;
 
     let promise = function
         .call2(
@@ -1383,7 +1483,9 @@ impl BrowserGlowRenderer {
             return Ok(());
         }
 
-        let fbo = self.offscreen_fbo.ok_or_else(|| "Offscreen FBO missing".to_string())?;
+        let fbo = self
+            .offscreen_fbo
+            .ok_or_else(|| "Offscreen FBO missing".to_string())?;
         let color = self
             .offscreen_color
             .ok_or_else(|| "Offscreen color texture missing".to_string())?;
@@ -1464,11 +1566,15 @@ impl BrowserGlowRenderer {
         self.ensure_initialized(gl)?;
         let viewport = info.viewport_in_pixels();
         let clip = info.clip_rect_in_pixels();
-        let program = self.program.ok_or_else(|| "Glow program missing".to_string())?;
+        let program = self
+            .program
+            .ok_or_else(|| "Glow program missing".to_string())?;
         let present_program = self
             .present_program
             .ok_or_else(|| "Present program missing".to_string())?;
-        let fbo = self.offscreen_fbo.ok_or_else(|| "Offscreen FBO missing".to_string())?;
+        let fbo = self
+            .offscreen_fbo
+            .ok_or_else(|| "Offscreen FBO missing".to_string())?;
         let offscreen_color = self
             .offscreen_color
             .ok_or_else(|| "Offscreen color missing".to_string())?;
@@ -1570,7 +1676,11 @@ fn append_grid_lines(lines: &mut Vec<GlVertex>) {
     }
 }
 
-fn append_line_geom(lines: &mut Vec<GlVertex>, geom: &BrowserGeomSnapshot, diagnostic_colors: bool) {
+fn append_line_geom(
+    lines: &mut Vec<GlVertex>,
+    geom: &BrowserGeomSnapshot,
+    diagnostic_colors: bool,
+) {
     let axes = geom_axes(geom);
     let half = scale3(axes[2], geom.size[1].max(0.02));
     let a = [
