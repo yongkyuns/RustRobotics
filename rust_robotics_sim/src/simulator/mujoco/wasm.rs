@@ -199,6 +199,18 @@ struct BrowserMujocoReport {
     #[serde(default)]
     avg_step_wall_ms: f32,
     #[serde(default)]
+    last_policy_wall_ms: f32,
+    #[serde(default)]
+    avg_policy_wall_ms: f32,
+    #[serde(default)]
+    last_physics_wall_ms: f32,
+    #[serde(default)]
+    avg_physics_wall_ms: f32,
+    #[serde(default)]
+    last_overlay_wall_ms: f32,
+    #[serde(default)]
+    avg_overlay_wall_ms: f32,
+    #[serde(default)]
     geoms: Vec<BrowserGeomSnapshot>,
     #[serde(default)]
     mesh_assets: Vec<BrowserMeshAssetSnapshot>,
@@ -653,6 +665,17 @@ impl WasmMujocoBackend {
                     report.display_fps, report.last_step_wall_ms, report.avg_step_wall_ms
                 ));
                 ui.label(format!(
+                    "Policy: {:.2} ms last, {:.2} ms avg | Physics: {:.2} ms last, {:.2} ms avg",
+                    report.last_policy_wall_ms,
+                    report.avg_policy_wall_ms,
+                    report.last_physics_wall_ms,
+                    report.avg_physics_wall_ms
+                ));
+                ui.label(format!(
+                    "Overlay render: {:.2} ms last, {:.2} ms avg",
+                    report.last_overlay_wall_ms, report.avg_overlay_wall_ms
+                ));
+                ui.label(format!(
                     "Policy inputs: {}",
                     report.policy_inputs.join(", ")
                 ));
@@ -786,6 +809,7 @@ impl WasmMujocoBackend {
         let _ = response;
 
         let state_binding = self.mujoco_state.borrow();
+        #[cfg(feature = "web_glow_viewport")]
         let report = match &*state_binding {
             BrowserMujocoState::Ready(report) => report.clone(),
             BrowserMujocoState::Idle => {
@@ -818,6 +842,49 @@ impl WasmMujocoBackend {
             }
             BrowserMujocoState::Error(err) => {
                 #[cfg(not(feature = "web_glow_viewport"))]
+                self.hide_browser_viewport();
+                ui.painter()
+                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    err,
+                    FontId::proportional(16.0),
+                    Color32::LIGHT_RED,
+                );
+                return;
+            }
+        };
+        #[cfg(not(feature = "web_glow_viewport"))]
+        match &*state_binding {
+            BrowserMujocoState::Ready(_) => {}
+            BrowserMujocoState::Idle => {
+                self.hide_browser_viewport();
+                ui.painter()
+                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    "MuJoCo browser runtime idle",
+                    FontId::proportional(18.0),
+                    Color32::from_gray(200),
+                );
+                return;
+            }
+            BrowserMujocoState::Loading => {
+                self.hide_browser_viewport();
+                ui.painter()
+                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    "Loading MuJoCo browser runtime...",
+                    FontId::proportional(18.0),
+                    Color32::from_gray(200),
+                );
+                return;
+            }
+            BrowserMujocoState::Error(err) => {
                 self.hide_browser_viewport();
                 ui.painter()
                     .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));

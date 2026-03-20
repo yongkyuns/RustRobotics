@@ -324,6 +324,11 @@ function applyControl(runtime) {
 }
 
 function collectGeomSnapshots(runtime) {
+  if (runtime.visualGeomMeta && runtime.visualGeomState && runtime.data.xpos && runtime.data.xmat) {
+    updateVisualGeomState(runtime);
+    return runtime.visualGeomState;
+  }
+
   const geoms = [];
   for (let i = 0; i < runtime.model.ngeom; ++i) {
     const modelGeom = runtime.model.geom(i);
@@ -353,6 +358,64 @@ function collectGeomSnapshots(runtime) {
     }
   }
   return geoms;
+}
+
+function collectVisualGeomMeta(runtime) {
+  const geoms = [];
+  for (let i = 0; i < runtime.model.ngeom; ++i) {
+    const modelGeom = runtime.model.geom(i);
+    try {
+      if (Number(modelGeom.group) >= 3) {
+        continue;
+      }
+      const rgba = Array.from(modelGeom.rgba);
+      if ((rgba[3] ?? 0.0) <= 0.01) {
+        continue;
+      }
+      geoms.push({
+        bodyId: Number(modelGeom.bodyid),
+        type_id: Number(modelGeom.type),
+        dataid: Number(modelGeom.dataid),
+        size: Array.from(modelGeom.size).slice(0, 3).map(Number),
+        rgba: rgba.slice(0, 4).map(Number),
+        localPos: Array.from(modelGeom.pos).slice(0, 3).map(Number),
+        localMat: quatToMat3(Array.from(modelGeom.quat).slice(0, 4).map(Number)),
+      });
+    } finally {
+      maybeDelete(modelGeom);
+    }
+  }
+  return geoms;
+}
+
+function createVisualGeomState(meta) {
+  return meta.map((geom) => ({
+    type_id: geom.type_id,
+    dataid: geom.dataid,
+    size: geom.size,
+    rgba: geom.rgba,
+    pos: [0.0, 0.0, 0.0],
+    mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+  }));
+}
+
+function updateVisualGeomState(runtime) {
+  const bodyPosAll = runtime.data.xpos;
+  const bodyMatAll = runtime.data.xmat;
+  for (let i = 0; i < runtime.visualGeomMeta.length; ++i) {
+    const meta = runtime.visualGeomMeta[i];
+    const state = runtime.visualGeomState[i];
+    const bodyPos = readVec3(bodyPosAll, meta.bodyId);
+    const bodyMat = readMat3(bodyMatAll, meta.bodyId);
+    const worldPos = transformPoint(bodyPos, bodyMat, meta.localPos);
+    const worldMat = mulMat3(bodyMat, meta.localMat);
+    state.pos[0] = worldPos[0];
+    state.pos[1] = worldPos[1];
+    state.pos[2] = worldPos[2];
+    for (let j = 0; j < 9; ++j) {
+      state.mat[j] = worldMat[j];
+    }
+  }
 }
 
 function collectMeshAssets(runtime) {
@@ -396,6 +459,15 @@ function buildMujocoReport(runtime, includeMeshAssets = false) {
     policy_inputs: Array.from(runtime.policyInputNames),
     policy_outputs: Array.from(runtime.policyOutputNames),
     command_vel_x: runtime.commandVelX,
+    display_fps: Number(runtime.displayFps ?? 0.0),
+    last_step_wall_ms: Number(runtime.lastStepWallMs ?? 0.0),
+    avg_step_wall_ms: Number(runtime.avgStepWallMs ?? 0.0),
+    last_policy_wall_ms: Number(runtime.lastPolicyWallMs ?? 0.0),
+    avg_policy_wall_ms: Number(runtime.avgPolicyWallMs ?? 0.0),
+    last_physics_wall_ms: Number(runtime.lastPhysicsWallMs ?? 0.0),
+    avg_physics_wall_ms: Number(runtime.avgPhysicsWallMs ?? 0.0),
+    last_overlay_wall_ms: Number(runtime.lastOverlayWallMs ?? 0.0),
+    avg_overlay_wall_ms: Number(runtime.avgOverlayWallMs ?? 0.0),
   };
   if (includeMeshAssets) {
     report.mesh_assets = collectMeshAssets(runtime);
@@ -479,7 +551,19 @@ async function createRustRoboticsMujocoRuntime(
     mujocoTimeMs: 0.0,
     stepCount: 0,
     commandVelX: 0.0,
+    displayFps: 0.0,
+    lastFrameTimeMs: 0.0,
+    lastStepWallMs: 0.0,
+    avgStepWallMs: 0.0,
+    lastPolicyWallMs: 0.0,
+    avgPolicyWallMs: 0.0,
+    lastPhysicsWallMs: 0.0,
+    avgPhysicsWallMs: 0.0,
+    lastOverlayWallMs: 0.0,
+    avgOverlayWallMs: 0.0,
   };
+  rustRoboticsMujocoRuntime.visualGeomMeta = collectVisualGeomMeta(rustRoboticsMujocoRuntime);
+  rustRoboticsMujocoRuntime.visualGeomState = createVisualGeomState(rustRoboticsMujocoRuntime.visualGeomMeta);
   const initialMeshAssets = collectMeshAssets(rustRoboticsMujocoRuntime);
   rustRoboticsMujocoRuntime.meshAssets = convertBrowserMeshAssets(initialMeshAssets);
   const initialReport = buildMujocoReport(rustRoboticsMujocoRuntime, true);
@@ -526,16 +610,32 @@ export async function rustRoboticsMujocoStep(stepCount, commandVelX) {
   const runtime = rustRoboticsMujocoRuntime;
   const steps = Math.max(1, Number(stepCount) || 1);
   runtime.commandVelX = Number(commandVelX) || 0.0;
+  const stepStart = performance.now();
+  let policyTotalMs = 0.0;
+  let physicsTotalMs = 0.0;
   for (let i = 0; i < steps; ++i) {
+    const policyStart = performance.now();
     updatePolicyInput(runtime);
     await runPolicy(runtime, runtime.commandVelX);
+    policyTotalMs += performance.now() - policyStart;
+
+    const physicsStart = performance.now();
     for (let j = 0; j < runtime.decimation; ++j) {
       applyControl(runtime);
       runtime.mujoco.mj_step(runtime.model, runtime.data);
       runtime.mujocoTimeMs += runtime.timestep * 1000.0;
     }
+    physicsTotalMs += performance.now() - physicsStart;
   }
   runtime.stepCount += steps;
+  const stepWallMs = performance.now() - stepStart;
+  runtime.lastStepWallMs = stepWallMs;
+  runtime.avgStepWallMs = runtime.avgStepWallMs > 0.0 ? runtime.avgStepWallMs * 0.9 + stepWallMs * 0.1 : stepWallMs;
+  runtime.lastPolicyWallMs = policyTotalMs;
+  runtime.avgPolicyWallMs = runtime.avgPolicyWallMs > 0.0 ? runtime.avgPolicyWallMs * 0.9 + policyTotalMs * 0.1 : policyTotalMs;
+  runtime.lastPhysicsWallMs = physicsTotalMs;
+  runtime.avgPhysicsWallMs =
+    runtime.avgPhysicsWallMs > 0.0 ? runtime.avgPhysicsWallMs * 0.9 + physicsTotalMs * 0.1 : physicsTotalMs;
   runtime.lastReport = buildMujocoReport(runtime, false);
   requestMujocoOverlayRender();
   return runtime.lastReport;
@@ -746,7 +846,7 @@ function ensureMujocoOverlayLoop() {
     if (!overlay.needsRender) {
       return;
     }
-    const minFrameMs = 1000.0 / 30.0;
+    const minFrameMs = 1000.0 / 60.0;
     if (now - overlay.lastRenderMs < minFrameMs) {
       overlay.rafHandle = window.requestAnimationFrame(tick);
       return;
@@ -789,6 +889,7 @@ function renderMujocoOverlay(now) {
     overlay.cameraInitialized = true;
   }
 
+  const renderStart = performance.now();
   const scene = buildOverlaySceneFrame(
     geoms,
     runtime.meshAssets,
@@ -799,6 +900,16 @@ function renderMujocoOverlay(now) {
   paintOverlayScene(overlay.renderer, gl, scene);
   overlay.needsRender = false;
   overlay.lastRenderMs = now ?? performance.now();
+  const overlayWallMs = performance.now() - renderStart;
+  runtime.lastOverlayWallMs = overlayWallMs;
+  runtime.avgOverlayWallMs =
+    runtime.avgOverlayWallMs > 0.0 ? runtime.avgOverlayWallMs * 0.9 + overlayWallMs * 0.1 : overlayWallMs;
+  const frameNow = performance.now();
+  if (runtime.lastFrameTimeMs > 0.0) {
+    const instantFps = 1000.0 / Math.max(1.0, frameNow - runtime.lastFrameTimeMs);
+    runtime.displayFps = runtime.displayFps > 0.0 ? runtime.displayFps * 0.9 + instantFps * 0.1 : instantFps;
+  }
+  runtime.lastFrameTimeMs = frameNow;
 }
 
 function createOverlayRenderer(gl) {
@@ -809,6 +920,9 @@ function createOverlayRenderer(gl) {
   const lineVbo = gl.createBuffer();
   const uViewProj = gl.getUniformLocation(program, "u_view_proj");
   const uUnlit = gl.getUniformLocation(program, "u_unlit");
+  const uModel = gl.getUniformLocation(program, "u_model");
+  const uNormalMat = gl.getUniformLocation(program, "u_normal_mat");
+  const uTint = gl.getUniformLocation(program, "u_tint");
 
   setupOverlayVertexArray(gl, triangleVao, triangleVbo);
   setupOverlayVertexArray(gl, lineVao, lineVbo);
@@ -821,6 +935,10 @@ function createOverlayRenderer(gl) {
     lineVbo,
     uViewProj,
     uUnlit,
+    uModel,
+    uNormalMat,
+    uTint,
+    meshBuffers: [],
   };
 }
 
@@ -839,12 +957,17 @@ function setupOverlayVertexArray(gl, vao, vbo) {
 }
 
 function paintOverlayScene(renderer, gl, scene) {
+  ensureOverlayMeshBuffers(renderer, gl, rustRoboticsMujocoRuntime?.meshAssets ?? []);
+
   gl.enable(gl.DEPTH_TEST);
   gl.depthFunc(gl.LEQUAL);
   gl.depthMask(true);
   gl.disable(gl.BLEND);
   gl.useProgram(renderer.program);
   gl.uniformMatrix4fv(renderer.uViewProj, false, scene.viewProj);
+  gl.uniformMatrix4fv(renderer.uModel, false, IDENTITY_MAT4);
+  gl.uniformMatrix3fv(renderer.uNormalMat, false, IDENTITY_MAT3);
+  gl.uniform4fv(renderer.uTint, WHITE_TINT);
 
   if (scene.triangles.length > 0) {
     gl.uniform1i(renderer.uUnlit, 0);
@@ -865,6 +988,24 @@ function paintOverlayScene(renderer, gl, scene) {
     gl.drawArrays(gl.LINES, 0, scene.lines.length / 10);
   }
 
+  if (scene.meshDraws.length > 0) {
+    gl.uniform1i(renderer.uUnlit, 0);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    for (const draw of scene.meshDraws) {
+      const meshBuffer = renderer.meshBuffers[draw.meshId];
+      if (!meshBuffer) {
+        continue;
+      }
+      gl.uniformMatrix4fv(renderer.uModel, false, draw.modelMat);
+      gl.uniformMatrix3fv(renderer.uNormalMat, false, draw.normalMat);
+      gl.uniform4fv(renderer.uTint, draw.tint);
+      gl.bindVertexArray(meshBuffer.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, meshBuffer.vertexCount);
+    }
+    gl.disable(gl.CULL_FACE);
+  }
+
   gl.bindVertexArray(null);
   gl.bindBuffer(gl.ARRAY_BUFFER, null);
   gl.useProgram(null);
@@ -873,6 +1014,7 @@ function paintOverlayScene(renderer, gl, scene) {
 function buildOverlaySceneFrame(geoms, meshAssets, aspect, camera, diagnosticColors) {
   const triangles = [];
   const lines = [];
+  const meshDraws = [];
   appendGridLines(lines);
   for (const geom of geoms) {
     switch (geom.type_id) {
@@ -891,7 +1033,7 @@ function buildOverlaySceneFrame(geoms, meshAssets, aspect, camera, diagnosticCol
         appendBoxGeom(triangles, geom, diagnosticColors);
         break;
       case 7:
-        appendMeshGeom(triangles, geom, meshAssets, diagnosticColors);
+        appendMeshDraw(meshDraws, geom, meshAssets, diagnosticColors);
         break;
       case 9:
         appendLineGeom(lines, geom, diagnosticColors);
@@ -903,6 +1045,7 @@ function buildOverlaySceneFrame(geoms, meshAssets, aspect, camera, diagnosticCol
   return {
     triangles: new Float32Array(triangles),
     lines: new Float32Array(lines),
+    meshDraws,
     viewProj: new Float32Array(viewProjectionMatrix(camera, Math.max(0.1, aspect))),
   };
 }
@@ -1067,26 +1210,23 @@ function appendSphereGeom(triangles, geom, rings, segments, diagnosticColors) {
   }
 }
 
-function appendMeshGeom(triangles, geom, meshAssets, diagnosticColors) {
+function appendMeshDraw(meshDraws, geom, meshAssets, diagnosticColors) {
   const meshId = Math.max(0, geom.dataid | 0);
   const mesh = meshAssets[meshId];
   if (!mesh) {
     return;
   }
-  const color = displayGeomColor(geom, diagnosticColors);
-  for (const vertex of mesh.triangles) {
-    pushVertex(
-      triangles,
-      transformGeomPoint(geom, vertex.position),
-      transformGeomVector(geom, vertex.normal),
-      color,
-    );
-  }
+  meshDraws.push({
+    meshId,
+    modelMat: new Float32Array(modelMatrixFromGeom(geom)),
+    normalMat: new Float32Array(normalMatrixFromGeom(geom)),
+    tint: new Float32Array(displayGeomColor(geom, diagnosticColors)),
+  });
 }
 
 function convertBrowserMeshAssets(meshes) {
   return meshes.map((mesh) => {
-    const triangles = [];
+    const vertexData = [];
     const vertnum = Math.floor(mesh.positions.length / 3);
     for (let i = 0; i + 2 < mesh.faces.length; i += 3) {
       const ia = mesh.faces[i];
@@ -1099,25 +1239,72 @@ function convertBrowserMeshAssets(meshes) {
       const b = readVec3(mesh.positions, ib);
       const c = readVec3(mesh.positions, ic);
       const faceNormal = triangleNormal(a, b, c);
-      triangles.push({
-        position: a,
-        normal: mesh.normals.length >= (ia + 1) * 3 ? normalize3(readVec3(mesh.normals, ia)) : faceNormal,
-      });
-      triangles.push({
-        position: b,
-        normal: mesh.normals.length >= (ib + 1) * 3 ? normalize3(readVec3(mesh.normals, ib)) : faceNormal,
-      });
-      triangles.push({
-        position: c,
-        normal: mesh.normals.length >= (ic + 1) * 3 ? normalize3(readVec3(mesh.normals, ic)) : faceNormal,
-      });
+      pushVertex(
+        vertexData,
+        a,
+        mesh.normals.length >= (ia + 1) * 3 ? normalize3(readVec3(mesh.normals, ia)) : faceNormal,
+        WHITE_COLOR,
+      );
+      pushVertex(
+        vertexData,
+        b,
+        mesh.normals.length >= (ib + 1) * 3 ? normalize3(readVec3(mesh.normals, ib)) : faceNormal,
+        WHITE_COLOR,
+      );
+      pushVertex(
+        vertexData,
+        c,
+        mesh.normals.length >= (ic + 1) * 3 ? normalize3(readVec3(mesh.normals, ic)) : faceNormal,
+        WHITE_COLOR,
+      );
     }
-    return { triangles };
+    return {
+      vertexData: new Float32Array(vertexData),
+      vertexCount: vertexData.length / 10,
+    };
   });
+}
+
+function ensureOverlayMeshBuffers(renderer, gl, meshAssets) {
+  if (renderer.meshBuffers.length === meshAssets.length && renderer.meshBuffers.length > 0) {
+    return;
+  }
+
+  for (const buffer of renderer.meshBuffers) {
+    if (!buffer) {
+      continue;
+    }
+    gl.deleteBuffer(buffer.vbo);
+    gl.deleteVertexArray(buffer.vao);
+  }
+  renderer.meshBuffers = [];
+
+  for (const mesh of meshAssets) {
+    const vao = gl.createVertexArray();
+    const vbo = gl.createBuffer();
+    setupOverlayVertexArray(gl, vao, vbo);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.vertexData, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    renderer.meshBuffers.push({
+      vao,
+      vbo,
+      vertexCount: mesh.vertexCount,
+    });
+  }
 }
 
 function readVec3(array, index) {
   return [array[index * 3], array[index * 3 + 1], array[index * 3 + 2]];
+}
+
+function readMat3(array, index) {
+  const base = index * 9;
+  return [
+    array[base], array[base + 1], array[base + 2],
+    array[base + 3], array[base + 4], array[base + 5],
+    array[base + 6], array[base + 7], array[base + 8],
+  ];
 }
 
 function defaultOverlayCamera() {
@@ -1234,6 +1421,49 @@ function geomAxes(geom) {
   ];
 }
 
+function quatToMat3(quat) {
+  const [w, x, y, z] = quat;
+  const xx = x * x;
+  const yy = y * y;
+  const zz = z * z;
+  const xy = x * y;
+  const xz = x * z;
+  const yz = y * z;
+  const wx = w * x;
+  const wy = w * y;
+  const wz = w * z;
+  return [
+    1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy),
+    2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx),
+    2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy),
+  ];
+}
+
+function transformPoint(origin, mat, local) {
+  return [
+    origin[0] + mat[0] * local[0] + mat[1] * local[1] + mat[2] * local[2],
+    origin[1] + mat[3] * local[0] + mat[4] * local[1] + mat[5] * local[2],
+    origin[2] + mat[6] * local[0] + mat[7] * local[1] + mat[8] * local[2],
+  ];
+}
+
+function modelMatrixFromGeom(geom) {
+  return [
+    geom.mat[0], geom.mat[3], geom.mat[6], 0.0,
+    geom.mat[1], geom.mat[4], geom.mat[7], 0.0,
+    geom.mat[2], geom.mat[5], geom.mat[8], 0.0,
+    geom.pos[0], geom.pos[1], geom.pos[2], 1.0,
+  ];
+}
+
+function normalMatrixFromGeom(geom) {
+  return [
+    geom.mat[0], geom.mat[3], geom.mat[6],
+    geom.mat[1], geom.mat[4], geom.mat[7],
+    geom.mat[2], geom.mat[5], geom.mat[8],
+  ];
+}
+
 function transformGeomPoint(geom, local) {
   return [
     geom.pos[0] + geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],
@@ -1331,6 +1561,20 @@ function normalize3(v) {
   return [v[0] / len, v[1] / len, v[2] / len];
 }
 
+function mulMat3(a, b) {
+  return [
+    a[0] * b[0] + a[1] * b[3] + a[2] * b[6],
+    a[0] * b[1] + a[1] * b[4] + a[2] * b[7],
+    a[0] * b[2] + a[1] * b[5] + a[2] * b[8],
+    a[3] * b[0] + a[4] * b[3] + a[5] * b[6],
+    a[3] * b[1] + a[4] * b[4] + a[5] * b[7],
+    a[3] * b[2] + a[4] * b[5] + a[5] * b[8],
+    a[6] * b[0] + a[7] * b[3] + a[8] * b[6],
+    a[6] * b[1] + a[7] * b[4] + a[8] * b[7],
+    a[6] * b[2] + a[7] * b[5] + a[8] * b[8],
+  ];
+}
+
 function mulMat4(a, b) {
   const out = new Array(16).fill(0.0);
   for (let col = 0; col < 4; ++col) {
@@ -1347,18 +1591,35 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+const IDENTITY_MAT4 = new Float32Array([
+  1.0, 0.0, 0.0, 0.0,
+  0.0, 1.0, 0.0, 0.0,
+  0.0, 0.0, 1.0, 0.0,
+  0.0, 0.0, 0.0, 1.0,
+]);
+const IDENTITY_MAT3 = new Float32Array([
+  1.0, 0.0, 0.0,
+  0.0, 1.0, 0.0,
+  0.0, 0.0, 1.0,
+]);
+const WHITE_TINT = new Float32Array([1.0, 1.0, 1.0, 1.0]);
+const WHITE_COLOR = [1.0, 1.0, 1.0, 1.0];
+
 const OVERLAY_VERTEX_SHADER = `#version 300 es
 precision highp float;
 layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec4 a_color;
 uniform mat4 u_view_proj;
+uniform mat4 u_model;
+uniform mat3 u_normal_mat;
+uniform vec4 u_tint;
 out vec3 v_normal;
 out vec4 v_color;
 void main() {
-  v_normal = a_normal;
-  v_color = a_color;
-  gl_Position = u_view_proj * vec4(a_pos, 1.0);
+  v_normal = normalize(u_normal_mat * a_normal);
+  v_color = a_color * u_tint;
+  gl_Position = u_view_proj * u_model * vec4(a_pos, 1.0);
 }`;
 
 const OVERLAY_FRAGMENT_SHADER = `#version 300 es
