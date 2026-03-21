@@ -48,7 +48,9 @@ mkdir -p "docs/vendor/mujoco/mt"
 mkdir -p "docs/assets/mujoco"
 
 rm -rf "docs/assets/mujoco/go2"
+rm -rf "docs/assets/mujoco/openduckmini"
 cp -R "rust_robotics_sim/assets/mujoco/go2" "docs/assets/mujoco/"
+cp -R "rust_robotics_sim/assets/mujoco/openduckmini" "docs/assets/mujoco/"
 
 cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort.wasm.min.js" \
   "docs/vendor/onnxruntime-web/dist/ort.wasm.min.js"

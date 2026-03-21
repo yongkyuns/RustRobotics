@@ -53,27 +53,34 @@ export async function rustRoboticsOrtSmokeTest(modelBytes, wasmBasePath, config 
   });
 
   const inputNames = Array.from(session.inputNames);
-  if (inputNames.length < 4) {
-    throw new Error(`unexpected input count: ${inputNames.length}`);
-  }
-
   const feeds = {};
-  const commandDim = Number(config?.command_dim) || 16;
-  const inputKeys = Array.isArray(config?.input_keys) ? config.input_keys : inputNames;
-  const nameFor = (predicate) => inputNames.find(predicate) ?? inputKeys.find(predicate);
-  const policyName = nameFor((name) => name === "policy");
-  const isInitName = nameFor((name) => name === "is_init");
-  const adaptHxName = nameFor((name) => name.includes("adapt_hx"));
-  const commandName = inputNames.find(
-    (name) => name !== policyName && name !== isInitName && name !== adaptHxName,
-  );
-  if (!policyName || !isInitName || !adaptHxName || !commandName) {
-    throw new Error(`failed to resolve ONNX smoke-test inputs from ${inputNames.join(", ")}`);
+  if (config?.controller_kind === "open_duck_mini_walk") {
+    const obsName = inputNames[0] ?? config?.input_keys?.[0];
+    if (!obsName) {
+      throw new Error("failed to resolve Open Duck Mini ONNX input name");
+    }
+    feeds[obsName] = new ort.Tensor("float32", new Float32Array(101), [1, 101]);
+  } else {
+    if (inputNames.length < 4) {
+      throw new Error(`unexpected input count: ${inputNames.length}`);
+    }
+    const commandDim = Number(config?.command_dim) || 16;
+    const inputKeys = Array.isArray(config?.input_keys) ? config.input_keys : inputNames;
+    const nameFor = (predicate) => inputNames.find(predicate) ?? inputKeys.find(predicate);
+    const policyName = nameFor((name) => name === "policy");
+    const isInitName = nameFor((name) => name === "is_init");
+    const adaptHxName = nameFor((name) => name.includes("adapt_hx"));
+    const commandName = inputNames.find(
+      (name) => name !== policyName && name !== isInitName && name !== adaptHxName,
+    );
+    if (!policyName || !isInitName || !adaptHxName || !commandName) {
+      throw new Error(`failed to resolve ONNX smoke-test inputs from ${inputNames.join(", ")}`);
+    }
+    feeds[policyName] = new ort.Tensor("float32", new Float32Array(117), [1, 117]);
+    feeds[isInitName] = new ort.Tensor("bool", [false], [1]);
+    feeds[adaptHxName] = new ort.Tensor("float32", new Float32Array(128), [1, 128]);
+    feeds[commandName] = new ort.Tensor("float32", new Float32Array(commandDim), [1, commandDim]);
   }
-  feeds[policyName] = new ort.Tensor("float32", new Float32Array(117), [1, 117]);
-  feeds[isInitName] = new ort.Tensor("bool", [false], [1]);
-  feeds[adaptHxName] = new ort.Tensor("float32", new Float32Array(128), [1, 128]);
-  feeds[commandName] = new ort.Tensor("float32", new Float32Array(commandDim), [1, commandDim]);
 
   const outputs = await session.run(feeds);
   const outputNames = Array.from(session.outputNames);
@@ -137,6 +144,15 @@ function writeWorkingFiles(mujoco, fileEntries) {
       ensureDirectory(mujoco.FS, parent);
     }
     mujoco.FS.writeFile(fullPath, new Uint8Array(bytes));
+
+    // Some imported MuJoCo XMLs resolve mesh filenames relative to /working
+    // even though the fetched bundle keeps them under assets/.
+    if (path.startsWith("assets/")) {
+      const leafName = path.substring("assets/".length);
+      if (leafName && !leafName.includes("/")) {
+        mujoco.FS.writeFile(`/working/${leafName}`, new Uint8Array(bytes));
+      }
+    }
   }
 }
 
@@ -281,6 +297,87 @@ function updatePolicyInput(runtime) {
   shiftHistory(runtime.jointVelHistory, jointVel);
 }
 
+function buildDuckCommandVector(runtime) {
+  const qpos = runtime.data.qpos;
+  const quat = [qpos[3], qpos[4], qpos[5], qpos[6]];
+  const basePos = [Number(qpos[0]), Number(qpos[1]), Number(qpos[2])];
+  const relBody = rotateVectorByInverseQuaternion(quat, [
+    runtime.commandSetpoint.x - basePos[0],
+    runtime.commandSetpoint.y - basePos[1],
+    0.0,
+  ]);
+  return new Float32Array([
+    clamp(relBody[0], -0.15, 0.15),
+    clamp(relBody[1], -0.2, 0.2),
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+  ]);
+}
+
+function updateDuckPhase(runtime) {
+  const phaseSteps = Math.max(1, Number(runtime.phaseSteps) || 27);
+  runtime.imitationIndex = (runtime.imitationIndex + 1) % phaseSteps;
+  const phase = (runtime.imitationIndex / phaseSteps) * Math.PI * 2.0;
+  runtime.imitationPhase[0] = Math.cos(phase);
+  runtime.imitationPhase[1] = Math.sin(phase);
+}
+
+function readSensorVec(runtime, adr, dim) {
+  const out = new Float32Array(dim);
+  for (let i = 0; i < dim; ++i) {
+    out[i] = Number(runtime.data.sensordata[adr + i] ?? 0.0);
+  }
+  return out;
+}
+
+function collectDuckFeetContacts(runtime) {
+  const contacts = new Float32Array(2);
+  const leftFootPos = readSensorVec(runtime, runtime.leftFootPosAdr, 3);
+  const rightFootPos = readSensorVec(runtime, runtime.rightFootPosAdr, 3);
+  contacts[0] = leftFootPos[2] <= 0.03 ? 1.0 : 0.0;
+  contacts[1] = rightFootPos[2] <= 0.03 ? 1.0 : 0.0;
+  return contacts;
+}
+
+function buildDuckObservation(runtime) {
+  const gyro = readSensorVec(runtime, runtime.duckGyroAdr, 3);
+  const accel = readSensorVec(runtime, runtime.duckAccelAdr, 3);
+  accel[0] += 1.3;
+  const commands = buildDuckCommandVector(runtime);
+  const obs = new Float32Array(101);
+  let idx = 0;
+  obs.set(gyro, idx);
+  idx += 3;
+  obs.set(accel, idx);
+  idx += 3;
+  obs.set(commands, idx);
+  idx += 7;
+
+  for (let i = 0; i < runtime.numDofs; ++i) {
+    obs[idx + i] = runtime.data.qpos[runtime.jointQposAdr[i]] - runtime.config.default_joint_pos[i];
+  }
+  idx += runtime.numDofs;
+  for (let i = 0; i < runtime.numDofs; ++i) {
+    obs[idx + i] = runtime.data.qvel[runtime.jointQvelAdr[i]] * 0.05;
+  }
+  idx += runtime.numDofs;
+  obs.set(runtime.lastActions, idx);
+  idx += runtime.numDofs;
+  obs.set(runtime.lastLastActions, idx);
+  idx += runtime.numDofs;
+  obs.set(runtime.lastLastLastActions, idx);
+  idx += runtime.numDofs;
+  obs.set(runtime.motorTargets, idx);
+  idx += runtime.numDofs;
+  obs.set(collectDuckFeetContacts(runtime), idx);
+  idx += 2;
+  obs.set(runtime.imitationPhase, idx);
+  return obs;
+}
+
 function computeVelocityCommandInput(runtime, commandVelX, commandVelY) {
   const qpos = runtime.data.qpos;
   const quat = [qpos[3], qpos[4], qpos[5], qpos[6]];
@@ -373,6 +470,27 @@ function computeCommandInput(runtime, commandVelX, commandVelY) {
 }
 
 async function runPolicy(runtime, commandVelX, commandVelY) {
+  if (runtime.controllerKind === "open_duck_mini_walk") {
+    const ort = globalThis.ort;
+    const obs = buildDuckObservation(runtime);
+    const feeds = {};
+    feeds[runtime.obsInputName] = new ort.Tensor("float32", obs, [1, 101]);
+    const outputs = await runtime.ortSession.run(feeds);
+    const actionTensor = outputs[runtime.actionOutputName];
+    if (!actionTensor) {
+      throw new Error("missing Open Duck Mini action output from ONNX Runtime");
+    }
+    const action = Float32Array.from(actionTensor.data);
+    if (action.length < runtime.numDofs) {
+      throw new Error(`policy returned ${action.length} actions, expected at least ${runtime.numDofs}`);
+    }
+    runtime.lastLastLastActions.set(runtime.lastLastActions);
+    runtime.lastLastActions.set(runtime.lastActions);
+    runtime.lastActions.set(action.subarray(0, runtime.numDofs));
+    updateDuckPhase(runtime);
+    return;
+  }
+
   const ort = globalThis.ort;
   const policyInput = flattenPolicyInput(runtime);
   const commandInput = computeCommandInput(runtime, commandVelX, commandVelY);
@@ -409,6 +527,24 @@ async function runPolicy(runtime, commandVelX, commandVelY) {
 }
 
 function applyControl(runtime) {
+  if (runtime.controllerKind === "open_duck_mini_walk") {
+    for (let i = 0; i < runtime.numDofs; ++i) {
+      runtime.motorTargets[i] =
+        runtime.config.default_joint_pos[i] + runtime.lastActions[i] * runtime.config.action_scale;
+    }
+    const delta = runtime.maxMotorVelocity * runtime.timestep * runtime.decimation;
+    for (let i = 0; i < runtime.numDofs; ++i) {
+      runtime.motorTargets[i] = clamp(
+        runtime.motorTargets[i],
+        runtime.prevMotorTargets[i] - delta,
+        runtime.prevMotorTargets[i] + delta,
+      );
+      runtime.prevMotorTargets[i] = runtime.motorTargets[i];
+      runtime.data.ctrl[runtime.ctrlAdr[i]] = runtime.motorTargets[i];
+    }
+    return;
+  }
+
   const qpos = runtime.data.qpos;
   const qvel = runtime.data.qvel;
   const ctrl = runtime.data.ctrl;
@@ -594,7 +730,7 @@ function buildMujocoReport(runtime, includeMeshAssets = false) {
     step_count: stepCount,
     qpos_preview: Array.from(data.qpos.slice(0, Math.min(8, data.qpos.length))),
     xpos_preview: Array.from(data.xpos.slice(0, Math.min(9, data.xpos.length))),
-    last_action_preview: Array.from(runtime.lastActions.slice(0, 12)),
+    last_action_preview: Array.from(runtime.lastActions.slice(0, Math.min(runtime.numDofs, 14))),
     policy_inputs: Array.from(runtime.policyInputNames),
     policy_outputs: Array.from(runtime.policyOutputNames),
     command_vel_x: runtime.commandVelX,
@@ -661,19 +797,35 @@ async function createRustRoboticsMujocoRuntime(
     maybeDelete(actuator);
   }
 
-  const outputNameMap = buildOutputNameMap(config.output_keys, Array.from(ortSession.outputNames));
-  const inputNameMap = buildInputNameMap(config.input_keys, Array.from(ortSession.inputNames));
-  const actionOutputName = outputNameMap.get("action");
-  const nextHxOutputName = outputNameMap.get("next.adapt_hx");
-  if (!actionOutputName || !nextHxOutputName) {
-    throw new Error("ONNX output mapping is missing action or next.adapt_hx");
-  }
-  if (!inputNameMap.policy || !inputNameMap.is_init || !inputNameMap.adapt_hx || !inputNameMap.command) {
-    throw new Error("ONNX input mapping is missing policy/is_init/adapt_hx/command");
+  const controllerKind = config.controller_kind ?? "go2_facet";
+  const outputNames = Array.from(ortSession.outputNames);
+  const inputNames = Array.from(ortSession.inputNames);
+  const outputNameMap = buildOutputNameMap(config.output_keys, outputNames);
+  const inputNameMap = buildInputNameMap(config.input_keys, inputNames);
+  let actionOutputName = null;
+  let nextHxOutputName = null;
+  let obsInputName = null;
+  if (controllerKind === "open_duck_mini_walk") {
+    actionOutputName = outputNameMap.get("continuous_actions") ?? outputNames[0] ?? null;
+    obsInputName = inputNames[0] ?? null;
+    if (!actionOutputName || !obsInputName) {
+      throw new Error("Open Duck Mini ONNX mapping is missing obs or continuous_actions");
+    }
+  } else {
+    actionOutputName = outputNameMap.get("action");
+    nextHxOutputName = outputNameMap.get("next.adapt_hx");
+    if (!actionOutputName || !nextHxOutputName) {
+      throw new Error("ONNX output mapping is missing action or next.adapt_hx");
+    }
+    if (!inputNameMap.policy || !inputNameMap.is_init || !inputNameMap.adapt_hx || !inputNameMap.command) {
+      throw new Error("ONNX input mapping is missing policy/is_init/adapt_hx/command");
+    }
   }
 
   const timestep = Number(model.opt.timestep);
-  const decimation = Math.max(1, Math.round(0.02 / timestep));
+  const decimation =
+    controllerKind === "open_duck_mini_walk" ? 10 : Math.max(1, Math.round(0.02 / timestep));
+  const numDofs = Math.max(1, config.joint_names.length);
   rustRoboticsMujocoRuntime = {
     mujoco,
     model,
@@ -685,18 +837,23 @@ async function createRustRoboticsMujocoRuntime(
     ctrlAdr,
     policyInputNames: Array.from(ortSession.inputNames),
     policyOutputNames: Array.from(ortSession.outputNames),
+    controllerKind,
     inputNameMap,
+    obsInputName,
     actionOutputName,
     nextHxOutputName,
-    lastActions: new Float32Array(12),
-    actionHistory: [new Float32Array(12), new Float32Array(12), new Float32Array(12)],
+    numDofs,
+    lastActions: new Float32Array(numDofs),
+    lastLastActions: new Float32Array(numDofs),
+    lastLastLastActions: new Float32Array(numDofs),
+    actionHistory: [new Float32Array(numDofs), new Float32Array(numDofs), new Float32Array(numDofs)],
     gravityHistory: [
       Float32Array.from([0.0, 0.0, -1.0]),
       Float32Array.from([0.0, 0.0, -1.0]),
       Float32Array.from([0.0, 0.0, -1.0]),
     ],
-    jointPosHistory: [new Float32Array(12), new Float32Array(12), new Float32Array(12)],
-    jointVelHistory: [new Float32Array(12), new Float32Array(12), new Float32Array(12)],
+    jointPosHistory: [new Float32Array(numDofs), new Float32Array(numDofs), new Float32Array(numDofs)],
+    jointVelHistory: [new Float32Array(numDofs), new Float32Array(numDofs), new Float32Array(numDofs)],
     adaptHx: new Float32Array(128),
     isInit: true,
     timestep,
@@ -708,7 +865,13 @@ async function createRustRoboticsMujocoRuntime(
     useSetpointBall: true,
     commandMode: config.command_mode ?? "velocity",
     commandDim: Number(config.command_dim) || 16,
+    phaseSteps: Number(config.phase_steps) || 0,
     impedanceKp: 24.0,
+    maxMotorVelocity: 5.24,
+    motorTargets: Float32Array.from(config.default_joint_pos),
+    prevMotorTargets: Float32Array.from(config.default_joint_pos),
+    imitationIndex: 0,
+    imitationPhase: new Float32Array([1.0, 0.0]),
     debugDragMode: "",
     debugPointerDowns: 0,
     debugPointerMoves: 0,
@@ -723,6 +886,12 @@ async function createRustRoboticsMujocoRuntime(
     lastOverlayWallMs: 0.0,
     avgOverlayWallMs: 0.0,
   };
+  if (controllerKind === "open_duck_mini_walk") {
+    rustRoboticsMujocoRuntime.duckGyroAdr = Number(model.sensor("imu_gyro").adr);
+    rustRoboticsMujocoRuntime.duckAccelAdr = Number(model.sensor("imu_accel").adr);
+    rustRoboticsMujocoRuntime.leftFootPosAdr = Number(model.sensor("left_foot_pos").adr);
+    rustRoboticsMujocoRuntime.rightFootPosAdr = Number(model.sensor("right_foot_pos").adr);
+  }
   syncCommandSetpointFromCommand(rustRoboticsMujocoRuntime);
   rustRoboticsMujocoRuntime.visualGeomMeta = collectVisualGeomMeta(rustRoboticsMujocoRuntime);
   rustRoboticsMujocoRuntime.visualGeomState = createVisualGeomState(rustRoboticsMujocoRuntime.visualGeomMeta);
@@ -1039,24 +1208,12 @@ function ensureMujocoOverlay() {
     if (overlay.dragMode === "setpoint" && rustRoboticsMujocoRuntime) {
       rustRoboticsMujocoRuntime.debugDragMode = "setpoint";
       updateCommandSetpointFromDragRay(overlay, event, rustRoboticsMujocoRuntime);
-    } else if (overlay.dragButton === 0) {
+    } else if (overlay.dragButton === 0 || overlay.dragButton === 2) {
       if (rustRoboticsMujocoRuntime) {
         rustRoboticsMujocoRuntime.debugDragMode = "orbit";
       }
       overlay.camera.azimuthDeg -= dx * 0.25;
-      overlay.camera.elevationDeg = clamp(overlay.camera.elevationDeg + dy * 0.2, -89.0, 89.0);
-    } else if (overlay.dragButton === 2) {
-      if (rustRoboticsMujocoRuntime) {
-        rustRoboticsMujocoRuntime.debugDragMode = "pan";
-      }
-      const forward = orbitForward(overlay.camera.azimuthDeg, overlay.camera.elevationDeg);
-      const right = normalize3(cross3(forward, [0.0, 0.0, 1.0]));
-      const up = normalize3(cross3(right, forward));
-      const panScale = overlay.camera.distance * 0.0025;
-      overlay.camera.target = sub3(
-        overlay.camera.target,
-        scale3(add3(scale3(right, dx), scale3(up, dy)), panScale),
-      );
+      overlay.camera.elevationDeg = clamp(overlay.camera.elevationDeg - dy * 0.2, -89.0, 89.0);
     }
 
     requestMujocoOverlayRender();

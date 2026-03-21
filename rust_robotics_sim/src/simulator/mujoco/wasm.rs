@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
-const BROWSER_ASSET_BASE_PATH: &str = "assets/mujoco/go2/";
-const BROWSER_ASSET_FILES: &[&str] = &[
+const GO2_ASSET_FILES: &[&str] = &[
     "scene.xml",
     "go2.xml",
     "asset_meta.json",
@@ -38,10 +37,107 @@ const BROWSER_ASSET_FILES: &[&str] = &[
     "assets/calf_mirror_1.obj",
     "assets/foot.obj",
 ];
+const OPEN_DUCK_MINI_ASSET_FILES: &[&str] = &[
+    "scene.xml",
+    "open_duck_mini_v2.xml",
+    "asset_meta.json",
+    "duck.json",
+    "BEST_WALK_ONNX.onnx",
+    "assets/antenna.stl",
+    "assets/battery_pack_lid.stl",
+    "assets/bms.stl",
+    "assets/bno055.stl",
+    "assets/board.stl",
+    "assets/body_back.stl",
+    "assets/body_front.stl",
+    "assets/body_middle_bottom.stl",
+    "assets/body_middle_top.stl",
+    "assets/cell.stl",
+    "assets/drive_palonier.stl",
+    "assets/foot_bottom_pla.stl",
+    "assets/foot_bottom_tpu.stl",
+    "assets/foot_side.stl",
+    "assets/foot_top.stl",
+    "assets/head.stl",
+    "assets/head_bot_sheet.stl",
+    "assets/head_pitch_to_yaw.stl",
+    "assets/head_roll_mount.stl",
+    "assets/head_yaw_to_roll.stl",
+    "assets/holder.stl",
+    "assets/left_antenna_holder.stl",
+    "assets/left_cache.stl",
+    "assets/left_knee_to_ankle_left_sheet.stl",
+    "assets/left_knee_to_ankle_right_sheet.stl",
+    "assets/left_roll_to_pitch.stl",
+    "assets/leg_spacer.stl",
+    "assets/neck_left_sheet.stl",
+    "assets/neck_right_sheet.stl",
+    "assets/passive_palonier.stl",
+    "assets/power_switch.stl",
+    "assets/raspberrypizerow.stl",
+    "assets/right_antenna_holder.stl",
+    "assets/right_cache.stl",
+    "assets/right_roll_to_pitch.stl",
+    "assets/roll_bearing.stl",
+    "assets/roll_motor_bottom.stl",
+    "assets/roll_motor_top.stl",
+    "assets/sg90.stl",
+    "assets/trunk_bottom.stl",
+    "assets/trunk_top.stl",
+    "assets/usb_c_charger.stl",
+    "assets/wj-wk00-0122topcabinetcase_95.stl",
+    "assets/wj-wk00-0123middlecase_56.stl",
+    "assets/wj-wk00-0124bottomcase_45.stl",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserRobotPreset {
+    Go2,
+    OpenDuckMini,
+}
+
+impl BrowserRobotPreset {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Go2 => "Go2",
+            Self::OpenDuckMini => "Open Duck Mini",
+        }
+    }
+
+    fn asset_base_path(self) -> &'static str {
+        match self {
+            Self::Go2 => "assets/mujoco/go2/",
+            Self::OpenDuckMini => "assets/mujoco/openduckmini/",
+        }
+    }
+
+    fn asset_files(self) -> &'static [&'static str] {
+        match self {
+            Self::Go2 => GO2_ASSET_FILES,
+            Self::OpenDuckMini => OPEN_DUCK_MINI_ASSET_FILES,
+        }
+    }
+
+    fn policy_config_name(self) -> &'static str {
+        match self {
+            Self::Go2 => "facet.json",
+            Self::OpenDuckMini => "duck.json",
+        }
+    }
+
+    fn robot_xml_name(self) -> &'static str {
+        match self {
+            Self::Go2 => "go2.xml",
+            Self::OpenDuckMini => "open_duck_mini_v2.xml",
+        }
+    }
+}
 
 pub(super) struct WasmMujocoBackend {
     active: bool,
+    selected_robot: BrowserRobotPreset,
     diagnostic_colors: bool,
+    generation: Rc<RefCell<u64>>,
     asset_state: Rc<RefCell<BrowserAssetState>>,
     ort_state: Rc<RefCell<BrowserOrtState>>,
     mujoco_state: Rc<RefCell<BrowserMujocoState>>,
@@ -59,7 +155,9 @@ impl Default for WasmMujocoBackend {
     fn default() -> Self {
         Self {
             active: false,
+            selected_robot: BrowserRobotPreset::Go2,
             diagnostic_colors: false,
+            generation: Rc::new(RefCell::new(0)),
             asset_state: Rc::new(RefCell::new(BrowserAssetState::Idle)),
             ort_state: Rc::new(RefCell::new(BrowserOrtState::Idle)),
             mujoco_state: Rc::new(RefCell::new(BrowserMujocoState::Idle)),
@@ -78,6 +176,13 @@ impl Default for WasmMujocoBackend {
 #[derive(Debug, Deserialize)]
 struct PolicyFile {
     onnx: OnnxFile,
+    #[serde(default)]
+    controller_kind: Option<String>,
+    #[serde(default)]
+    command_mode: Option<String>,
+    #[serde(default)]
+    phase_steps: Option<usize>,
+    #[serde(default)]
     obs_config: PolicyObsConfig,
     action_scale: f32,
     stiffness: f32,
@@ -98,7 +203,10 @@ struct PolicyCommandConfig {
 }
 
 impl PolicyFile {
-    fn command_mode(&self) -> &'static str {
+    fn command_mode(&self) -> &str {
+        if let Some(command_mode) = self.command_mode.as_deref() {
+            return command_mode;
+        }
         let commands = if !self.obs_config.command.is_empty() {
             &self.obs_config.command
         } else {
@@ -109,6 +217,20 @@ impl PolicyFile {
         } else {
             "velocity"
         }
+    }
+
+    fn controller_kind(&self) -> &str {
+        self.controller_kind.as_deref().unwrap_or_else(|| {
+            if self.onnx.meta.in_keys.len() == 1 {
+                "open_duck_mini_walk"
+            } else {
+                "go2_facet"
+            }
+        })
+    }
+
+    fn phase_steps(&self) -> usize {
+        self.phase_steps.unwrap_or(0)
     }
 }
 
@@ -149,6 +271,7 @@ struct AssetMeta {
 }
 
 struct BrowserAssetBundle {
+    preset: BrowserRobotPreset,
     files: BTreeMap<String, Vec<u8>>,
     scene_include: String,
     meshdir: String,
@@ -270,6 +393,7 @@ struct BrowserGeomSnapshot {
 
 #[derive(Serialize)]
 struct BrowserMujocoConfig {
+    controller_kind: String,
     joint_names: Vec<String>,
     default_joint_pos: Vec<f32>,
     action_scale: f32,
@@ -279,6 +403,7 @@ struct BrowserMujocoConfig {
     output_keys: Vec<String>,
     command_dim: usize,
     command_mode: String,
+    phase_steps: usize,
 }
 
 #[derive(Serialize)]
@@ -424,9 +549,32 @@ impl WasmMujocoBackend {
             |ui| {
                 ui.heading("mujoco");
                 ui.label("Browser app shell is active.");
-                ui.label(
-                    "This backend runs the facet policy and uses the draggable setpoint ball as the only command input.",
-                );
+                let previous_robot = self.selected_robot;
+                egui::ComboBox::from_label("Robot")
+                    .selected_text(self.selected_robot.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.selected_robot,
+                            BrowserRobotPreset::Go2,
+                            BrowserRobotPreset::Go2.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.selected_robot,
+                            BrowserRobotPreset::OpenDuckMini,
+                            BrowserRobotPreset::OpenDuckMini.label(),
+                        );
+                    });
+                if self.selected_robot != previous_robot {
+                    self.reset_selected_robot_state();
+                }
+                ui.label(match self.selected_robot {
+                    BrowserRobotPreset::Go2 => {
+                        "Go2 runs the facet policy and uses the draggable setpoint ball as the command input."
+                    }
+                    BrowserRobotPreset::OpenDuckMini => {
+                        "Open Duck Mini runs the BEST_WALK_ONNX policy and uses the draggable setpoint ball to generate walking commands."
+                    }
+                });
                 ui.label(format!(
                     "Status: {}",
                     if self.active {
@@ -533,8 +681,16 @@ impl WasmMujocoBackend {
 
         *self.asset_state.borrow_mut() = BrowserAssetState::Loading;
         let state = Rc::clone(&self.asset_state);
+        let generation = Rc::clone(&self.generation);
+        let expected_generation = *generation.borrow();
+        let preset = self.selected_robot;
         spawn_local(async move {
-            let result = BrowserAssetBundle::load_from_server().await.map(Rc::new);
+            let result = BrowserAssetBundle::load_from_server(preset)
+                .await
+                .map(Rc::new);
+            if *generation.borrow() != expected_generation {
+                return;
+            }
             *state.borrow_mut() = match result {
                 Ok(bundle) => BrowserAssetState::Ready(bundle),
                 Err(err) => BrowserAssetState::Error(err),
@@ -553,8 +709,19 @@ impl WasmMujocoBackend {
         *self.ort_state.borrow_mut() = BrowserOrtState::Idle;
         *self.mujoco_state.borrow_mut() = BrowserMujocoState::Idle;
         *self.mujoco_step_in_flight.borrow_mut() = false;
+        self.compiled_mesh_assets.borrow_mut().clear();
         #[cfg(not(feature = "web_glow_viewport"))]
         self.reset_browser_runtime();
+    }
+
+    fn reset_selected_robot_state(&mut self) {
+        *self.generation.borrow_mut() += 1;
+        *self.asset_state.borrow_mut() = BrowserAssetState::Idle;
+        self.reset_loaded_policy_state();
+        self.camera = BrowserOrbitCamera::default();
+        self.camera_initialized = false;
+        #[cfg(not(feature = "web_glow_viewport"))]
+        self.hide_browser_viewport();
     }
 
     fn ui_asset_report(&self, ui: &mut Ui, bundle: &BrowserAssetBundle) {
@@ -565,6 +732,7 @@ impl WasmMujocoBackend {
                 .color(Color32::LIGHT_GREEN),
         );
         ui.label(format!("Files: {} fetched assets", bundle.files.len()));
+        ui.label(format!("Robot preset: {}", bundle.preset.label()));
         ui.label(format!("Scene include: {}", bundle.scene_include));
         ui.label(format!(
             "Meshes: {} files under {}",
@@ -665,6 +833,8 @@ impl WasmMujocoBackend {
 
         *self.ort_state.borrow_mut() = BrowserOrtState::Loading;
         let state = Rc::clone(&self.ort_state);
+        let generation = Rc::clone(&self.generation);
+        let expected_generation = *generation.borrow();
         let policy = bundle.policy();
         let onnx_path = normalize_rel_path(&policy.onnx.path);
         let Some(model_bytes) = bundle.files.get(onnx_path.as_str()).cloned() else {
@@ -674,6 +844,7 @@ impl WasmMujocoBackend {
         };
         let wasm_base_path = "./vendor/onnxruntime-web/dist/";
         let config = BrowserMujocoConfig {
+            controller_kind: policy.controller_kind().to_string(),
             joint_names: bundle.asset_meta.joint_names_isaac.clone(),
             default_joint_pos: bundle.asset_meta.default_joint_pos.clone(),
             action_scale: policy.action_scale,
@@ -697,6 +868,7 @@ impl WasmMujocoBackend {
                 .copied()
                 .unwrap_or(16),
             command_mode: policy.command_mode().to_string(),
+            phase_steps: policy.phase_steps(),
         };
 
         spawn_local(async move {
@@ -707,6 +879,9 @@ impl WasmMujocoBackend {
             }
             .await;
 
+            if *generation.borrow() != expected_generation {
+                return;
+            }
             *state.borrow_mut() = match result {
                 Ok(report) => BrowserOrtState::Ready(report),
                 Err(err) => BrowserOrtState::Error(js_error_to_string(err)),
@@ -737,7 +912,10 @@ impl WasmMujocoBackend {
                     "Live state: sim_time={:.4}s step_count={}",
                     report.sim_time, report.step_count
                 ));
-                ui.label("Command mode: setpoint ball");
+                ui.label(format!(
+                    "Robot: {} | Command mode: setpoint ball",
+                    self.selected_robot.label()
+                ));
                 ui.label(format!(
                     "Policy command: {} | setpoint={:?}",
                     report.command_mode, report.setpoint_preview
@@ -793,11 +971,18 @@ impl WasmMujocoBackend {
         *self.mujoco_state.borrow_mut() = BrowserMujocoState::Loading;
         let state = Rc::clone(&self.mujoco_state);
         let compiled_mesh_assets = Rc::clone(&self.compiled_mesh_assets);
+        let generation = Rc::clone(&self.generation);
+        let expected_generation = *generation.borrow();
+        let policy_config_name = bundle.preset.policy_config_name();
+        let policy_onnx_path = normalize_rel_path(&bundle.policy().onnx.path);
         let file_entries = bundle
             .files
             .iter()
             .filter_map(|(path, bytes)| {
-                if matches!(path.as_str(), "asset_meta.json" | "facet.json" | "facet.onnx") {
+                if path == "asset_meta.json"
+                    || path == policy_config_name
+                    || path == &policy_onnx_path
+                {
                     None
                 } else {
                     Some((path.clone(), bytes.clone()))
@@ -814,6 +999,7 @@ impl WasmMujocoBackend {
         let mujoco_wasm_base_path = "./vendor/mujoco/mt/";
         let ort_wasm_base_path = "./vendor/onnxruntime-web/dist/";
         let config = BrowserMujocoConfig {
+            controller_kind: policy.controller_kind().to_string(),
             joint_names: bundle.asset_meta.joint_names_isaac.clone(),
             default_joint_pos: bundle.asset_meta.default_joint_pos.clone(),
             action_scale: policy.action_scale,
@@ -837,6 +1023,7 @@ impl WasmMujocoBackend {
                 .copied()
                 .unwrap_or(16),
             command_mode: policy.command_mode().to_string(),
+            phase_steps: policy.phase_steps(),
         };
 
         spawn_local(async move {
@@ -854,6 +1041,9 @@ impl WasmMujocoBackend {
             }
             .await;
 
+            if *generation.borrow() != expected_generation {
+                return;
+            }
             if let Ok(report) = &result {
                 *compiled_mesh_assets.borrow_mut() =
                     convert_browser_mesh_assets(&report.mesh_assets);
@@ -876,6 +1066,8 @@ impl WasmMujocoBackend {
         *self.mujoco_step_in_flight.borrow_mut() = true;
         let state = Rc::clone(&self.mujoco_state);
         let step_in_flight = Rc::clone(&self.mujoco_step_in_flight);
+        let generation = Rc::clone(&self.generation);
+        let expected_generation = *generation.borrow();
         let step_count = sim_speed.max(1);
         let command_vel_x = 0.0f32;
         let command_vel_y = 0.0f32;
@@ -891,6 +1083,10 @@ impl WasmMujocoBackend {
             }
             .await;
 
+            if *generation.borrow() != expected_generation {
+                *step_in_flight.borrow_mut() = false;
+                return;
+            }
             *step_in_flight.borrow_mut() = false;
             *state.borrow_mut() = match result {
                 Ok(report) => BrowserMujocoState::Ready(report),
@@ -1293,7 +1489,10 @@ impl WasmMujocoBackend {
         let Some(window) = web_sys::window() else {
             return;
         };
-        let Ok(function) = Reflect::get(window.as_ref(), &JsValue::from_str("rustRoboticsMujocoReset")) else {
+        let Ok(function) = Reflect::get(
+            window.as_ref(),
+            &JsValue::from_str("rustRoboticsMujocoReset"),
+        ) else {
             return;
         };
         let Ok(function) = function.dyn_into::<Function>() else {
@@ -1308,10 +1507,10 @@ impl BrowserAssetBundle {
         &self.policy
     }
 
-    async fn load_from_server() -> Result<Self, String> {
+    async fn load_from_server(preset: BrowserRobotPreset) -> Result<Self, String> {
         let mut files = BTreeMap::new();
-        for path in BROWSER_ASSET_FILES {
-            let bytes = fetch_browser_asset_bytes(path).await?;
+        for path in preset.asset_files() {
+            let bytes = fetch_browser_asset_bytes(preset, path).await?;
             files.insert((*path).to_string(), bytes);
         }
 
@@ -1321,12 +1520,13 @@ impl BrowserAssetBundle {
                 .ok_or_else(|| "Missing fetched scene.xml".to_string())?,
         )
         .map_err(|err| format!("scene.xml is not valid UTF-8: {err}"))?;
-        let go2_xml = std::str::from_utf8(
+        let robot_xml_name = preset.robot_xml_name();
+        let robot_xml = std::str::from_utf8(
             files
-                .get("go2.xml")
-                .ok_or_else(|| "Missing fetched go2.xml".to_string())?,
+                .get(robot_xml_name)
+                .ok_or_else(|| format!("Missing fetched {robot_xml_name}"))?,
         )
-        .map_err(|err| format!("go2.xml is not valid UTF-8: {err}"))?;
+        .map_err(|err| format!("{robot_xml_name} is not valid UTF-8: {err}"))?;
         let asset_meta_json = std::str::from_utf8(
             files
                 .get("asset_meta.json")
@@ -1340,12 +1540,12 @@ impl BrowserAssetBundle {
             return Err(format!("scene.xml includes missing file {}", scene_include));
         }
 
-        let meshdir = single_xml_attribute(go2_xml, "compiler", "meshdir")
-            .ok_or_else(|| "go2.xml missing <compiler meshdir=\"...\">".to_string())?;
+        let meshdir = single_xml_attribute(robot_xml, "compiler", "meshdir")
+            .ok_or_else(|| format!("{robot_xml_name} missing <compiler meshdir=\"...\">"))?;
 
-        let mesh_files = xml_attribute_values(go2_xml, "mesh", "file");
+        let mesh_files = xml_attribute_values(robot_xml, "mesh", "file");
         if mesh_files.is_empty() {
-            return Err("go2.xml contains no mesh assets".to_string());
+            return Err(format!("{robot_xml_name} contains no mesh assets"));
         }
         for mesh_file in &mesh_files {
             let asset_path = join_asset_path(&meshdir, mesh_file);
@@ -1357,7 +1557,7 @@ impl BrowserAssetBundle {
             }
         }
 
-        let policy_path = "facet.json";
+        let policy_path = preset.policy_config_name();
         let policy_json = std::str::from_utf8(
             files
                 .get(policy_path)
@@ -1373,34 +1573,46 @@ impl BrowserAssetBundle {
                 onnx_path
             ));
         }
-        if policy.onnx.meta.in_keys.len() < 4 {
+        if policy.controller_kind() == "open_duck_mini_walk" {
+            if policy.onnx.meta.in_keys.is_empty() {
+                return Err(format!(
+                    "Policy {policy_path} is missing expected ONNX input keys"
+                ));
+            }
+        } else if policy.onnx.meta.in_keys.len() < 4 {
             return Err(format!(
                 "Policy {policy_path} is missing expected ONNX input keys"
             ));
         }
         if policy.onnx.meta.in_shapes.is_empty() {
-            return Err(format!("Policy {policy_path} metadata is missing input shapes"));
+            return Err(format!(
+                "Policy {policy_path} metadata is missing input shapes"
+            ));
         }
         if policy.onnx.meta.out_keys.is_empty() {
-            return Err(format!("Policy {policy_path} metadata is missing output keys"));
+            return Err(format!(
+                "Policy {policy_path} metadata is missing output keys"
+            ));
         }
 
         let asset_meta: AssetMeta = serde_json::from_str(asset_meta_json)
             .map_err(|err| format!("Failed to parse fetched asset_meta.json: {err}"))?;
-        if asset_meta.joint_names_isaac.len() != 12 {
+        if asset_meta.joint_names_isaac.is_empty() {
             return Err(format!(
-                "Expected 12 joints in asset metadata, found {}",
+                "Expected non-empty joint metadata, found {} joints",
                 asset_meta.joint_names_isaac.len()
             ));
         }
-        if asset_meta.default_joint_pos.len() != 12 {
+        if asset_meta.default_joint_pos.len() != asset_meta.joint_names_isaac.len() {
             return Err(format!(
-                "Expected 12 default joint positions, found {}",
-                asset_meta.default_joint_pos.len()
+                "Expected matching default joint positions and joints, found {} positions for {} joints",
+                asset_meta.default_joint_pos.len(),
+                asset_meta.joint_names_isaac.len()
             ));
         }
 
         Ok(Self {
+            preset,
             files,
             scene_include,
             meshdir,
@@ -1411,9 +1623,12 @@ impl BrowserAssetBundle {
     }
 }
 
-async fn fetch_browser_asset_bytes(path: &str) -> Result<Vec<u8>, String> {
+async fn fetch_browser_asset_bytes(
+    preset: BrowserRobotPreset,
+    path: &str,
+) -> Result<Vec<u8>, String> {
     let window = web_sys::window().ok_or_else(|| "window is unavailable".to_string())?;
-    let asset_url = format!("{BROWSER_ASSET_BASE_PATH}{path}");
+    let asset_url = format!("{}{}", preset.asset_base_path(), path);
     let response_value = JsFuture::from(window.fetch_with_str(&asset_url))
         .await
         .map_err(js_error_to_string)?;
@@ -1468,22 +1683,30 @@ fn xml_attribute_values(xml: &str, tag: &str, attr: &str) -> Vec<String> {
 }
 
 fn normalize_rel_path(path: &str) -> String {
-    let trimmed = path.trim_start_matches("./").trim_start_matches('/');
-    if trimmed.is_empty() {
-        path.to_string()
-    } else {
-        trimmed.to_string()
-    }
+    normalize_path_components(path)
 }
 
 fn join_asset_path(dir: &str, file: &str) -> String {
-    let dir = dir.trim_matches('/');
-    let file = file.trim_matches('/');
-    if dir.is_empty() {
-        file.to_string()
-    } else {
-        format!("{dir}/{file}")
+    if dir.trim().is_empty() {
+        return normalize_path_components(file);
     }
+    normalize_path_components(&format!("{dir}/{file}"))
+}
+
+fn normalize_path_components(path: &str) -> String {
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if !parts.is_empty() {
+                    parts.pop();
+                }
+            }
+            _ => parts.push(part),
+        }
+    }
+    parts.join("/")
 }
 
 fn format_bytes(byte_count: usize) -> String {
