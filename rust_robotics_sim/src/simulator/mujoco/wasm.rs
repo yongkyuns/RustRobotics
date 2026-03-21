@@ -996,7 +996,7 @@ impl WasmMujocoBackend {
                 BrowserMujocoState::Error(format!("Browser asset bundle missing {onnx_path}"));
             return;
         };
-        let mujoco_wasm_base_path = "./vendor/mujoco/mt/";
+        let mujoco_wasm_base_path = "./vendor/mujoco/";
         let ort_wasm_base_path = "./vendor/onnxruntime-web/dist/";
         let config = BrowserMujocoConfig {
             controller_kind: policy.controller_kind().to_string(),

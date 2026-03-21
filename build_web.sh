@@ -54,14 +54,26 @@ cp -R "rust_robotics_sim/assets/mujoco/openduckmini" "docs/assets/mujoco/"
 
 cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort.wasm.min.js" \
   "docs/vendor/onnxruntime-web/dist/ort.wasm.min.js"
-cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs" \
-  "docs/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm.wasm" \
+  "docs/vendor/onnxruntime-web/dist/ort-wasm.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-threaded.wasm" \
+  "docs/vendor/onnxruntime-web/dist/ort-wasm-threaded.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd.wasm" \
+  "docs/vendor/onnxruntime-web/dist/ort-wasm-simd.wasm"
 cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm" \
   "docs/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd.jsep.wasm" \
+  "docs/vendor/onnxruntime-web/dist/ort-wasm-simd.jsep.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm" \
+  "docs/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm"
 cp "rust_robotics_sim/web/vendor/mujoco/mujoco.js" \
   "docs/vendor/mujoco/mujoco.js"
 cp "rust_robotics_sim/web/vendor/mujoco/mujoco.wasm" \
   "docs/vendor/mujoco/mujoco.wasm"
+cp "rust_robotics_sim/web/vendor/mujoco/mujoco_wasm.js" \
+  "docs/vendor/mujoco/mujoco_wasm.js"
+cp "rust_robotics_sim/web/vendor/mujoco/mujoco_wasm.wasm" \
+  "docs/vendor/mujoco/mujoco_wasm.wasm"
 cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.js" \
   "docs/vendor/mujoco/mt/mujoco.js"
 cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.wasm" \

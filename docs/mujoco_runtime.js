@@ -34,10 +34,7 @@ async function configureRustRoboticsOrt(wasmBasePath) {
   }
 
   const assetBase = new URL(wasmBasePath, window.location.href);
-  ort.env.wasm.wasmPaths = {
-    mjs: new URL("ort-wasm-simd-threaded.mjs", assetBase).href,
-    wasm: new URL("ort-wasm-simd-threaded.wasm", assetBase).href,
-  };
+  ort.env.wasm.wasmPaths = assetBase.href;
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.simd = true;
   ort.env.wasm.proxy = false;
@@ -108,7 +105,7 @@ export async function rustRoboticsOrtSmokeTest(modelBytes, wasmBasePath, config 
 async function getRustRoboticsMujocoModule(wasmBasePath) {
   const assetBase = new URL(wasmBasePath, window.location.href);
   if (!rustRoboticsMujocoModulePromise) {
-    const { default: loadMujoco } = await import("./vendor/mujoco/mt/mujoco.js");
+    const { default: loadMujoco } = await import("./vendor/mujoco/mujoco_wasm.js");
     rustRoboticsMujocoModulePromise = loadMujoco({
       locateFile: (path) => new URL(path, assetBase).href,
     });
@@ -117,8 +114,15 @@ async function getRustRoboticsMujocoModule(wasmBasePath) {
 }
 
 function maybeDelete(handle) {
-  if (handle && typeof handle.delete === "function") {
+  if (!handle) {
+    return;
+  }
+  if (typeof handle.delete === "function") {
     handle.delete();
+    return;
+  }
+  if (typeof handle.free === "function") {
+    handle.free();
   }
 }
 
@@ -163,6 +167,22 @@ function buildOutputNameMap(outputKeys, outputNames) {
     mapping.set(outputKeys[i], outputNames[i]);
   }
   return mapping;
+}
+
+function name2idChecked(simulation, mujoco, type, name) {
+  const typeId = Number(type?.value ?? type);
+  const id = Number(simulation.name2id(typeId, name));
+  if (id < 0) {
+    throw new Error(`failed to resolve object id for ${name}`);
+  }
+  return id;
+}
+
+function liveState(runtime) {
+  if (runtime.simulation && runtime.simulation.qpos) {
+    return runtime.simulation;
+  }
+  return runtime.data;
 }
 
 function buildInputNameMap(inputKeys, inputNames) {
@@ -281,8 +301,9 @@ function flattenPolicyInput(runtime) {
 }
 
 function updatePolicyInput(runtime) {
-  const qpos = runtime.data.qpos;
-  const qvel = runtime.data.qvel;
+  const state = liveState(runtime);
+  const qpos = state.qpos;
+  const qvel = state.qvel;
   const quat = [qpos[3], qpos[4], qpos[5], qpos[6]];
   const gravity = rotateVectorByInverseQuaternion(quat, [0.0, 0.0, -1.0]);
   shiftHistory(runtime.gravityHistory, gravity);
@@ -298,7 +319,8 @@ function updatePolicyInput(runtime) {
 }
 
 function buildDuckCommandVector(runtime) {
-  const qpos = runtime.data.qpos;
+  const state = liveState(runtime);
+  const qpos = state.qpos;
   const quat = [qpos[3], qpos[4], qpos[5], qpos[6]];
   const basePos = [Number(qpos[0]), Number(qpos[1]), Number(qpos[2])];
   const relBody = rotateVectorByInverseQuaternion(quat, [
@@ -326,9 +348,10 @@ function updateDuckPhase(runtime) {
 }
 
 function readSensorVec(runtime, adr, dim) {
+  const state = liveState(runtime);
   const out = new Float32Array(dim);
   for (let i = 0; i < dim; ++i) {
-    out[i] = Number(runtime.data.sensordata[adr + i] ?? 0.0);
+    out[i] = Number(state.sensordata[adr + i] ?? 0.0);
   }
   return out;
 }
@@ -343,6 +366,7 @@ function collectDuckFeetContacts(runtime) {
 }
 
 function buildDuckObservation(runtime) {
+  const state = liveState(runtime);
   const gyro = readSensorVec(runtime, runtime.duckGyroAdr, 3);
   const accel = readSensorVec(runtime, runtime.duckAccelAdr, 3);
   accel[0] += 1.3;
@@ -357,11 +381,11 @@ function buildDuckObservation(runtime) {
   idx += 7;
 
   for (let i = 0; i < runtime.numDofs; ++i) {
-    obs[idx + i] = runtime.data.qpos[runtime.jointQposAdr[i]] - runtime.config.default_joint_pos[i];
+    obs[idx + i] = state.qpos[runtime.jointQposAdr[i]] - runtime.config.default_joint_pos[i];
   }
   idx += runtime.numDofs;
   for (let i = 0; i < runtime.numDofs; ++i) {
-    obs[idx + i] = runtime.data.qvel[runtime.jointQvelAdr[i]] * 0.05;
+    obs[idx + i] = state.qvel[runtime.jointQvelAdr[i]] * 0.05;
   }
   idx += runtime.numDofs;
   obs.set(runtime.lastActions, idx);
@@ -379,7 +403,8 @@ function buildDuckObservation(runtime) {
 }
 
 function computeVelocityCommandInput(runtime, commandVelX, commandVelY) {
-  const qpos = runtime.data.qpos;
+  const state = liveState(runtime);
+  const qpos = state.qpos;
   const quat = [qpos[3], qpos[4], qpos[5], qpos[6]];
   const command = rotateVectorByInverseQuaternion(quat, [commandVelX, commandVelY, 0.0]);
   const yaw = quaternionYaw(quat);
@@ -406,7 +431,8 @@ function computeVelocityCommandInput(runtime, commandVelX, commandVelY) {
 }
 
 function computeImpedanceCommandInput(runtime) {
-  const qpos = runtime.data.qpos;
+  const state = liveState(runtime);
+  const qpos = state.qpos;
   const quat = [qpos[3], qpos[4], qpos[5], qpos[6]];
   const basePos = [Number(qpos[0]), Number(qpos[1]), Number(qpos[2])];
   const kp = runtime.impedanceKp ?? 24.0;
@@ -528,6 +554,7 @@ async function runPolicy(runtime, commandVelX, commandVelY) {
 
 function applyControl(runtime) {
   if (runtime.controllerKind === "open_duck_mini_walk") {
+    const state = liveState(runtime);
     for (let i = 0; i < runtime.numDofs; ++i) {
       runtime.motorTargets[i] =
         runtime.config.default_joint_pos[i] + runtime.lastActions[i] * runtime.config.action_scale;
@@ -540,14 +567,15 @@ function applyControl(runtime) {
         runtime.prevMotorTargets[i] + delta,
       );
       runtime.prevMotorTargets[i] = runtime.motorTargets[i];
-      runtime.data.ctrl[runtime.ctrlAdr[i]] = runtime.motorTargets[i];
+      state.ctrl[runtime.ctrlAdr[i]] = runtime.motorTargets[i];
     }
     return;
   }
 
-  const qpos = runtime.data.qpos;
-  const qvel = runtime.data.qvel;
-  const ctrl = runtime.data.ctrl;
+  const state = liveState(runtime);
+  const qpos = state.qpos;
+  const qvel = state.qvel;
+  const ctrl = state.ctrl;
 
   for (let i = 0; i < 12; ++i) {
     const target =
@@ -561,38 +589,30 @@ function applyControl(runtime) {
 }
 
 function collectGeomSnapshots(runtime) {
-  if (runtime.visualGeomMeta && runtime.visualGeomState && runtime.data.xpos && runtime.data.xmat) {
+  const state = liveState(runtime);
+  if (runtime.visualGeomMeta && runtime.visualGeomState && state.xpos && state.xmat) {
     updateVisualGeomState(runtime);
     return runtime.visualGeomState;
   }
 
   const geoms = [];
   for (let i = 0; i < runtime.model.ngeom; ++i) {
-    const modelGeom = runtime.model.geom(i);
-    try {
-      if (Number(modelGeom.group) >= 3) {
-        continue;
-      }
-      const rgba = Array.from(modelGeom.rgba);
-      if ((rgba[3] ?? 0.0) <= 0.01) {
-        continue;
-      }
-      const dataGeom = runtime.data.geom(i);
-      try {
-        geoms.push({
-          type_id: Number(modelGeom.type),
-          dataid: Number(modelGeom.dataid),
-          size: Array.from(modelGeom.size).slice(0, 3).map(Number),
-          rgba: rgba.slice(0, 4).map(Number),
-          pos: Array.from(dataGeom.xpos).slice(0, 3).map(Number),
-          mat: Array.from(dataGeom.xmat).slice(0, 9).map(Number),
-        });
-      } finally {
-        maybeDelete(dataGeom);
-      }
-    } finally {
-      maybeDelete(modelGeom);
+    if (Number(runtime.model.geom_group[i]) >= 3) {
+      continue;
     }
+    const rgbaBase = i * 4;
+    const rgba = Array.from(runtime.model.geom_rgba.slice(rgbaBase, rgbaBase + 4), Number);
+    if ((rgba[3] ?? 0.0) <= 0.01) {
+      continue;
+    }
+    geoms.push({
+      type_id: Number(runtime.model.geom_type[i]),
+      dataid: Number(runtime.model.geom_dataid[i]),
+      size: Array.from(runtime.model.geom_size.slice(i * 3, i * 3 + 3), Number),
+      rgba,
+      pos: Array.from(state.geom_xpos.slice(i * 3, i * 3 + 3), Number),
+      mat: Array.from(state.geom_xmat.slice(i * 9, i * 9 + 9), Number),
+    });
   }
   return geoms;
 }
@@ -600,27 +620,23 @@ function collectGeomSnapshots(runtime) {
 function collectVisualGeomMeta(runtime) {
   const geoms = [];
   for (let i = 0; i < runtime.model.ngeom; ++i) {
-    const modelGeom = runtime.model.geom(i);
-    try {
-      if (Number(modelGeom.group) >= 3) {
-        continue;
-      }
-      const rgba = Array.from(modelGeom.rgba);
-      if ((rgba[3] ?? 0.0) <= 0.01) {
-        continue;
-      }
-      geoms.push({
-        bodyId: Number(modelGeom.bodyid),
-        type_id: Number(modelGeom.type),
-        dataid: Number(modelGeom.dataid),
-        size: Array.from(modelGeom.size).slice(0, 3).map(Number),
-        rgba: rgba.slice(0, 4).map(Number),
-        localPos: Array.from(modelGeom.pos).slice(0, 3).map(Number),
-        localMat: quatToMat3(Array.from(modelGeom.quat).slice(0, 4).map(Number)),
-      });
-    } finally {
-      maybeDelete(modelGeom);
+    if (Number(runtime.model.geom_group[i]) >= 3) {
+      continue;
     }
+    const rgbaBase = i * 4;
+    const rgba = Array.from(runtime.model.geom_rgba.slice(rgbaBase, rgbaBase + 4), Number);
+    if ((rgba[3] ?? 0.0) <= 0.01) {
+      continue;
+    }
+    geoms.push({
+      bodyId: Number(runtime.model.geom_bodyid[i]),
+      type_id: Number(runtime.model.geom_type[i]),
+      dataid: Number(runtime.model.geom_dataid[i]),
+      size: Array.from(runtime.model.geom_size.slice(i * 3, i * 3 + 3), Number),
+      rgba,
+      localPos: Array.from(runtime.model.geom_pos.slice(i * 3, i * 3 + 3), Number),
+      localMat: quatToMat3(Array.from(runtime.model.geom_quat.slice(i * 4, i * 4 + 4), Number)),
+    });
   }
   return geoms;
 }
@@ -637,8 +653,9 @@ function createVisualGeomState(meta) {
 }
 
 function updateVisualGeomState(runtime) {
-  const bodyPosAll = runtime.data.xpos;
-  const bodyMatAll = runtime.data.xmat;
+  const state = liveState(runtime);
+  const bodyPosAll = state.xpos;
+  const bodyMatAll = state.xmat;
   for (let i = 0; i < runtime.visualGeomMeta.length; ++i) {
     const meta = runtime.visualGeomMeta[i];
     const state = runtime.visualGeomState[i];
@@ -656,7 +673,8 @@ function updateVisualGeomState(runtime) {
 }
 
 function basePosition(runtime) {
-  const qpos = runtime.data.qpos;
+  const state = liveState(runtime);
+  const qpos = state.qpos;
   return [Number(qpos[0]), Number(qpos[1]), Number(qpos[2])];
 }
 
@@ -719,17 +737,21 @@ function collectMeshAssets(runtime) {
 }
 
 function buildMujocoReport(runtime, includeMeshAssets = false) {
-  const { model, data, stepCount } = runtime;
+  const { model, stepCount } = runtime;
+  const state = liveState(runtime);
+  const qpos = state?.qpos ?? [];
+  const xpos = state?.xpos ?? [];
+  const options = typeof model.getOptions === "function" ? model.getOptions() : null;
   const report = {
-    nbody: model.nbody,
-    ngeom: model.ngeom,
-    nv: model.nv,
-    nu: model.nu,
-    timestep: model.opt.timestep,
-    sim_time: data.time,
+    nbody: Number(model.nbody ?? 0),
+    ngeom: Number(model.ngeom ?? 0),
+    nv: Number(model.nv ?? 0),
+    nu: Number(model.nu ?? 0),
+    timestep: Number(options?.timestep ?? 0.0),
+    sim_time: Number(state?.time ?? 0.0),
     step_count: stepCount,
-    qpos_preview: Array.from(data.qpos.slice(0, Math.min(8, data.qpos.length))),
-    xpos_preview: Array.from(data.xpos.slice(0, Math.min(9, data.xpos.length))),
+    qpos_preview: Array.from(qpos.slice(0, Math.min(8, qpos.length)), Number),
+    xpos_preview: Array.from(xpos.slice(0, Math.min(9, xpos.length)), Number),
     last_action_preview: Array.from(runtime.lastActions.slice(0, Math.min(runtime.numDofs, 14))),
     policy_inputs: Array.from(runtime.policyInputNames),
     policy_outputs: Array.from(runtime.policyOutputNames),
@@ -775,26 +797,33 @@ async function createRustRoboticsMujocoRuntime(
 
   writeWorkingFiles(mujoco, fileEntries);
 
-  const model = mujoco.MjModel.mj_loadXML("/working/scene.xml");
-  const data = new mujoco.MjData(model);
+  const model = mujoco.Model.load_from_xml("/working/scene.xml");
+  const data = new mujoco.State(model);
+  const simulation = new mujoco.Simulation(model, data);
   if (model.nkey > 0) {
-    mujoco.mj_resetDataKeyframe(model, data, 0);
+    simulation.resetDataKeyframe(0);
   } else {
-    mujoco.mj_resetData(model, data);
+    simulation.resetData();
   }
-  mujoco.mj_forward(model, data);
+  simulation.forward();
 
   const jointQposAdr = [];
   const jointQvelAdr = [];
   const ctrlAdr = [];
   for (const jointName of config.joint_names) {
-    const joint = model.jnt(jointName);
-    const actuator = model.actuator(stripJointSuffix(jointName));
-    jointQposAdr.push(Number(joint.qposadr));
-    jointQvelAdr.push(Number(joint.dofadr));
-    ctrlAdr.push(Number(actuator.id));
-    maybeDelete(joint);
-    maybeDelete(actuator);
+    const jointId = name2idChecked(simulation, mujoco, mujoco.mjtObj.mjOBJ_JOINT, jointName);
+    const actuatorId = name2idChecked(
+      simulation,
+      mujoco,
+      mujoco.mjtObj.mjOBJ_ACTUATOR,
+      stripJointSuffix(jointName),
+    );
+    if (jointId < 0 || actuatorId < 0) {
+      throw new Error(`failed to resolve joint/actuator ids for ${jointName}`);
+    }
+    jointQposAdr.push(Number(model.jnt_qposadr[jointId]));
+    jointQvelAdr.push(Number(model.jnt_dofadr[jointId]));
+    ctrlAdr.push(actuatorId);
   }
 
   const controllerKind = config.controller_kind ?? "go2_facet";
@@ -822,7 +851,7 @@ async function createRustRoboticsMujocoRuntime(
     }
   }
 
-  const timestep = Number(model.opt.timestep);
+  const timestep = Number(model.getOptions().timestep);
   const decimation =
     controllerKind === "open_duck_mini_walk" ? 10 : Math.max(1, Math.round(0.02 / timestep));
   const numDofs = Math.max(1, config.joint_names.length);
@@ -830,6 +859,7 @@ async function createRustRoboticsMujocoRuntime(
     mujoco,
     model,
     data,
+    simulation,
     ortSession,
     config,
     jointQposAdr,
@@ -887,10 +917,24 @@ async function createRustRoboticsMujocoRuntime(
     avgOverlayWallMs: 0.0,
   };
   if (controllerKind === "open_duck_mini_walk") {
-    rustRoboticsMujocoRuntime.duckGyroAdr = Number(model.sensor("imu_gyro").adr);
-    rustRoboticsMujocoRuntime.duckAccelAdr = Number(model.sensor("imu_accel").adr);
-    rustRoboticsMujocoRuntime.leftFootPosAdr = Number(model.sensor("left_foot_pos").adr);
-    rustRoboticsMujocoRuntime.rightFootPosAdr = Number(model.sensor("right_foot_pos").adr);
+    const gyroId = name2idChecked(simulation, mujoco, mujoco.mjtObj.mjOBJ_SENSOR, "imu_gyro");
+    const accelId = name2idChecked(simulation, mujoco, mujoco.mjtObj.mjOBJ_SENSOR, "imu_accel");
+    const leftFootId = name2idChecked(
+      simulation,
+      mujoco,
+      mujoco.mjtObj.mjOBJ_SENSOR,
+      "left_foot_pos",
+    );
+    const rightFootId = name2idChecked(
+      simulation,
+      mujoco,
+      mujoco.mjtObj.mjOBJ_SENSOR,
+      "right_foot_pos",
+    );
+    rustRoboticsMujocoRuntime.duckGyroAdr = Number(model.sensor_adr[gyroId]);
+    rustRoboticsMujocoRuntime.duckAccelAdr = Number(model.sensor_adr[accelId]);
+    rustRoboticsMujocoRuntime.leftFootPosAdr = Number(model.sensor_adr[leftFootId]);
+    rustRoboticsMujocoRuntime.rightFootPosAdr = Number(model.sensor_adr[rightFootId]);
   }
   syncCommandSetpointFromCommand(rustRoboticsMujocoRuntime);
   rustRoboticsMujocoRuntime.visualGeomMeta = collectVisualGeomMeta(rustRoboticsMujocoRuntime);
@@ -962,7 +1006,7 @@ export async function rustRoboticsMujocoStep(stepCount, commandVelX, commandVelY
     const physicsStart = performance.now();
     for (let j = 0; j < runtime.decimation; ++j) {
       applyControl(runtime);
-      runtime.mujoco.mj_step(runtime.model, runtime.data);
+      runtime.simulation.step();
       runtime.mujocoTimeMs += runtime.timestep * 1000.0;
     }
     physicsTotalMs += performance.now() - physicsStart;
@@ -1051,6 +1095,7 @@ export function rustRoboticsMujocoResetViewportCamera() {
 
 export function rustRoboticsMujocoReset() {
   if (rustRoboticsMujocoRuntime) {
+    maybeDelete(rustRoboticsMujocoRuntime.simulation);
     maybeDelete(rustRoboticsMujocoRuntime.data);
     maybeDelete(rustRoboticsMujocoRuntime.model);
   }
