@@ -84,9 +84,10 @@ Important files:
   - [`rust_robotics_sim/src/simulator/mujoco/wasm.rs`](./rust_robotics_sim/src/simulator/mujoco/wasm.rs)
   - [`rust_robotics_sim/web/mujoco_runtime.js`](./rust_robotics_sim/web/mujoco_runtime.js)
 - shared FW:
-  - [`rust_robotics_algo/src/mujoco/mod.rs`](./rust_robotics_algo/src/mujoco/mod.rs)
-  - [`rust_robotics_algo/src/mujoco/go2.rs`](./rust_robotics_algo/src/mujoco/go2.rs)
-  - [`rust_robotics_algo/src/mujoco/duck.rs`](./rust_robotics_algo/src/mujoco/duck.rs)
+  - [`rust_robotics_algo/src/robot_fw/mod.rs`](./rust_robotics_algo/src/robot_fw/mod.rs)
+  - [`rust_robotics_algo/src/robot_fw/go2.rs`](./rust_robotics_algo/src/robot_fw/go2.rs)
+  - [`rust_robotics_algo/src/robot_fw/duck.rs`](./rust_robotics_algo/src/robot_fw/duck.rs)
+  - [`rust_robotics_algo/src/robot_fw/onnx.rs`](./rust_robotics_algo/src/robot_fw/onnx.rs)
 
 ## Native Runtime Notes
 

@@ -1,7 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::*;
 #[cfg(not(target_arch = "wasm32"))]
-use rust_robotics_algo::mujoco::{Actuation, RawState};
+use rust_robotics_algo::robot_fw::{Actuation, RawState};
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeMap;
 

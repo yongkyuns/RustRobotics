@@ -10,9 +10,10 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use rust_robotics_algo::mujoco::duck::DuckController;
-use rust_robotics_algo::mujoco::go2::{Go2CommandMode, Go2Controller};
-use rust_robotics_algo::mujoco::{Command, InferenceBackend, InferenceInput, PolicyOutput};
+use rust_robotics_algo::robot_fw::duck::DuckController;
+use rust_robotics_algo::robot_fw::go2::{Go2CommandMode, Go2Controller};
+use rust_robotics_algo::robot_fw::onnx::{NativeOrtBackend, OrtModelMetadata};
+use rust_robotics_algo::robot_fw::Command;
 
 #[cfg(not(target_arch = "wasm32"))]
 use serde::Deserialize;
@@ -25,16 +26,8 @@ use wgpu::util::DeviceExt as _;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
     ffi::{CStr, CString},
-    mem::ManuallyDrop,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
-};
-
-#[cfg(not(target_arch = "wasm32"))]
-use ort::{
-    logging::LogLevel,
-    session::{builder::GraphOptimizationLevel, Session, SessionInputValue},
-    value::Tensor,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -509,339 +502,20 @@ impl OnnxKey {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl OnnxMeta {
+    fn as_fw_metadata(&self) -> OrtModelMetadata {
+        OrtModelMetadata {
+            input_keys: self.in_keys.clone(),
+            output_keys: self.out_keys.iter().map(OnnxKey::joined).collect(),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Deserialize)]
 struct AssetMeta {
     joint_names_isaac: Vec<String>,
     default_joint_pos: Vec<f32>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct MujocoPolicy {
-    session: Session,
-    kind: NativePolicyKind,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-enum NativePolicyKind {
-    Go2 {
-        policy_input_name: String,
-        is_init_input_name: String,
-        adapt_hx_input_name: String,
-        command_input_name: String,
-        action_output_name: String,
-        next_hx_output_name: String,
-    },
-    Duck {
-        obs_input_name: String,
-        action_output_name: String,
-    },
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-static ORT_INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
-
-#[cfg(not(target_arch = "wasm32"))]
-impl MujocoPolicy {
-    fn load(path: &Path, meta: &OnnxMeta, controller_kind: &str) -> Result<Self, String> {
-        debug_log(&format!("policy.load: begin {}", path.display()));
-        let ort_lib = find_onnxruntime_library().ok_or_else(|| {
-            "Failed to locate libonnxruntime.dylib; set ORT_DYLIB_PATH or install ONNX Runtime"
-                .to_string()
-        })?;
-        debug_log(&format!("policy.load: ort dylib {}", ort_lib.display()));
-
-        ensure_ort_initialized(&ort_lib)?;
-
-        debug_log("policy.load: Session::builder start");
-        let mut builder = Session::builder()
-            .map_err(|err| format!("Failed to create ONNX Runtime session builder: {err}"))?
-            .with_optimization_level(GraphOptimizationLevel::Level1)
-            .and_then(|builder| builder.with_log_level(LogLevel::Fatal))
-            .map_err(|err| format!("Failed to configure ONNX Runtime session: {err}"))?;
-        debug_log("policy.load: Session::builder configured");
-
-        debug_log(&format!(
-            "policy.load: commit_from_file start {}",
-            path.display()
-        ));
-        let session = {
-            let _stderr_silencer = StderrSilencer::new();
-            builder
-                .commit_from_file(path)
-                .map_err(|err| format!("Failed to load ONNX model {}: {err}", path.display()))?
-        };
-        debug_log("policy.load: session ready");
-
-        let output_name_map = meta
-            .out_keys
-            .iter()
-            .zip(session.outputs().iter())
-            .map(|(semantic_key, outlet)| (semantic_key.joined(), outlet.name().to_string()))
-            .collect::<std::collections::HashMap<_, _>>();
-        let input_name_map = meta
-            .in_keys
-            .iter()
-            .zip(session.inputs().iter())
-            .map(|(semantic_key, inlet)| (semantic_key.clone(), inlet.name().to_string()))
-            .collect::<std::collections::HashMap<_, _>>();
-
-        let kind = if controller_kind == "open_duck_mini_walk" {
-            let obs_input_name = input_name_map
-                .get("obs")
-                .cloned()
-                .or_else(|| session.inputs().first().map(|input| input.name().to_string()))
-                .ok_or_else(|| "ONNX metadata missing input mapping for obs".to_string())?;
-            let action_output_name = output_name_map
-                .get("continuous_actions")
-                .cloned()
-                .or_else(|| session.outputs().first().map(|output| output.name().to_string()))
-                .ok_or_else(|| "ONNX metadata missing output mapping for continuous_actions".to_string())?;
-            NativePolicyKind::Duck {
-                obs_input_name,
-                action_output_name,
-            }
-        } else {
-            let policy_input_name = input_name_map
-                .get("policy")
-                .cloned()
-                .ok_or_else(|| "ONNX metadata missing input mapping for policy".to_string())?;
-            let is_init_input_name = input_name_map
-                .get("is_init")
-                .cloned()
-                .ok_or_else(|| "ONNX metadata missing input mapping for is_init".to_string())?;
-            let adapt_hx_input_name = input_name_map
-                .iter()
-                .find_map(|(semantic_key, input_name)| {
-                    semantic_key.contains("adapt_hx").then(|| input_name.clone())
-                })
-                .ok_or_else(|| "ONNX metadata missing input mapping for adapt_hx".to_string())?;
-            let command_input_name = input_name_map
-                .iter()
-                .find_map(|(semantic_key, input_name)| {
-                    (semantic_key != "policy"
-                        && semantic_key != "is_init"
-                        && !semantic_key.contains("adapt_hx"))
-                    .then(|| input_name.clone())
-                })
-                .ok_or_else(|| "ONNX metadata missing input mapping for command".to_string())?;
-            let action_output_name = output_name_map
-                .get("action")
-                .cloned()
-                .ok_or_else(|| "ONNX metadata missing output mapping for action".to_string())?;
-            let next_hx_output_name = output_name_map
-                .get("next.adapt_hx")
-                .cloned()
-                .ok_or_else(|| "ONNX metadata missing output mapping for next.adapt_hx".to_string())?;
-
-            debug_log(&format!(
-                "policy.load: output mapping action={} next_hx={}",
-                action_output_name, next_hx_output_name
-            ));
-
-            NativePolicyKind::Go2 {
-                policy_input_name,
-                is_init_input_name,
-                adapt_hx_input_name,
-                command_input_name,
-                action_output_name,
-                next_hx_output_name,
-            }
-        };
-
-        Ok(Self { session, kind })
-    }
-
-    fn run_go2(
-        &mut self,
-        policy: &[f32],
-        is_init: bool,
-        adapt_hx: &[f32; 128],
-        command: &[f32],
-    ) -> Result<(Vec<f32>, Vec<f32>), String> {
-        let NativePolicyKind::Go2 {
-            policy_input_name,
-            is_init_input_name,
-            adapt_hx_input_name,
-            command_input_name,
-            action_output_name,
-            next_hx_output_name,
-        } = &self.kind
-        else {
-            return Err("attempted to run Go2 policy through non-Go2 ONNX session".to_string());
-        };
-        let first_inference = is_init;
-        debug_log_if(first_inference, "policy.run: first inference start");
-        let policy = Tensor::from_array(([1usize, policy.len()], policy.to_vec().into_boxed_slice()))
-            .map_err(|err| format!("Failed to build policy tensor: {err}"))?;
-        let is_init = Tensor::from_array(([1usize], vec![is_init].into_boxed_slice()))
-            .map_err(|err| format!("Failed to build init tensor: {err}"))?;
-        let adapt_hx = Tensor::from_array(([1usize, 128], adapt_hx.to_vec().into_boxed_slice()))
-            .map_err(|err| format!("Failed to build recurrent tensor: {err}"))?;
-        let command = Tensor::from_array(([1usize, command.len()], command.to_vec().into_boxed_slice()))
-            .map_err(|err| format!("Failed to build command tensor: {err}"))?;
-
-        let inputs: Vec<(&str, SessionInputValue<'_>)> = vec![
-            (policy_input_name.as_str(), policy.into()),
-            (is_init_input_name.as_str(), is_init.into()),
-            (adapt_hx_input_name.as_str(), adapt_hx.into()),
-            (command_input_name.as_str(), command.into()),
-        ];
-        let outputs = self
-            .session
-            .run(inputs)
-            .map_err(|err| format!("ONNX inference failed: {err}"))?;
-        debug_log_if(first_inference, "policy.run: first inference done");
-
-        let action = outputs[action_output_name.as_str()]
-            .try_extract_array::<f32>()
-            .map_err(|err| format!("Failed to read action tensor: {err}"))?
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
-
-        let next_hx = outputs[next_hx_output_name.as_str()]
-            .try_extract_array::<f32>()
-            .map_err(|err| format!("Failed to read recurrent tensor: {err}"))?
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
-
-        Ok((action, next_hx))
-    }
-
-    fn run_duck(&mut self, observation: &[f32]) -> Result<Vec<f32>, String> {
-        let NativePolicyKind::Duck {
-            obs_input_name,
-            action_output_name,
-        } = &self.kind
-        else {
-            return Err("attempted to run Duck policy through non-Duck ONNX session".to_string());
-        };
-
-        let observation =
-            Tensor::from_array(([1usize, observation.len()], observation.to_vec().into_boxed_slice()))
-                .map_err(|err| format!("Failed to build duck observation tensor: {err}"))?;
-        let inputs: Vec<(&str, SessionInputValue<'_>)> =
-            vec![(obs_input_name.as_str(), observation.into())];
-        let outputs = self
-            .session
-            .run(inputs)
-            .map_err(|err| format!("Duck ONNX inference failed: {err}"))?;
-
-        let actions = outputs[action_output_name.as_str()]
-            .try_extract_array::<f32>()
-            .map_err(|err| format!("Failed to read duck action tensor: {err}"))?
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
-        Ok(actions)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl InferenceBackend for MujocoPolicy {
-    fn run(&mut self, input: InferenceInput<'_>) -> Result<PolicyOutput, String> {
-        match input {
-            InferenceInput::Go2 {
-                policy,
-                is_init,
-                adapt_hx,
-                command,
-            } => {
-                let adapt_hx: [f32; 128] = adapt_hx
-                    .try_into()
-                    .map_err(|_| format!("Expected 128 recurrent values, got {}", adapt_hx.len()))?;
-                let (actions, recurrent) = self.run_go2(policy, is_init, &adapt_hx, command)?;
-                Ok(PolicyOutput { actions, recurrent })
-            }
-            InferenceInput::Duck { observation } => Ok(PolicyOutput {
-                actions: self.run_duck(observation)?,
-                recurrent: Vec::new(),
-            }),
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn ensure_ort_initialized(ort_lib: &Path) -> Result<(), String> {
-    ORT_INIT_RESULT
-        .get_or_init(|| {
-            debug_log("policy.load: ort manual init start");
-            let library = unsafe { libloading::Library::new(ort_lib) }.map_err(|err| {
-                format!(
-                    "Failed to load ONNX Runtime dylib {}: {err}",
-                    ort_lib.display()
-                )
-            })?;
-            debug_log("policy.load: ort manual library open done");
-
-            let get_api_base: libloading::Symbol<
-                '_,
-                unsafe extern "C" fn() -> *const ort::sys::OrtApiBase,
-            > = unsafe { library.get(b"OrtGetApiBase") }.map_err(|err| {
-                format!(
-                    "Failed to locate OrtGetApiBase in {}: {err}",
-                    ort_lib.display()
-                )
-            })?;
-            debug_log("policy.load: ort manual symbol lookup done");
-
-            let api_base = unsafe { get_api_base() };
-            if api_base.is_null() {
-                return Err(format!(
-                    "OrtGetApiBase returned null for {}",
-                    ort_lib.display()
-                ));
-            }
-
-            let version = unsafe { CStr::from_ptr(((*api_base).GetVersionString)()) }
-                .to_string_lossy()
-                .into_owned();
-            debug_log(&format!("policy.load: ort version {version}"));
-
-            let api_ptr = unsafe { ((*api_base).GetApi)(ort::sys::ORT_API_VERSION) };
-            if api_ptr.is_null() {
-                return Err(format!(
-                    "OrtGetApi({}) returned null for {}",
-                    ort::sys::ORT_API_VERSION,
-                    ort_lib.display()
-                ));
-            }
-
-            let api = unsafe { std::ptr::read(api_ptr) };
-            let _library = ManuallyDrop::new(library);
-            let inserted = ort::set_api(api);
-            debug_log(&format!("policy.load: ort set_api inserted={inserted}"));
-
-            let committed = ort::init().commit();
-            debug_log(&format!(
-                "policy.load: ort env commit committed={committed}"
-            ));
-            Ok(())
-        })
-        .clone()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn find_onnxruntime_library() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("ORT_DYLIB_PATH") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    let candidates = [
-        "/usr/local/lib/libonnxruntime.dylib",
-        "/usr/local/lib/libonnxruntime.1.20.2.dylib",
-        "/opt/homebrew/lib/libonnxruntime.dylib",
-        "/opt/homebrew/lib/libonnxruntime.1.20.2.dylib",
-    ];
-
-    candidates
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -850,7 +524,7 @@ struct MujocoRuntime {
     scene: mjvScene,
     cam: mjvCamera,
     opt: mjvOption,
-    policy: MujocoPolicy,
+    policy: NativeOrtBackend,
     robot: NativeRobotController,
     command: Command,
     mujoco_time_ms: f32,
@@ -1030,7 +704,7 @@ impl MujocoRuntime {
 
         let policy_started = Instant::now();
         debug_log("runtime.load: policy load start");
-        let policy = MujocoPolicy::load(
+        let policy = NativeOrtBackend::load(
             &scene_path
                 .parent()
                 .ok_or_else(|| {
@@ -1040,7 +714,7 @@ impl MujocoRuntime {
                     )
                 })?
                 .join(&policy_file.onnx.path),
-            &policy_file.onnx.meta,
+            &policy_file.onnx.meta.as_fw_metadata(),
             &controller_kind,
         )?;
         let policy_elapsed = policy_started.elapsed();
@@ -2575,13 +2249,6 @@ fn debug_log(message: &str) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn debug_log_if(condition: bool, message: &str) {
-    if condition {
-        debug_log(message);
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn object_name(model: *const mjModel, objtype: i32, objid: i32) -> Option<String> {
     if model.is_null() || objid < 0 {
         return None;
@@ -3505,76 +3172,6 @@ fn rgba_to_color32(rgba: [f32; 4]) -> Color32 {
 fn shade_color_by_depth(color: Color32, depth: f32) -> Color32 {
     let attenuation = (1.25 / (0.35 + depth * 0.12)).clamp(0.45, 1.0);
     color.gamma_multiply(attenuation)
-}
-
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-struct StderrSilencer {
-    saved_stderr: i32,
-    dev_null: i32,
-}
-
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-impl StderrSilencer {
-    fn new() -> Option<Self> {
-        unsafe {
-            let dev_null_path = CString::new("/dev/null").ok()?;
-            let dev_null = open(dev_null_path.as_ptr(), O_WRONLY);
-            if dev_null < 0 {
-                return None;
-            }
-
-            let saved_stderr = dup(STDERR_FILENO);
-            if saved_stderr < 0 {
-                close(dev_null);
-                return None;
-            }
-
-            if dup2(dev_null, STDERR_FILENO) < 0 {
-                close(saved_stderr);
-                close(dev_null);
-                return None;
-            }
-
-            Some(Self {
-                saved_stderr,
-                dev_null,
-            })
-        }
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-impl Drop for StderrSilencer {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = dup2(self.saved_stderr, STDERR_FILENO);
-            let _ = close(self.saved_stderr);
-            let _ = close(self.dev_null);
-        }
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-const O_WRONLY: i32 = 0x0001;
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-const STDERR_FILENO: i32 = 2;
-
-#[cfg(all(not(target_arch = "wasm32"), unix))]
-unsafe extern "C" {
-    fn open(path: *const std::os::raw::c_char, oflag: i32) -> i32;
-    fn dup(fd: i32) -> i32;
-    fn dup2(src: i32, dst: i32) -> i32;
-    fn close(fd: i32) -> i32;
-}
-
-#[cfg(all(not(target_arch = "wasm32"), not(unix)))]
-struct StderrSilencer;
-
-#[cfg(all(not(target_arch = "wasm32"), not(unix)))]
-impl StderrSilencer {
-    fn new() -> Option<Self> {
-        None
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

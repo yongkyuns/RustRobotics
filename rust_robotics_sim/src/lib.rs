@@ -7,9 +7,6 @@ pub mod math;
 pub mod simulator;
 pub mod time;
 
-#[cfg(target_arch = "wasm32")]
-mod mujoco_fw_web;
-
 pub use app::App;
 
 pub mod prelude {

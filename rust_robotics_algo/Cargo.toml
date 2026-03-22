@@ -13,6 +13,7 @@ rand = "0.8"
 nalgebra = "0.30"
 num-traits = "0.2"
 nalgebra-numpy = {version="0.3", optional=true}
+serde = { version = "1", features = ["derive"] }
 # Sparse matrix support for Graph SLAM
 sprs = "0.11"
 # nalgebra = {version="0.30", default_features=false, features=["libm","macros"]}
@@ -22,9 +23,21 @@ sprs = "0.11"
 [dependencies.clarabel]
 version = "0.9"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-20", "alternative-backend"] }
+libloading = "0.8"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies.clarabel]
 version = "0.9"
 features = ["wasm"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.85"
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "api-20", "alternative-backend"] }
+ort-web = "0.2.1"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2.108"
+wasm-bindgen-futures = "0.4.58"
 
 [features]
 default = []

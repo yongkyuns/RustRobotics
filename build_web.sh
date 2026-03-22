@@ -78,6 +78,10 @@ cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.js" \
   "docs/vendor/mujoco/mt/mujoco.js"
 cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.wasm" \
   "docs/vendor/mujoco/mt/mujoco.wasm"
+cp "rust_robotics_sim/web/ort_web/_loader.js" \
+  "docs/_loader.js"
+cp "rust_robotics_sim/web/ort_web/_telemetry.js" \
+  "docs/_telemetry.js"
 cp "rust_robotics_sim/web/mujoco_runtime.js" \
   "docs/mujoco_runtime.js"
 
@@ -91,7 +95,7 @@ TARGET=$(cargo metadata --format-version=1 | jq --raw-output .target_directory)
 echo "Generating JS bindings for wasm…"
 TARGET_NAME="${CRATE_NAME_SNAKE_CASE}.wasm"
 WASM_PATH="${TARGET}/wasm32-unknown-unknown/${BUILD}/${TARGET_NAME}"
-wasm-bindgen "${WASM_PATH}" --out-dir docs --no-modules --no-typescript
+wasm-bindgen "${WASM_PATH}" --out-dir docs --target web --no-typescript
 
 if [[ "${FAST}" == false ]]; then
   echo "Optimizing wasm…"

@@ -29,8 +29,6 @@ wasm-bindgen-futures = "0.4.58"
 web-sys = { version = "0.3.85", features = ["Window", "Document", "HtmlCanvasElement", "Element", "HtmlElement", "HtmlIFrameElement", "Node", "Response"] }
 wasm-bindgen = "0.2.108"
 web-time = "1.1"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-20"] }
-libloading = "0.8"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
