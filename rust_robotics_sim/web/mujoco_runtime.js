@@ -668,8 +668,7 @@ function collectGeomSnapshots(runtime) {
     if (Number(runtime.model.geom_group[i]) >= 3) {
       continue;
     }
-    const rgbaBase = i * 4;
-    const rgba = Array.from(runtime.model.geom_rgba.slice(rgbaBase, rgbaBase + 4), Number);
+    const rgba = resolvedGeomRgba(runtime, i);
     if ((rgba[3] ?? 0.0) <= 0.01) {
       continue;
     }
@@ -691,8 +690,7 @@ function collectVisualGeomMeta(runtime) {
     if (Number(runtime.model.geom_group[i]) >= 3) {
       continue;
     }
-    const rgbaBase = i * 4;
-    const rgba = Array.from(runtime.model.geom_rgba.slice(rgbaBase, rgbaBase + 4), Number);
+    const rgba = resolvedGeomRgba(runtime, i);
     if ((rgba[3] ?? 0.0) <= 0.01) {
       continue;
     }
@@ -707,6 +705,13 @@ function collectVisualGeomMeta(runtime) {
     });
   }
   return geoms;
+}
+
+function resolvedGeomRgba(runtime, geomId) {
+  const matId = Number(runtime.model.geom_matid?.[geomId] ?? -1);
+  const rgbaBase = (matId >= 0 ? matId : geomId) * 4;
+  const rgbaSource = matId >= 0 ? runtime.model.mat_rgba : runtime.model.geom_rgba;
+  return Array.from(rgbaSource.slice(rgbaBase, rgbaBase + 4), Number);
 }
 
 function createVisualGeomState(meta) {
