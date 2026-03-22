@@ -1,6 +1,7 @@
 use super::{
     oscillator, quaternion_yaw, rotate_vector_by_inverse_quaternion, shift_history_12,
-    shift_history_3, Actuation, Command, Observation, PolicyOutput, RawState,
+    shift_history_3, Actuation, Command, InferenceBackend, InferenceInput, Observation,
+    PolicyOutput, RawState,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,6 +215,25 @@ impl Go2Controller {
         self.adapt_hx.copy_from_slice(&output.recurrent[0..128]);
         self.is_init = false;
         Ok(())
+    }
+
+    pub fn step(
+        &mut self,
+        raw: &RawState,
+        command: &Command,
+        inference: &mut dyn InferenceBackend,
+    ) -> Result<Actuation, String> {
+        self.update_from_raw_state(raw);
+        let observation = self.build_observation();
+        let command_input = self.build_command_input(raw, command);
+        let output = inference.run(InferenceInput::Go2 {
+            policy: &observation.values,
+            is_init: self.is_init(),
+            adapt_hx: self.adapt_hx(),
+            command: &command_input.values,
+        })?;
+        self.integrate_policy_output(&output)?;
+        Ok(self.decode_actuation(raw))
     }
 
     pub fn decode_actuation(&self, raw: &RawState) -> Actuation {

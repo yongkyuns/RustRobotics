@@ -1,4 +1,6 @@
-use super::{Actuation, Command, Observation, PolicyOutput, RawState};
+use super::{
+    Actuation, Command, InferenceBackend, InferenceInput, Observation, PolicyOutput, RawState,
+};
 
 pub struct DuckController {
     default_joint_pos: Vec<f32>,
@@ -98,6 +100,20 @@ impl DuckController {
         self.last_actions.copy_from_slice(&output.actions[..self.default_joint_pos.len()]);
         self.update_phase();
         Ok(())
+    }
+
+    pub fn step(
+        &mut self,
+        raw: &RawState,
+        command: &Command,
+        inference: &mut dyn InferenceBackend,
+    ) -> Result<Actuation, String> {
+        let observation = self.build_observation(raw, command);
+        let output = inference.run(InferenceInput::Duck {
+            observation: &observation.values,
+        })?;
+        self.integrate_policy_output(&output)?;
+        Ok(self.decode_actuation())
     }
 
     pub fn decode_actuation(&mut self) -> Actuation {

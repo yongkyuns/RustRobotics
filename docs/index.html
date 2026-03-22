@@ -211,6 +211,8 @@
     <script src="rust_robotics_sim.js"></script>
 
     <script>
+      globalThis.wasm_bindgen = wasm_bindgen;
+
       // We'll defer our execution until the wasm is ready to go.
       // Here we tell bindgen the path to the wasm file so it can start
       // initialization and return to us a promise when it's done.

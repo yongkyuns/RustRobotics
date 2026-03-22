@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use rust_robotics_algo::mujoco::duck::DuckController;
 use rust_robotics_algo::mujoco::go2::{Go2CommandMode, Go2Controller};
-use rust_robotics_algo::mujoco::{Command, PolicyOutput};
+use rust_robotics_algo::mujoco::{Command, InferenceBackend, InferenceInput, PolicyOutput};
 
 #[cfg(not(target_arch = "wasm32"))]
 use serde::Deserialize;
@@ -739,6 +739,30 @@ impl MujocoPolicy {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl InferenceBackend for MujocoPolicy {
+    fn run(&mut self, input: InferenceInput<'_>) -> Result<PolicyOutput, String> {
+        match input {
+            InferenceInput::Go2 {
+                policy,
+                is_init,
+                adapt_hx,
+                command,
+            } => {
+                let adapt_hx: [f32; 128] = adapt_hx
+                    .try_into()
+                    .map_err(|_| format!("Expected 128 recurrent values, got {}", adapt_hx.len()))?;
+                let (actions, recurrent) = self.run_go2(policy, is_init, &adapt_hx, command)?;
+                Ok(PolicyOutput { actions, recurrent })
+            }
+            InferenceInput::Duck { observation } => Ok(PolicyOutput {
+                actions: self.run_duck(observation)?,
+                recurrent: Vec::new(),
+            }),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn ensure_ort_initialized(ort_lib: &Path) -> Result<(), String> {
     ORT_INIT_RESULT
         .get_or_init(|| {
@@ -1078,67 +1102,24 @@ impl MujocoRuntime {
         let started = Instant::now();
         self.command.vel_x = command_vel_x;
         for _ in 0..sim_speed {
-            self.update_policy_input()?;
-            self.run_policy()?;
+            let policy_started = Instant::now();
+            let raw = self.sim.read_raw_state();
+            let actuation = match &mut self.robot {
+                NativeRobotController::Go2(robot) => robot.step(&raw, &self.command, &mut self.policy)?,
+                NativeRobotController::Duck(robot) => {
+                    robot.step(&raw, &self.command, &mut self.policy)?
+                }
+            };
+            self.diagnostics.last_policy_ms = policy_started.elapsed().as_secs_f32() * 1000.0;
 
             for _ in 0..self.sim.decimation() {
-                self.apply_control();
+                self.sim.apply_actuation(&actuation)?;
                 self.sim.step_substeps(1);
                 self.mujoco_time_ms += self.sim.timestep() * 1000.0;
             }
         }
         self.diagnostics.last_step_ms = started.elapsed().as_secs_f32() * 1000.0;
         Ok(())
-    }
-
-    fn update_policy_input(&mut self) -> Result<(), String> {
-        let raw = self.sim.read_raw_state();
-        if let NativeRobotController::Go2(robot) = &mut self.robot {
-            robot.update_from_raw_state(&raw);
-        }
-        Ok(())
-    }
-
-    fn run_policy(&mut self) -> Result<(), String> {
-        let started = Instant::now();
-        let raw = self.sim.read_raw_state();
-        match &mut self.robot {
-            NativeRobotController::Go2(robot) => {
-                let observation = robot.build_observation();
-                let command_input = robot.build_command_input(&raw, &self.command);
-                let (action, next_hx) = self.policy.run_go2(
-                    &observation.values,
-                    robot.is_init(),
-                    robot.adapt_hx(),
-                    &command_input.values,
-                )?;
-                robot.integrate_policy_output(&PolicyOutput {
-                    actions: action,
-                    recurrent: next_hx,
-                })?;
-            }
-            NativeRobotController::Duck(robot) => {
-                let observation = robot.build_observation(&raw, &self.command);
-                let action = self.policy.run_duck(&observation.values)?;
-                robot.integrate_policy_output(&PolicyOutput {
-                    actions: action,
-                    recurrent: Vec::new(),
-                })?;
-            }
-        }
-        self.diagnostics.last_policy_ms = started.elapsed().as_secs_f32() * 1000.0;
-        Ok(())
-    }
-
-    fn apply_control(&mut self) {
-        let actuation = match &mut self.robot {
-            NativeRobotController::Go2(robot) => {
-                let raw = self.sim.read_raw_state();
-                robot.decode_actuation(&raw)
-            }
-            NativeRobotController::Duck(robot) => robot.decode_actuation(),
-        };
-        let _ = self.sim.apply_actuation(&actuation);
     }
 
     fn render_software(&mut self, ui: &mut Ui, desired_size: egui::Vec2) {

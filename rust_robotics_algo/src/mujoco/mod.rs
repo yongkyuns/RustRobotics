@@ -38,6 +38,22 @@ pub struct PolicyOutput {
     pub recurrent: Vec<f32>,
 }
 
+pub enum InferenceInput<'a> {
+    Go2 {
+        policy: &'a [f32],
+        is_init: bool,
+        adapt_hx: &'a [f32],
+        command: &'a [f32],
+    },
+    Duck {
+        observation: &'a [f32],
+    },
+}
+
+pub trait InferenceBackend {
+    fn run(&mut self, input: InferenceInput<'_>) -> Result<PolicyOutput, String>;
+}
+
 #[derive(Clone, Debug)]
 pub enum Actuation {
     JointTorques([f32; 12]),
