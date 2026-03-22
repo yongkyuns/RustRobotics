@@ -4,6 +4,7 @@
 
 pub mod control;
 pub mod localization;
+pub mod mujoco;
 pub mod path_planning;
 pub mod slam;
 pub mod util;

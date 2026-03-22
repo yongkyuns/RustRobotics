@@ -8,7 +8,7 @@ fn main() {
     tracing_subscriber::fmt::init();
 
     let native_options = eframe::NativeOptions {
-        renderer: eframe::Renderer::Glow,
+        renderer: eframe::Renderer::Wgpu,
         ..eframe::NativeOptions::default()
     };
     let _ = eframe::run_native(

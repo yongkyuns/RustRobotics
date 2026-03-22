@@ -35,7 +35,7 @@ libloading = "0.8"
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tracing-subscriber = "0.3"
-eframe = { version = "0.32.3", features = ["persistence", "glow"] }
+eframe = { version = "0.32.3", features = ["persistence", "glow", "wgpu"] }
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]

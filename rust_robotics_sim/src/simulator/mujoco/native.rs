@@ -10,13 +10,19 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use rust_robotics_algo::mujoco::duck::DuckController;
+use rust_robotics_algo::mujoco::go2::{Go2CommandMode, Go2Controller};
+use rust_robotics_algo::mujoco::{Command, PolicyOutput};
+
 #[cfg(not(target_arch = "wasm32"))]
 use serde::Deserialize;
 
 #[cfg(not(target_arch = "wasm32"))]
 use eframe::glow::HasContext;
 #[cfg(not(target_arch = "wasm32"))]
-use eframe::{egui_glow, glow};
+use eframe::{egui_glow, egui_wgpu, glow, wgpu};
+#[cfg(not(target_arch = "wasm32"))]
+use wgpu::util::DeviceExt as _;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
@@ -29,9 +35,14 @@ use std::{
 #[cfg(not(target_arch = "wasm32"))]
 use ort::{
     logging::LogLevel,
-    session::{builder::GraphOptimizationLevel, Session},
+    session::{builder::GraphOptimizationLevel, Session, SessionInputValue},
     value::Tensor,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+mod sim;
+#[cfg(not(target_arch = "wasm32"))]
+use sim::MujocoSim;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(
@@ -77,7 +88,37 @@ const MJ_GEOM_MESH: i32 = mjtGeom__mjGEOM_MESH as i32;
 #[cfg(not(target_arch = "wasm32"))]
 const MJ_GEOM_LINE: i32 = mjtGeom__mjGEOM_LINE as i32;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeRobotPreset {
+    Go2,
+    OpenDuckMini,
+}
+
+impl NativeRobotPreset {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Go2 => "Go2",
+            Self::OpenDuckMini => "Open Duck Mini",
+        }
+    }
+
+    fn default_scene(self) -> PathBuf {
+        match self {
+            Self::Go2 => local_asset_path("scene.xml"),
+            Self::OpenDuckMini => local_duck_asset_path("scene.xml"),
+        }
+    }
+
+    fn default_policy(self) -> PathBuf {
+        match self {
+            Self::Go2 => local_asset_path("facet.json"),
+            Self::OpenDuckMini => local_duck_asset_path("duck.json"),
+        }
+    }
+}
+
 pub(super) struct NativeMujocoBackend {
+    selected_robot: NativeRobotPreset,
     scene_path: String,
     policy_path: String,
     command_vel_x: f32,
@@ -92,9 +133,15 @@ pub(super) struct NativeMujocoBackend {
 
 impl Default for NativeMujocoBackend {
     fn default() -> Self {
+        let selected_robot = NativeRobotPreset::Go2;
         Self {
-            scene_path: local_asset_path("scene.xml").to_string_lossy().into_owned(),
-            policy_path: local_asset_path("robust.json")
+            selected_robot,
+            scene_path: selected_robot
+                .default_scene()
+                .to_string_lossy()
+                .into_owned(),
+            policy_path: selected_robot
+                .default_policy()
                 .to_string_lossy()
                 .into_owned(),
             command_vel_x: 0.0,
@@ -180,40 +227,39 @@ impl NativeMujocoBackend {
     fn ui_native_controls(&mut self, ui: &mut Ui) {
         ui.heading("mujoco");
         ui.label("Native MuJoCo running inside RustRobotics.");
-
-        ui.horizontal(|ui| {
-            ui.label("Scene:");
-            let changed = ui
-                .add(TextEdit::singleline(&mut self.scene_path).desired_width(360.0))
-                .changed();
-
-            if ui.button("Reload").clicked() || changed {
-                self.runtime = None;
-                self.init_error = None;
-                self.render_error = None;
-                self.status = "Reloading MuJoCo scene...".to_string();
-            }
+        let previous_robot = self.selected_robot;
+        egui::ComboBox::from_label("Robot")
+            .selected_text(self.selected_robot.label())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.selected_robot, NativeRobotPreset::Go2, "Go2");
+                ui.selectable_value(
+                    &mut self.selected_robot,
+                    NativeRobotPreset::OpenDuckMini,
+                    "Open Duck Mini",
+                );
+            });
+        if self.selected_robot != previous_robot {
+            self.scene_path = self
+                .selected_robot
+                .default_scene()
+                .to_string_lossy()
+                .into_owned();
+            self.policy_path = self
+                .selected_robot
+                .default_policy()
+                .to_string_lossy()
+                .into_owned();
+            self.runtime = None;
+            self.init_error = None;
+            self.render_error = None;
+            self.status = format!("Switching to {}...", self.selected_robot.label());
+        }
+        ui.label(match self.selected_robot {
+            NativeRobotPreset::Go2 => "Policy: facet",
+            NativeRobotPreset::OpenDuckMini => "Policy: BEST_WALK_ONNX",
         });
-
-        ui.horizontal(|ui| {
-            ui.label("Policy:");
-            let changed = ui
-                .add(TextEdit::singleline(&mut self.policy_path).desired_width(360.0))
-                .changed();
-
-            if ui.button("Reload policy").clicked() || changed {
-                self.runtime = None;
-                self.init_error = None;
-                self.render_error = None;
-                self.status = "Reloading MuJoCo policy...".to_string();
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Command vx:");
-            ui.add(Slider::new(&mut self.command_vel_x, -2.0..=2.0).show_value(true));
-            ui.checkbox(&mut self.diagnostic_colors, "Diagnostic colors");
-        });
+        ui.label("Control: drag the red setpoint ball in the viewport.");
+        ui.checkbox(&mut self.diagnostic_colors, "Diagnostic colors");
 
         ui.horizontal(|ui| {
             if ui.button("Reset sim").clicked() {
@@ -237,6 +283,36 @@ impl NativeMujocoBackend {
             }
         });
 
+        egui::CollapsingHeader::new("Advanced")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Scene:");
+                    let changed = ui
+                        .add(TextEdit::singleline(&mut self.scene_path).desired_width(320.0))
+                        .changed();
+                    if ui.button("Reload").clicked() || changed {
+                        self.runtime = None;
+                        self.init_error = None;
+                        self.render_error = None;
+                        self.status = "Reloading MuJoCo scene...".to_string();
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Policy:");
+                    let changed = ui
+                        .add(TextEdit::singleline(&mut self.policy_path).desired_width(320.0))
+                        .changed();
+                    if ui.button("Reload policy").clicked() || changed {
+                        self.runtime = None;
+                        self.init_error = None;
+                        self.render_error = None;
+                        self.status = "Reloading MuJoCo policy...".to_string();
+                    }
+                });
+            });
+
         ui.horizontal(|ui| {
             ui.label("Mesh filter:");
             ui.add(Slider::new(&mut self.mesh_filter, -1..=15).show_value(true));
@@ -250,6 +326,11 @@ impl NativeMujocoBackend {
         ui.label(format!("Status: {}", self.status));
 
         if let Some(runtime) = self.runtime.as_ref() {
+            ui.label(format!(
+                "Command mode: {}",
+                runtime.robot.command_mode_label()
+            ));
+            ui.label(format!("Setpoint: {:?}", runtime.command.setpoint_world));
             ui.label(format!("Load: {}", runtime.diagnostics.load_summary));
             ui.label(format!(
                 "Perf: step {:.2} ms | policy {:.2} ms | render {:.2} ms | gl-init {:.2} ms | frames {}",
@@ -266,7 +347,28 @@ impl NativeMujocoBackend {
         let mut desired = ui.available_size_before_wrap();
         desired.x = desired.x.max(320.0);
         desired.y = desired.y.max(240.0);
-        if let Some(err) = self.render_error.clone() {
+        if let Some(render_state) = frame.and_then(|frame| frame.wgpu_render_state()) {
+            let diagnostic_colors = self.diagnostic_colors;
+            let mesh_filter = normalize_mesh_filter(self.mesh_filter);
+            match self.ensure_runtime().and_then(|runtime| {
+                runtime.render_wgpu(ui, render_state, desired, diagnostic_colors, mesh_filter)
+            }) {
+                Ok(()) => {
+                    self.render_error = None;
+                    return;
+                }
+                Err(err) => {
+                    debug_log(&format!("ui_native: wgpu render error: {err}"));
+                    self.render_error = Some(err.clone());
+                    self.status = "MuJoCo running with native software fallback renderer".to_string();
+                    if let Ok(runtime) = self.ensure_runtime() {
+                        runtime.render_software(ui, frame, desired, diagnostic_colors, mesh_filter);
+                    }
+                    return;
+                }
+            }
+        }
+        if self.render_error.is_some() {
             let diagnostic_colors = self.diagnostic_colors;
             let mesh_filter = normalize_mesh_filter(self.mesh_filter);
             if let Ok(runtime) = self.ensure_runtime() {
@@ -307,7 +409,7 @@ impl NativeMujocoBackend {
             Err(err) => {
                 debug_log(&format!("ui_native: render error: {err}"));
                 self.render_error = Some(err.clone());
-                self.status = "MuJoCo running with glow 3D fallback renderer".to_string();
+                self.status = "MuJoCo running with native software fallback renderer".to_string();
                 let diagnostic_colors = self.diagnostic_colors;
                 let mesh_filter = normalize_mesh_filter(self.mesh_filter);
                 if let Ok(runtime) = self.ensure_runtime() {
@@ -356,9 +458,71 @@ impl NativeMujocoBackend {
 #[derive(Debug, Deserialize)]
 struct PolicyFile {
     onnx: OnnxFile,
+    #[serde(default)]
+    controller_kind: Option<String>,
+    #[serde(default)]
+    command_mode: Option<String>,
+    #[serde(default)]
+    phase_steps: Option<usize>,
+    #[serde(default)]
+    obs_config: PolicyObsConfig,
     action_scale: f32,
     stiffness: f32,
     damping: f32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Deserialize, Default)]
+struct PolicyObsConfig {
+    #[serde(default)]
+    command: Vec<PolicyCommandConfig>,
+    #[serde(default, rename = "command_")]
+    command_alt: Vec<PolicyCommandConfig>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Deserialize)]
+struct PolicyCommandConfig {
+    name: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PolicyFile {
+    fn controller_kind(&self) -> &str {
+        self.controller_kind.as_deref().unwrap_or_else(|| {
+            if self.onnx.meta.in_keys.len() == 1 {
+                "open_duck_mini_walk"
+            } else {
+                "go2_facet"
+            }
+        })
+    }
+
+    fn phase_steps(&self) -> usize {
+        self.phase_steps.unwrap_or(0)
+    }
+
+    fn command_mode(&self) -> Go2CommandMode {
+        if let Some(command_mode) = self.command_mode.as_deref() {
+            return if command_mode == "impedance" {
+                Go2CommandMode::Impedance
+            } else {
+                Go2CommandMode::Velocity
+            };
+        }
+
+        let commands = if !self.obs_config.command.is_empty() {
+            &self.obs_config.command
+        } else {
+            &self.obs_config.command_alt
+        };
+
+        if commands.iter().any(|cfg| cfg.name == "ImpedanceCommand") {
+            Go2CommandMode::Impedance
+        } else {
+            Go2CommandMode::Velocity
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -371,6 +535,8 @@ struct OnnxFile {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Deserialize)]
 struct OnnxMeta {
+    #[serde(default)]
+    in_keys: Vec<String>,
     out_keys: Vec<OnnxKey>,
 }
 
@@ -402,8 +568,23 @@ struct AssetMeta {
 #[cfg(not(target_arch = "wasm32"))]
 struct MujocoPolicy {
     session: Session,
-    action_output_name: String,
-    next_hx_output_name: String,
+    kind: NativePolicyKind,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum NativePolicyKind {
+    Go2 {
+        policy_input_name: String,
+        is_init_input_name: String,
+        adapt_hx_input_name: String,
+        command_input_name: String,
+        action_output_name: String,
+        next_hx_output_name: String,
+    },
+    Duck {
+        obs_input_name: String,
+        action_output_name: String,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -417,7 +598,7 @@ static MESH_DIAGNOSTICS_LOGGED: OnceLock<()> = OnceLock::new();
 
 #[cfg(not(target_arch = "wasm32"))]
 impl MujocoPolicy {
-    fn load(path: &Path, meta: &OnnxMeta) -> Result<Self, String> {
+    fn load(path: &Path, meta: &OnnxMeta, controller_kind: &str) -> Result<Self, String> {
         debug_log(&format!("policy.load: begin {}", path.display()));
         let ort_lib = find_onnxruntime_library().ok_or_else(|| {
             "Failed to locate libonnxruntime.dylib; set ORT_DYLIB_PATH or install ONNX Runtime"
@@ -453,60 +634,128 @@ impl MujocoPolicy {
             .zip(session.outputs().iter())
             .map(|(semantic_key, outlet)| (semantic_key.joined(), outlet.name().to_string()))
             .collect::<std::collections::HashMap<_, _>>();
+        let input_name_map = meta
+            .in_keys
+            .iter()
+            .zip(session.inputs().iter())
+            .map(|(semantic_key, inlet)| (semantic_key.clone(), inlet.name().to_string()))
+            .collect::<std::collections::HashMap<_, _>>();
 
-        let action_output_name = output_name_map
-            .get("action")
-            .cloned()
-            .ok_or_else(|| "ONNX metadata missing output mapping for action".to_string())?;
-        let next_hx_output_name = output_name_map
-            .get("next.adapt_hx")
-            .cloned()
-            .ok_or_else(|| "ONNX metadata missing output mapping for next.adapt_hx".to_string())?;
+        let kind = if controller_kind == "open_duck_mini_walk" {
+            let obs_input_name = input_name_map
+                .get("obs")
+                .cloned()
+                .or_else(|| session.inputs().first().map(|input| input.name().to_string()))
+                .ok_or_else(|| "ONNX metadata missing input mapping for obs".to_string())?;
+            let action_output_name = output_name_map
+                .get("continuous_actions")
+                .cloned()
+                .or_else(|| session.outputs().first().map(|output| output.name().to_string()))
+                .ok_or_else(|| "ONNX metadata missing output mapping for continuous_actions".to_string())?;
+            NativePolicyKind::Duck {
+                obs_input_name,
+                action_output_name,
+            }
+        } else {
+            let policy_input_name = input_name_map
+                .get("policy")
+                .cloned()
+                .ok_or_else(|| "ONNX metadata missing input mapping for policy".to_string())?;
+            let is_init_input_name = input_name_map
+                .get("is_init")
+                .cloned()
+                .ok_or_else(|| "ONNX metadata missing input mapping for is_init".to_string())?;
+            let adapt_hx_input_name = input_name_map
+                .iter()
+                .find_map(|(semantic_key, input_name)| {
+                    semantic_key.contains("adapt_hx").then(|| input_name.clone())
+                })
+                .ok_or_else(|| "ONNX metadata missing input mapping for adapt_hx".to_string())?;
+            let command_input_name = input_name_map
+                .iter()
+                .find_map(|(semantic_key, input_name)| {
+                    (semantic_key != "policy"
+                        && semantic_key != "is_init"
+                        && !semantic_key.contains("adapt_hx"))
+                    .then(|| input_name.clone())
+                })
+                .ok_or_else(|| "ONNX metadata missing input mapping for command".to_string())?;
+            let action_output_name = output_name_map
+                .get("action")
+                .cloned()
+                .ok_or_else(|| "ONNX metadata missing output mapping for action".to_string())?;
+            let next_hx_output_name = output_name_map
+                .get("next.adapt_hx")
+                .cloned()
+                .ok_or_else(|| "ONNX metadata missing output mapping for next.adapt_hx".to_string())?;
 
-        debug_log(&format!(
-            "policy.load: output mapping action={} next_hx={}",
-            action_output_name, next_hx_output_name
-        ));
+            debug_log(&format!(
+                "policy.load: output mapping action={} next_hx={}",
+                action_output_name, next_hx_output_name
+            ));
 
-        Ok(Self {
-            session,
-            action_output_name,
-            next_hx_output_name,
-        })
+            NativePolicyKind::Go2 {
+                policy_input_name,
+                is_init_input_name,
+                adapt_hx_input_name,
+                command_input_name,
+                action_output_name,
+                next_hx_output_name,
+            }
+        };
+
+        Ok(Self { session, kind })
     }
 
-    fn run(
+    fn run_go2(
         &mut self,
-        policy: &[f32; 117],
+        policy: &[f32],
         is_init: bool,
         adapt_hx: &[f32; 128],
-        command: &[f32; 16],
+        command: &[f32],
     ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let NativePolicyKind::Go2 {
+            policy_input_name,
+            is_init_input_name,
+            adapt_hx_input_name,
+            command_input_name,
+            action_output_name,
+            next_hx_output_name,
+        } = &self.kind
+        else {
+            return Err("attempted to run Go2 policy through non-Go2 ONNX session".to_string());
+        };
         let first_inference = is_init;
         debug_log_if(first_inference, "policy.run: first inference start");
-        let policy = Tensor::from_array(([1usize, 117], policy.to_vec().into_boxed_slice()))
+        let policy = Tensor::from_array(([1usize, policy.len()], policy.to_vec().into_boxed_slice()))
             .map_err(|err| format!("Failed to build policy tensor: {err}"))?;
         let is_init = Tensor::from_array(([1usize], vec![is_init].into_boxed_slice()))
             .map_err(|err| format!("Failed to build init tensor: {err}"))?;
         let adapt_hx = Tensor::from_array(([1usize, 128], adapt_hx.to_vec().into_boxed_slice()))
             .map_err(|err| format!("Failed to build recurrent tensor: {err}"))?;
-        let command = Tensor::from_array(([1usize, 16], command.to_vec().into_boxed_slice()))
+        let command = Tensor::from_array(([1usize, command.len()], command.to_vec().into_boxed_slice()))
             .map_err(|err| format!("Failed to build command tensor: {err}"))?;
 
+        let inputs: Vec<(&str, SessionInputValue<'_>)> = vec![
+            (policy_input_name.as_str(), policy.into()),
+            (is_init_input_name.as_str(), is_init.into()),
+            (adapt_hx_input_name.as_str(), adapt_hx.into()),
+            (command_input_name.as_str(), command.into()),
+        ];
         let outputs = self
             .session
-            .run(ort::inputs![policy, is_init, adapt_hx, command])
+            .run(inputs)
             .map_err(|err| format!("ONNX inference failed: {err}"))?;
         debug_log_if(first_inference, "policy.run: first inference done");
 
-        let action = outputs[self.action_output_name.as_str()]
+        let action = outputs[action_output_name.as_str()]
             .try_extract_array::<f32>()
             .map_err(|err| format!("Failed to read action tensor: {err}"))?
             .iter()
             .copied()
             .collect::<Vec<_>>();
 
-        let next_hx = outputs[self.next_hx_output_name.as_str()]
+        let next_hx = outputs[next_hx_output_name.as_str()]
             .try_extract_array::<f32>()
             .map_err(|err| format!("Failed to read recurrent tensor: {err}"))?
             .iter()
@@ -514,6 +763,34 @@ impl MujocoPolicy {
             .collect::<Vec<_>>();
 
         Ok((action, next_hx))
+    }
+
+    fn run_duck(&mut self, observation: &[f32]) -> Result<Vec<f32>, String> {
+        let NativePolicyKind::Duck {
+            obs_input_name,
+            action_output_name,
+        } = &self.kind
+        else {
+            return Err("attempted to run Duck policy through non-Duck ONNX session".to_string());
+        };
+
+        let observation =
+            Tensor::from_array(([1usize, observation.len()], observation.to_vec().into_boxed_slice()))
+                .map_err(|err| format!("Failed to build duck observation tensor: {err}"))?;
+        let inputs: Vec<(&str, SessionInputValue<'_>)> =
+            vec![(obs_input_name.as_str(), observation.into())];
+        let outputs = self
+            .session
+            .run(inputs)
+            .map_err(|err| format!("Duck ONNX inference failed: {err}"))?;
+
+        let actions = outputs[action_output_name.as_str()]
+            .try_extract_array::<f32>()
+            .map_err(|err| format!("Failed to read duck action tensor: {err}"))?
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        Ok(actions)
     }
 }
 
@@ -601,8 +878,7 @@ fn find_onnxruntime_library() -> Option<PathBuf> {
 
 #[cfg(not(target_arch = "wasm32"))]
 struct MujocoRuntime {
-    model: *mut mjModel,
-    data: *mut mjData,
+    sim: MujocoSim,
     scene: mjvScene,
     cam: mjvCamera,
     opt: mjvOption,
@@ -610,27 +886,50 @@ struct MujocoRuntime {
     gl_ready: bool,
     texture: Option<TextureHandle>,
     policy: MujocoPolicy,
-    joint_qpos_adr: [usize; 12],
-    joint_qvel_adr: [usize; 12],
-    ctrl_adr: [usize; 12],
-    default_jpos: [f32; 12],
-    action_scale: [f32; 12],
-    kp: [f32; 12],
-    kd: [f32; 12],
-    last_actions: [f32; 12],
-    action_history: [[f32; 12]; 3],
-    gravity_history: [[f32; 3]; 3],
-    joint_pos_history: [[f32; 12]; 3],
-    joint_vel_history: [[f32; 12]; 3],
-    adapt_hx: [f32; 128],
-    is_init: bool,
-    command_vel_x: f32,
-    timestep: f32,
-    decimation: usize,
+    robot: NativeRobotController,
+    command: Command,
     mujoco_time_ms: f32,
     diagnostics: MujocoDiagnostics,
     glow_renderer: Arc<Mutex<GlowSceneRenderer>>,
     glow_scene: Arc<Mutex<GlowSceneFrame>>,
+    wgpu_scene: Arc<Mutex<WgpuSceneFrame>>,
+    mesh_assets: BTreeMap<usize, MeshAssetCpu>,
+    wgpu_renderer: Arc<Mutex<WgpuSceneRenderer>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum NativeRobotController {
+    Go2(Go2Controller),
+    Duck(DuckController),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeRobotController {
+    fn reset(&mut self) {
+        match self {
+            Self::Go2(robot) => robot.reset(),
+            Self::Duck(robot) => robot.reset(),
+        }
+    }
+
+    fn command_mode_label(&self) -> &'static str {
+        match self {
+            Self::Go2(robot) => match robot.command_mode() {
+                Go2CommandMode::Velocity => "velocity",
+                Go2CommandMode::Impedance => "setpoint ball",
+            },
+            Self::Duck(_) => "setpoint ball",
+        }
+    }
+
+    fn uses_setpoint_ball(&self) -> bool {
+        matches!(self, Self::Duck(_))
+            || matches!(
+                self,
+                Self::Go2(robot) if robot.command_mode() == Go2CommandMode::Impedance
+            )
+    }
+
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -652,12 +951,6 @@ impl Drop for MujocoRuntime {
                 mjr_freeContext(&mut self.con);
             }
             mjv_freeScene(&mut self.scene);
-            if !self.data.is_null() {
-                mj_deleteData(self.data);
-            }
-            if !self.model.is_null() {
-                mj_deleteModel(self.model);
-            }
         }
     }
 }
@@ -723,90 +1016,17 @@ impl MujocoRuntime {
                 )
             })?;
 
-        if asset_meta.joint_names_isaac.len() != 12 {
-            return Err(format!(
-                "Expected 12 joints in asset metadata, found {}",
-                asset_meta.joint_names_isaac.len()
-            ));
-        }
-        if asset_meta.default_joint_pos.len() != 12 {
-            return Err(format!(
-                "Expected 12 default joint positions in asset metadata, found {}",
-                asset_meta.default_joint_pos.len()
-            ));
-        }
-
-        let model_started = Instant::now();
-        debug_log("runtime.load: mj_loadXML start");
-        let model = unsafe {
-            let scene_c = CString::new(scene_path.as_os_str().to_string_lossy().as_bytes())
-                .map_err(|err| format!("Invalid scene path {}: {err}", scene_path.display()))?;
-            let mut error = [0i8; 1024];
-            let model = mj_loadXML(
-                scene_c.as_ptr(),
-                std::ptr::null(),
-                error.as_mut_ptr(),
-                error.len() as i32,
-            );
-            if model.is_null() {
-                let message = cstring_buffer_to_string(&error);
-                return Err(format!(
-                    "Failed to load MuJoCo scene {}: {}",
-                    scene_path.display(),
-                    message
-                ));
-            }
-            model
+        let controller_kind = policy_file.controller_kind().to_string();
+        let sensor_names: &[&str] = if controller_kind == "open_duck_mini_walk" {
+            &["imu_gyro", "imu_accel", "left_foot_pos", "right_foot_pos"]
+        } else {
+            &[]
         };
-        let model_elapsed = model_started.elapsed();
-        debug_log(&format!(
-            "runtime.load: mj_loadXML done in {}",
-            fmt_duration(model_elapsed)
-        ));
 
-        debug_log("runtime.load: mj_makeData start");
-        let data = unsafe {
-            let data = mj_makeData(model);
-            if data.is_null() {
-                mj_deleteModel(model);
-                return Err(format!(
-                    "Failed to allocate MuJoCo data for {}",
-                    scene_path.display()
-                ));
-            }
-            data
-        };
-        debug_log("runtime.load: mj_makeData done");
-
-        debug_log("runtime.load: initial mj_forward start");
-        unsafe {
-            if (*model).nkey > 0 {
-                mj_resetDataKeyframe(model, data, 0);
-            } else {
-                mj_resetData(model, data);
-            }
-            mj_forward(model, data);
-        }
-        debug_log("runtime.load: initial mj_forward done");
-
-        let mut joint_qpos_adr = [0usize; 12];
-        let mut joint_qvel_adr = [0usize; 12];
-        let mut ctrl_adr = [0usize; 12];
-
-        for (i, joint_name) in asset_meta.joint_names_isaac.iter().enumerate() {
-            let joint_id = unsafe { name2id(model, MJ_OBJ_JOINT, joint_name)? };
-            let actuator_name = joint_name.strip_suffix("_joint").unwrap_or(joint_name);
-            let actuator_id = unsafe { name2id(model, MJ_OBJ_ACTUATOR, actuator_name)? };
-
-            unsafe {
-                joint_qpos_adr[i] = *(*model).jnt_qposadr.add(joint_id as usize) as usize;
-                joint_qvel_adr[i] = *(*model).jnt_dofadr.add(joint_id as usize) as usize;
-            }
-            ctrl_adr[i] = actuator_id as usize;
-        }
-
-        let timestep = unsafe { (*model).opt.timestep as f32 };
-        let decimation = ((0.02 / timestep).round() as usize).max(1);
+        let sim_started = Instant::now();
+        let sim = MujocoSim::load(&scene_path, &asset_meta.joint_names_isaac, sensor_names)?;
+        let mesh_assets = collect_mesh_assets(sim.model_ptr());
+        let sim_elapsed = sim_started.elapsed();
         let mut scene = unsafe { std::mem::zeroed::<mjvScene>() };
         let mut cam = unsafe { std::mem::zeroed::<mjvCamera>() };
         let mut opt = unsafe { std::mem::zeroed::<mjvOption>() };
@@ -814,20 +1034,42 @@ impl MujocoRuntime {
 
         unsafe {
             mjv_defaultScene(&mut scene);
-            mjv_makeScene(model, &mut scene, 3000);
+            mjv_makeScene(sim.model_ptr(), &mut scene, 3000);
             mjv_defaultCamera(&mut cam);
-            mjv_defaultFreeCamera(model, &mut cam);
+            mjv_defaultFreeCamera(sim.model_ptr(), &mut cam);
             mjv_defaultOption(&mut opt);
             mjr_defaultContext(&mut con);
         }
-        fit_camera_to_model_stat(model, &mut cam);
+        fit_camera_to_model_stat(sim.model_ptr(), &mut cam);
 
-        let mut default_jpos = [0.0f32; 12];
-        default_jpos.copy_from_slice(&asset_meta.default_joint_pos);
-
-        let action_scale = [policy_file.action_scale; 12];
-        let kp = [policy_file.stiffness; 12];
-        let kd = [policy_file.damping; 12];
+        let robot = if controller_kind == "open_duck_mini_walk" {
+            NativeRobotController::Duck(DuckController::new(
+                asset_meta.default_joint_pos.clone(),
+                policy_file.action_scale,
+                policy_file.phase_steps(),
+                sim.timestep(),
+                sim.decimation(),
+            ))
+        } else {
+            if asset_meta.default_joint_pos.len() != 12 {
+                return Err(format!(
+                    "Expected 12 default joint positions for Go2, found {}",
+                    asset_meta.default_joint_pos.len()
+                ));
+            }
+            let mut default_jpos = [0.0f32; 12];
+            default_jpos.copy_from_slice(&asset_meta.default_joint_pos);
+            let action_scale = [policy_file.action_scale; 12];
+            let kp = [policy_file.stiffness; 12];
+            let kd = [policy_file.damping; 12];
+            NativeRobotController::Go2(Go2Controller::new(
+                policy_file.command_mode(),
+                default_jpos,
+                action_scale,
+                kp,
+                kd,
+            ))
+        };
 
         let policy_started = Instant::now();
         debug_log("runtime.load: policy load start");
@@ -842,6 +1084,7 @@ impl MujocoRuntime {
                 })?
                 .join(&policy_file.onnx.path),
             &policy_file.onnx.meta,
+            &controller_kind,
         )?;
         let policy_elapsed = policy_started.elapsed();
         debug_log(&format!(
@@ -849,9 +1092,13 @@ impl MujocoRuntime {
             fmt_duration(policy_elapsed)
         ));
 
+        let initial_setpoint = {
+            let raw = sim.read_raw_state();
+            Some([raw.base_pos[0], raw.base_pos[1], 0.05])
+        };
+
         Ok(Self {
-            model,
-            data,
+            sim,
             scene,
             cam,
             opt,
@@ -859,35 +1106,26 @@ impl MujocoRuntime {
             gl_ready: false,
             texture: None,
             policy,
-            joint_qpos_adr,
-            joint_qvel_adr,
-            ctrl_adr,
-            default_jpos,
-            action_scale,
-            kp,
-            kd,
-            last_actions: [0.0; 12],
-            action_history: [[0.0; 12]; 3],
-            gravity_history: [[0.0, 0.0, -1.0]; 3],
-            joint_pos_history: [[0.0; 12]; 3],
-            joint_vel_history: [[0.0; 12]; 3],
-            adapt_hx: [0.0; 128],
-            is_init: true,
-            command_vel_x: 0.0,
-            timestep,
-            decimation,
+            robot,
+            command: Command {
+                setpoint_world: initial_setpoint,
+                ..Command::default()
+            },
             mujoco_time_ms: 0.0,
             diagnostics: MujocoDiagnostics {
                 load_summary: format!(
-                    "total {} | model {} | policy {}",
+                    "total {} | sim {} | policy {}",
                     fmt_duration(load_started.elapsed()),
-                    fmt_duration(model_elapsed),
+                    fmt_duration(sim_elapsed),
                     fmt_duration(policy_elapsed)
                 ),
                 ..Default::default()
             },
             glow_renderer: Arc::new(Mutex::new(GlowSceneRenderer::default())),
             glow_scene: Arc::new(Mutex::new(GlowSceneFrame::default())),
+            wgpu_scene: Arc::new(Mutex::new(WgpuSceneFrame::default())),
+            mesh_assets,
+            wgpu_renderer: Arc::new(Mutex::new(WgpuSceneRenderer::default())),
         })
     }
 
@@ -915,7 +1153,7 @@ impl MujocoRuntime {
         }
         debug_log("runtime.ensure_gl: mjr_makeContext start");
         unsafe {
-            mjr_makeContext(self.model, &mut self.con, MJ_FONTSCALE_100);
+            mjr_makeContext(self.sim.model_ptr(), &mut self.con, MJ_FONTSCALE_100);
         }
         self.gl_ready = true;
         self.diagnostics.last_gl_init_ms = started.elapsed().as_secs_f32() * 1000.0;
@@ -927,47 +1165,33 @@ impl MujocoRuntime {
     }
 
     fn reset(&mut self) -> Result<(), String> {
-        unsafe {
-            if (*self.model).nkey > 0 {
-                mj_resetDataKeyframe(self.model, self.data, 0);
-            } else {
-                mj_resetData(self.model, self.data);
-            }
-            mj_forward(self.model, self.data);
-        }
-
-        self.last_actions = [0.0; 12];
-        self.action_history = [[0.0; 12]; 3];
-        self.gravity_history = [[0.0, 0.0, -1.0]; 3];
-        self.joint_pos_history = [[0.0; 12]; 3];
-        self.joint_vel_history = [[0.0; 12]; 3];
-        self.adapt_hx = [0.0; 128];
-        self.is_init = true;
+        self.sim.reset()?;
+        self.robot.reset();
         self.mujoco_time_ms = 0.0;
+        let raw = self.sim.read_raw_state();
+        self.command.setpoint_world = Some([raw.base_pos[0], raw.base_pos[1], 0.05]);
         Ok(())
     }
 
     fn reset_camera(&mut self) {
         unsafe {
             mjv_defaultCamera(&mut self.cam);
-            mjv_defaultFreeCamera(self.model, &mut self.cam);
+            mjv_defaultFreeCamera(self.sim.model_ptr(), &mut self.cam);
         }
-        fit_camera_to_model_stat(self.model, &mut self.cam);
+        fit_camera_to_model_stat(self.sim.model_ptr(), &mut self.cam);
     }
 
     fn step(&mut self, sim_speed: usize, command_vel_x: f32) -> Result<(), String> {
         let started = Instant::now();
-        self.command_vel_x = command_vel_x;
+        self.command.vel_x = command_vel_x;
         for _ in 0..sim_speed {
             self.update_policy_input()?;
             self.run_policy()?;
 
-            for _ in 0..self.decimation {
+            for _ in 0..self.sim.decimation() {
                 self.apply_control();
-                unsafe {
-                    mj_step(self.model, self.data);
-                }
-                self.mujoco_time_ms += self.timestep * 1000.0;
+                self.sim.step_substeps(1);
+                self.mujoco_time_ms += self.sim.timestep() * 1000.0;
             }
         }
         self.diagnostics.last_step_ms = started.elapsed().as_secs_f32() * 1000.0;
@@ -975,146 +1199,53 @@ impl MujocoRuntime {
     }
 
     fn update_policy_input(&mut self) -> Result<(), String> {
-        let qpos =
-            unsafe { std::slice::from_raw_parts((*self.data).qpos, (*self.model).nq as usize) };
-        let qvel =
-            unsafe { std::slice::from_raw_parts((*self.data).qvel, (*self.model).nv as usize) };
-
-        let base_qpos = &qpos[0..7];
-        let quat = [
-            base_qpos[3] as f32,
-            base_qpos[4] as f32,
-            base_qpos[5] as f32,
-            base_qpos[6] as f32,
-        ];
-        let gravity = rotate_vector_by_inverse_quaternion(quat, [0.0, 0.0, -1.0]);
-
-        shift_history_3(&mut self.gravity_history, gravity);
-
-        let mut joint_pos = [0.0f32; 12];
-        let mut joint_vel = [0.0f32; 12];
-        for i in 0..12 {
-            joint_pos[i] = qpos[self.joint_qpos_adr[i]] as f32;
-            joint_vel[i] = qvel[self.joint_qvel_adr[i]] as f32;
+        let raw = self.sim.read_raw_state();
+        if let NativeRobotController::Go2(robot) = &mut self.robot {
+            robot.update_from_raw_state(&raw);
         }
-        shift_history_12(&mut self.joint_pos_history, joint_pos);
-        shift_history_12(&mut self.joint_vel_history, joint_vel);
         Ok(())
     }
 
     fn run_policy(&mut self) -> Result<(), String> {
         let started = Instant::now();
-        let policy_input = self.flatten_policy_input();
-        let command_input = self.compute_command_input();
-        let (action, next_hx) =
-            self.policy
-                .run(&policy_input, self.is_init, &self.adapt_hx, &command_input)?;
-
-        if action.len() < 12 {
-            return Err(format!(
-                "Policy returned {} actions, expected at least 12",
-                action.len()
-            ));
+        let raw = self.sim.read_raw_state();
+        match &mut self.robot {
+            NativeRobotController::Go2(robot) => {
+                let observation = robot.build_observation();
+                let command_input = robot.build_command_input(&raw, &self.command);
+                let (action, next_hx) = self.policy.run_go2(
+                    &observation.values,
+                    robot.is_init(),
+                    robot.adapt_hx(),
+                    &command_input.values,
+                )?;
+                robot.integrate_policy_output(&PolicyOutput {
+                    actions: action,
+                    recurrent: next_hx,
+                })?;
+            }
+            NativeRobotController::Duck(robot) => {
+                let observation = robot.build_observation(&raw, &self.command);
+                let action = self.policy.run_duck(&observation.values)?;
+                robot.integrate_policy_output(&PolicyOutput {
+                    actions: action,
+                    recurrent: Vec::new(),
+                })?;
+            }
         }
-        if next_hx.len() < 128 {
-            return Err(format!(
-                "Policy returned {} recurrent values, expected at least 128",
-                next_hx.len()
-            ));
-        }
-
-        let mut smoothed = [0.0f32; 12];
-        for i in 0..12 {
-            smoothed[i] = self.last_actions[i] * 0.2 + action[i] * 0.8;
-        }
-
-        self.last_actions = smoothed;
-        shift_history_12(&mut self.action_history, self.last_actions);
-        self.adapt_hx.copy_from_slice(&next_hx[0..128]);
-        self.is_init = false;
         self.diagnostics.last_policy_ms = started.elapsed().as_secs_f32() * 1000.0;
         Ok(())
     }
 
     fn apply_control(&mut self) {
-        let qpos =
-            unsafe { std::slice::from_raw_parts((*self.data).qpos, (*self.model).nq as usize) };
-        let qvel =
-            unsafe { std::slice::from_raw_parts((*self.data).qvel, (*self.model).nv as usize) };
-        let ctrl =
-            unsafe { std::slice::from_raw_parts_mut((*self.data).ctrl, (*self.model).nu as usize) };
-
-        for i in 0..12 {
-            let target = self.action_scale[i] * self.last_actions[i] + self.default_jpos[i];
-            let torque = self.kp[i] * (target - qpos[self.joint_qpos_adr[i]] as f32)
-                + self.kd[i] * (0.0 - qvel[self.joint_qvel_adr[i]] as f32);
-            ctrl[self.ctrl_adr[i]] = torque as f64;
-        }
-    }
-
-    fn flatten_policy_input(&self) -> [f32; 117] {
-        let mut out = [0.0f32; 117];
-        let mut idx = 0;
-
-        for step in &self.gravity_history {
-            for value in step {
-                out[idx] = *value;
-                idx += 1;
+        let actuation = match &mut self.robot {
+            NativeRobotController::Go2(robot) => {
+                let raw = self.sim.read_raw_state();
+                robot.decode_actuation(&raw)
             }
-        }
-        for step in &self.joint_pos_history {
-            for value in step {
-                out[idx] = *value;
-                idx += 1;
-            }
-        }
-        for step in &self.joint_vel_history {
-            for value in step {
-                out[idx] = *value;
-                idx += 1;
-            }
-        }
-        for joint in 0..12 {
-            for step in &self.action_history {
-                out[idx] = step[joint];
-                idx += 1;
-            }
-        }
-
-        out
-    }
-
-    fn compute_command_input(&self) -> [f32; 16] {
-        let qpos =
-            unsafe { std::slice::from_raw_parts((*self.data).qpos, (*self.model).nq as usize) };
-        let quat = [
-            qpos[3] as f32,
-            qpos[4] as f32,
-            qpos[5] as f32,
-            qpos[6] as f32,
-        ];
-        let command = rotate_vector_by_inverse_quaternion(quat, [self.command_vel_x, 0.0, 0.0]);
-        let yaw = quaternion_yaw(quat);
-        let oscillator = oscillator(self.mujoco_time_ms / 1000.0);
-
-        [
-            command[0],
-            command[1],
-            -yaw,
-            0.0,
-            oscillator[0],
-            oscillator[1],
-            oscillator[2],
-            oscillator[3],
-            oscillator[4],
-            oscillator[5],
-            oscillator[6],
-            oscillator[7],
-            oscillator[8],
-            oscillator[9],
-            oscillator[10],
-            oscillator[11],
-        ]
+            NativeRobotController::Duck(robot) => robot.decode_actuation(),
+        };
+        let _ = self.sim.apply_actuation(&actuation);
     }
 
     fn render(
@@ -1143,8 +1274,8 @@ impl MujocoRuntime {
 
         unsafe {
             mjv_updateScene(
-                self.model,
-                self.data,
+                self.sim.model_ptr(),
+                self.sim.data_ptr(),
                 &self.opt,
                 std::ptr::null::<mjvPerturb>(),
                 &mut self.cam,
@@ -1287,7 +1418,69 @@ impl MujocoRuntime {
         Ok(())
     }
 
-    fn render_software_2d(&mut self, ui: &mut Ui, desired_size: egui::Vec2) {
+    fn render_wgpu(
+        &mut self,
+        ui: &mut Ui,
+        render_state: &egui_wgpu::RenderState,
+        _desired_size: egui::Vec2,
+        diagnostic_colors: bool,
+        mesh_filter: Option<usize>,
+    ) -> Result<(), String> {
+        let started = Instant::now();
+        let rect = aligned_viewport_rect(ui);
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        self.update_software_camera(ui, &response);
+        self.update_visual_scene();
+        let frame = self.build_wgpu_scene_frame(
+            (rect.width() / rect.height()).max(0.1),
+            diagnostic_colors,
+            mesh_filter,
+        )?;
+        {
+            let mut scene = self
+                .wgpu_scene
+                .lock()
+                .map_err(|_| "Failed to lock WGPU scene state".to_string())?;
+            *scene = frame;
+        }
+        {
+            let mut renderer = self
+                .wgpu_renderer
+                .lock()
+                .map_err(|_| "Failed to lock WGPU renderer".to_string())?;
+            renderer.ensure_mesh_assets(&render_state.device, &self.mesh_assets);
+        }
+
+        let callback = NativeWgpuCallback {
+            rect,
+            renderer: self.wgpu_renderer.clone(),
+            scene: self.wgpu_scene.clone(),
+            target_format: render_state.target_format,
+        };
+        ui.painter()
+            .add(egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
+                rect, callback,
+            )));
+
+        let overlay = self.software_overlay_text();
+        ui.painter().text(
+            rect.left_top() + vec2(12.0, 12.0),
+            Align2::LEFT_TOP,
+            &overlay,
+            FontId::monospace(12.0),
+            Color32::from_gray(210),
+        );
+
+        if let Ok(renderer) = self.wgpu_renderer.lock() {
+            self.diagnostics.last_render_ms = renderer.last_render_ms_ms;
+        } else {
+            self.diagnostics.last_render_ms = started.elapsed().as_secs_f32() * 1000.0;
+        }
+        self.diagnostics.frame_count += 1;
+        Ok(())
+    }
+
+    fn render_software_2d(&mut self, ui: &mut Ui, _desired_size: egui::Vec2) {
         let started = Instant::now();
         let rect = aligned_viewport_rect(ui);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -1316,6 +1509,8 @@ impl MujocoRuntime {
             self.draw_geom_software(&painter, rect, &geoms[idx], camera.as_ref());
         }
 
+        self.draw_command_setpoint(&painter, rect, camera.as_ref());
+
         let overlay = self.software_overlay_text();
         painter.text(
             rect.left_top() + vec2(12.0, 12.0),
@@ -1329,11 +1524,36 @@ impl MujocoRuntime {
         self.diagnostics.frame_count += 1;
     }
 
+    fn draw_command_setpoint(&self, painter: &Painter, rect: Rect, camera: Option<&SoftwareCamera>) {
+        let Some(setpoint) = self.command.setpoint_world else {
+            return;
+        };
+        let raw = self.sim.read_raw_state();
+        let start = [raw.base_pos[0], raw.base_pos[1], setpoint[2]];
+        if let Some(camera) = camera {
+            if let (Some((start_pos, _)), Some((setpoint_pos, _))) =
+                (camera.project(rect, start), camera.project(rect, setpoint))
+            {
+                painter.line_segment(
+                    [start_pos, setpoint_pos],
+                    Stroke::new(2.0, Color32::from_rgb(220, 90, 90)),
+                );
+                let radius = camera.project_radius(rect, setpoint, 0.05).clamp(6.0, 18.0);
+                painter.circle_filled(setpoint_pos, radius, Color32::from_rgb(220, 70, 70));
+                painter.circle_stroke(
+                    setpoint_pos,
+                    radius,
+                    Stroke::new(1.5, Color32::from_rgb(255, 220, 220)),
+                );
+            }
+        }
+    }
+
     fn update_visual_scene(&mut self) {
         unsafe {
             mjv_updateScene(
-                self.model,
-                self.data,
+                self.sim.model_ptr(),
+                self.sim.data_ptr(),
                 &self.opt,
                 std::ptr::null::<mjvPerturb>(),
                 &mut self.cam,
@@ -1348,7 +1568,18 @@ impl MujocoRuntime {
             self.reset_camera();
         }
 
-        if response.dragged_by(PointerButton::Primary) {
+        let software_camera = SoftwareCamera::from_gl(&self.scene.camera[0], response.rect.aspect_ratio());
+        if self.robot.uses_setpoint_ball() {
+            if response.dragged_by(PointerButton::Primary) {
+                if let (Some(pointer), Some(camera)) = (response.interact_pointer_pos(), software_camera.as_ref()) {
+                    if let Some(world) = camera.intersect_plane_z(response.rect, pointer, 0.05) {
+                        self.command.setpoint_world = Some(world);
+                        self.command.vel_x = world[0] - self.sim.read_raw_state().base_pos[0];
+                        self.command.vel_y = world[1] - self.sim.read_raw_state().base_pos[1];
+                    }
+                }
+            }
+        } else if response.dragged_by(PointerButton::Primary) {
             let delta = response.drag_delta();
             self.cam.azimuth -= delta.x as f64 * 0.25;
             self.cam.elevation = (self.cam.elevation + delta.y as f64 * 0.2).clamp(-89.0, 89.0);
@@ -1356,14 +1587,8 @@ impl MujocoRuntime {
 
         if response.dragged_by(PointerButton::Secondary) {
             let delta = response.drag_delta();
-            let forward = orbit_forward(self.cam.azimuth as f32, self.cam.elevation as f32);
-            let right = normalize3(cross3(forward, [0.0, 0.0, 1.0]));
-            let up = normalize3(cross3(right, forward));
-            let pan_scale = self.cam.distance as f32 * 0.0025;
-            for axis in 0..3 {
-                self.cam.lookat[axis] -=
-                    (right[axis] * delta.x + up[axis] * delta.y) as f64 * pan_scale as f64;
-            }
+            self.cam.azimuth -= delta.x as f64 * 0.25;
+            self.cam.elevation = (self.cam.elevation - delta.y as f64 * 0.2).clamp(-89.0, 89.0);
         }
 
         if response.hovered() {
@@ -1376,37 +1601,35 @@ impl MujocoRuntime {
     }
 
     fn software_overlay_text(&self) -> String {
-        let qpos =
-            unsafe { std::slice::from_raw_parts((*self.data).qpos, (*self.model).nq as usize) };
-        let qvel =
-            unsafe { std::slice::from_raw_parts((*self.data).qvel, (*self.model).nv as usize) };
-        let quat = [
-            qpos[3] as f32,
-            qpos[4] as f32,
-            qpos[5] as f32,
-            qpos[6] as f32,
-        ];
-        let yaw_deg = quaternion_yaw(quat).to_degrees();
-        let planar_speed = (qvel[0] as f32).hypot(qvel[1] as f32);
+        let raw = self.sim.read_raw_state();
+        let yaw_deg = quaternion_yaw(raw.base_quat).to_degrees();
+        let planar_speed = raw.base_lin_vel[0].hypot(raw.base_lin_vel[1]);
         let (triangles, lines) = self
             .glow_scene
             .lock()
             .map(|scene| (scene.triangles.len() / 3, scene.lines.len() / 2))
             .unwrap_or((0, 0));
 
+        let command_hint = if self.robot.uses_setpoint_ball() {
+            "Left-drag: setpoint | Right-drag: orbit | Wheel: zoom | Double-click: reset view"
+        } else {
+            "Drag: orbit | Right-drag: orbit | Wheel: zoom | Double-click: reset view"
+        };
         format!(
             concat!(
-                "Glow 3D fallback renderer\n",
-                "Sim t={:.2}s  cmd_vx={:+.2}  speed={:.2}  z={:.2}  yaw={:+.1}deg\n",
+                "Native MuJoCo fallback renderer\n",
+                "Sim t={:.2}s  cmd=({:+.2}, {:+.2})  speed={:.2}  z={:.2}  yaw={:+.1}deg\n",
                 "Cam az={:+.1}  el={:+.1}  dist={:.2}  lookat=({:+.2}, {:+.2}, {:+.2})\n",
+                "Setpoint {:?}\n",
                 "Step {:.2} ms  Policy {:.2} ms  Render {:.2} ms  Frames {}\n",
                 "Glow tris {}  lines {}\n",
-                "Drag: orbit | Right-drag: pan | Wheel: zoom | Double-click: reset view"
+                "{}"
             ),
             self.mujoco_time_ms / 1000.0,
-            self.command_vel_x,
+            self.command.vel_x,
+            self.command.vel_y,
             planar_speed,
-            qpos[2] as f32,
+            raw.base_pos[2],
             yaw_deg,
             self.cam.azimuth as f32,
             self.cam.elevation as f32,
@@ -1414,12 +1637,14 @@ impl MujocoRuntime {
             self.cam.lookat[0] as f32,
             self.cam.lookat[1] as f32,
             self.cam.lookat[2] as f32,
+            self.command.setpoint_world,
             self.diagnostics.last_step_ms,
             self.diagnostics.last_policy_ms,
             self.diagnostics.last_render_ms,
             self.diagnostics.frame_count,
             triangles,
             lines,
+            command_hint,
         )
     }
 
@@ -1603,7 +1828,8 @@ impl MujocoRuntime {
 
         let mut mesh_diagnostics = Vec::new();
         let mut mesh_assets = BTreeMap::<usize, MeshAssetStats>::new();
-        let ngeom = unsafe { (*self.model).ngeom as usize };
+        let model = self.sim.model_ptr();
+        let ngeom = unsafe { (*model).ngeom as usize };
         for geom_id in 0..ngeom {
             let Some(geom) = self.model_geom_instance(geom_id) else {
                 continue;
@@ -1644,6 +1870,8 @@ impl MujocoRuntime {
             }
         }
 
+        self.append_command_setpoint_scene(&mut frame.triangles, &mut frame.lines);
+
         frame.view_proj = camera.fitted_view_projection_matrix(&frame.triangles);
 
         if GLOW_SCENE_LOGGED.get().is_none() {
@@ -1670,7 +1898,7 @@ impl MujocoRuntime {
                 debug_log(line);
             }
             for stats in mesh_assets.values() {
-                debug_log(&stats.describe(self.model));
+                debug_log(&stats.describe(model));
             }
             let _ = MESH_DIAGNOSTICS_LOGGED.set(());
         }
@@ -1678,19 +1906,135 @@ impl MujocoRuntime {
         Ok(frame)
     }
 
+    fn build_wgpu_scene_frame(
+        &self,
+        aspect: f32,
+        diagnostic_colors: bool,
+        mesh_filter: Option<usize>,
+    ) -> Result<WgpuSceneFrame, String> {
+        let camera = SoftwareCamera::from_gl(&self.scene.camera[0], aspect)
+            .ok_or_else(|| "MuJoCo scene camera is not available for wgpu renderer".to_string())?;
+        let mut frame = WgpuSceneFrame::default();
+        let mut depth_points = Vec::new();
+
+        append_grid_lines(&mut frame.lines);
+        for line in &frame.lines {
+            depth_points.push(line.position);
+        }
+
+        let model = self.sim.model_ptr();
+        let ngeom = unsafe { (*model).ngeom as usize };
+        for geom_id in 0..ngeom {
+            let Some(geom) = self.model_geom_instance(geom_id) else {
+                continue;
+            };
+
+            match geom.type_ {
+                MJ_GEOM_PLANE => {}
+                MJ_GEOM_SPHERE => {
+                    let start = frame.triangles.len();
+                    append_sphere_geom(&mut frame.triangles, &geom, 12, 20, diagnostic_colors);
+                    depth_points.extend(frame.triangles[start..].iter().map(|v| v.position));
+                }
+                MJ_GEOM_CAPSULE => {
+                    let start = frame.triangles.len();
+                    append_capsule_geom(&mut frame.triangles, &geom, 10, 18, diagnostic_colors);
+                    depth_points.extend(frame.triangles[start..].iter().map(|v| v.position));
+                }
+                MJ_GEOM_CYLINDER => {
+                    let start = frame.triangles.len();
+                    append_cylinder_geom(&mut frame.triangles, &geom, 18, diagnostic_colors);
+                    depth_points.extend(frame.triangles[start..].iter().map(|v| v.position));
+                }
+                MJ_GEOM_BOX => {
+                    let start = frame.triangles.len();
+                    append_box_geom(&mut frame.triangles, &geom, diagnostic_colors);
+                    depth_points.extend(frame.triangles[start..].iter().map(|v| v.position));
+                }
+                MJ_GEOM_MESH => {
+                    if let Some(filter) = mesh_filter {
+                        if self.resolve_mesh_id(&geom) != Some(filter) {
+                            continue;
+                        }
+                    }
+                    if let Some(instance) = self.build_mesh_instance(&geom, diagnostic_colors) {
+                        if let Some(asset) = self.mesh_assets.get(&(instance.mesh_id as usize)) {
+                            extend_depth_points_with_mesh_bounds(
+                                &mut depth_points,
+                                asset,
+                                &instance.model,
+                            );
+                        }
+                        frame.mesh_instances.push(instance);
+                    }
+                }
+                MJ_GEOM_LINE => {
+                    let start = frame.lines.len();
+                    append_line_geom(&mut frame.lines, &geom, diagnostic_colors);
+                    depth_points.extend(frame.lines[start..].iter().map(|v| v.position));
+                }
+                _ => {}
+            }
+        }
+
+        self.append_command_setpoint_scene(&mut frame.triangles, &mut frame.lines);
+        if let Some(setpoint) = self.command.setpoint_world {
+            let raw = self.sim.read_raw_state();
+            let start = [raw.base_pos[0], raw.base_pos[1], setpoint[2]];
+            depth_points.push(start);
+            depth_points.push(setpoint);
+            let marker_radius = 0.05;
+            for sx in [-marker_radius, marker_radius] {
+                for sy in [-marker_radius, marker_radius] {
+                    for sz in [-marker_radius, marker_radius] {
+                        depth_points.push([setpoint[0] + sx, setpoint[1] + sy, setpoint[2] + sz]);
+                    }
+                }
+            }
+        }
+
+        frame
+            .mesh_instances
+            .sort_by_key(|instance| instance.mesh_id);
+        frame.view_proj = camera.fitted_view_projection_matrix_points(&depth_points);
+        Ok(frame)
+    }
+
+    fn append_command_setpoint_scene(
+        &self,
+        triangles: &mut Vec<GlVertex>,
+        lines: &mut Vec<GlVertex>,
+    ) {
+        let Some(setpoint) = self.command.setpoint_world else {
+            return;
+        };
+        let raw = self.sim.read_raw_state();
+        let start = [raw.base_pos[0], raw.base_pos[1], setpoint[2]];
+        push_line(
+            lines,
+            start,
+            setpoint,
+            [0.92, 0.24, 0.24, 1.0],
+        );
+        let marker = world_sphere_geom(setpoint, 0.05, [0.92, 0.24, 0.24, 1.0]);
+        append_sphere_geom(triangles, &marker, 10, 16, false);
+    }
+
     fn model_geom_instance(&self, geom_id: usize) -> Option<mjvGeom> {
         unsafe {
-            if geom_id >= (*self.model).ngeom as usize {
+            let model = self.sim.model_ptr();
+            let data = self.sim.data_ptr();
+            if geom_id >= (*model).ngeom as usize {
                 return None;
             }
 
-            if *(*self.model).geom_group.add(geom_id) >= 3 {
+            if *(*model).geom_group.add(geom_id) >= 3 {
                 return None;
             }
 
-            let type_ = *(*self.model).geom_type.add(geom_id);
-            let dataid = *(*self.model).geom_dataid.add(geom_id);
-            let matid = *(*self.model).geom_matid.add(geom_id);
+            let type_ = *(*model).geom_type.add(geom_id);
+            let dataid = *(*model).geom_dataid.add(geom_id);
+            let matid = *(*model).geom_matid.add(geom_id);
             let mut geom = std::mem::zeroed::<mjvGeom>();
             geom.type_ = type_;
             geom.objtype = MJ_OBJ_GEOM;
@@ -1698,17 +2042,17 @@ impl MujocoRuntime {
             geom.dataid = if dataid >= 0 { dataid * 2 } else { -1 };
 
             for axis in 0..3 {
-                geom.size[axis] = *(*self.model).geom_size.add(geom_id * 3 + axis) as f32;
-                geom.pos[axis] = *(*self.data).geom_xpos.add(geom_id * 3 + axis) as f32;
+                geom.size[axis] = *(*model).geom_size.add(geom_id * 3 + axis) as f32;
+                geom.pos[axis] = *(*data).geom_xpos.add(geom_id * 3 + axis) as f32;
             }
             for idx in 0..9 {
-                geom.mat[idx] = *(*self.data).geom_xmat.add(geom_id * 9 + idx) as f32;
+                geom.mat[idx] = *(*data).geom_xmat.add(geom_id * 9 + idx) as f32;
             }
 
             let rgba_src = if matid >= 0 {
-                (*self.model).mat_rgba.add(matid as usize * 4)
+                (*model).mat_rgba.add(matid as usize * 4)
             } else {
-                (*self.model).geom_rgba.add(geom_id * 4)
+                (*model).geom_rgba.add(geom_id * 4)
             };
             for idx in 0..4 {
                 geom.rgba[idx] = (*rgba_src.add(idx) as f32).clamp(0.0, 1.0);
@@ -1732,26 +2076,21 @@ impl MujocoRuntime {
         };
 
         unsafe {
-            let vertadr = *(*self.model).mesh_vertadr.add(mesh_id) as usize;
-            let vertnum = *(*self.model).mesh_vertnum.add(mesh_id) as usize;
-            let faceadr = *(*self.model).mesh_faceadr.add(mesh_id) as usize;
-            let facenum = *(*self.model).mesh_facenum.add(mesh_id) as usize;
+            let model = self.sim.model_ptr();
+            let vertadr = *(*model).mesh_vertadr.add(mesh_id) as usize;
+            let vertnum = *(*model).mesh_vertnum.add(mesh_id) as usize;
+            let faceadr = *(*model).mesh_faceadr.add(mesh_id) as usize;
+            let facenum = *(*model).mesh_facenum.add(mesh_id) as usize;
             if vertnum == 0 || facenum == 0 {
                 return None;
             }
 
-            let all_vertices = std::slice::from_raw_parts(
-                (*self.model).mesh_vert,
-                (*self.model).nmeshvert as usize * 3,
-            );
-            let all_normals = std::slice::from_raw_parts(
-                (*self.model).mesh_normal,
-                (*self.model).nmeshvert as usize * 3,
-            );
-            let all_faces = std::slice::from_raw_parts(
-                (*self.model).mesh_face,
-                (*self.model).nmeshface as usize * 3,
-            );
+            let all_vertices =
+                std::slice::from_raw_parts((*model).mesh_vert, (*model).nmeshvert as usize * 3);
+            let all_normals =
+                std::slice::from_raw_parts((*model).mesh_normal, (*model).nmeshvert as usize * 3);
+            let all_faces =
+                std::slice::from_raw_parts((*model).mesh_face, (*model).nmeshface as usize * 3);
             let local_vertices = &all_vertices[vertadr * 3..(vertadr + vertnum) * 3];
             let local_normals = &all_normals[vertadr * 3..(vertadr + vertnum) * 3];
             let face_slice = &all_faces[faceadr * 3..(faceadr + facenum) * 3];
@@ -1796,11 +2135,28 @@ impl MujocoRuntime {
         }
     }
 
+    fn build_mesh_instance(&self, geom: &mjvGeom, diagnostic_colors: bool) -> Option<MeshInstance> {
+        let mesh_id = self.resolve_mesh_id(geom)? as u32;
+        let color = display_geom_color(geom, diagnostic_colors);
+        Some(MeshInstance {
+            model: [
+                [geom.mat[0], geom.mat[3], geom.mat[6], 0.0],
+                [geom.mat[1], geom.mat[4], geom.mat[7], 0.0],
+                [geom.mat[2], geom.mat[5], geom.mat[8], 0.0],
+                [geom.pos[0], geom.pos[1], geom.pos[2], 1.0],
+            ],
+            color,
+            mesh_id,
+            _padding: [0; 3],
+        })
+    }
+
     fn resolve_mesh_id(&self, geom: &mjvGeom) -> Option<usize> {
         unsafe {
+            let model = self.sim.model_ptr();
             if geom.objtype == MJ_OBJ_GEOM && geom.objid >= 0 {
                 let geom_id = geom.objid as usize;
-                let dataid = *(*self.model).geom_dataid.add(geom_id);
+                let dataid = *(*model).geom_dataid.add(geom_id);
                 if dataid >= 0 {
                     return Some(dataid as usize);
                 }
@@ -1816,18 +2172,17 @@ impl MujocoRuntime {
 
     fn describe_mesh_geom(&self, geom: &mjvGeom) -> String {
         let resolved = self.resolve_mesh_id(geom);
-        let geom_name =
-            object_name(self.model, MJ_OBJ_GEOM, geom.objid).unwrap_or_else(|| "-".to_string());
+        let geom_name = object_name(self.sim.model_ptr(), MJ_OBJ_GEOM, geom.objid)
+            .unwrap_or_else(|| "-".to_string());
         let (vertnum, facenum, vertadr, faceadr, local_mode) = if let Some(mesh_id) = resolved {
             unsafe {
-                let vertadr = *(*self.model).mesh_vertadr.add(mesh_id) as usize;
-                let vertnum = *(*self.model).mesh_vertnum.add(mesh_id) as usize;
-                let faceadr = *(*self.model).mesh_faceadr.add(mesh_id) as usize;
-                let facenum = *(*self.model).mesh_facenum.add(mesh_id) as usize;
-                let all_faces = std::slice::from_raw_parts(
-                    (*self.model).mesh_face,
-                    (*self.model).nmeshface as usize * 3,
-                );
+                let model = self.sim.model_ptr();
+                let vertadr = *(*model).mesh_vertadr.add(mesh_id) as usize;
+                let vertnum = *(*model).mesh_vertnum.add(mesh_id) as usize;
+                let faceadr = *(*model).mesh_faceadr.add(mesh_id) as usize;
+                let facenum = *(*model).mesh_facenum.add(mesh_id) as usize;
+                let all_faces =
+                    std::slice::from_raw_parts((*model).mesh_face, (*model).nmeshface as usize * 3);
                 let face_slice = &all_faces[faceadr * 3..(faceadr + facenum) * 3];
                 let local_mode = face_slice
                     .iter()
@@ -1864,7 +2219,7 @@ impl MujocoRuntime {
 
     fn mesh_filter_label(&self, mesh_filter: i32) -> String {
         normalize_mesh_filter(mesh_filter)
-            .and_then(|mesh_id| object_name(self.model, MJ_OBJ_MESH, mesh_id as i32))
+            .and_then(|mesh_id| object_name(self.sim.model_ptr(), MJ_OBJ_MESH, mesh_id as i32))
             .unwrap_or_else(|| "unknown".to_string())
     }
 }
@@ -1875,6 +2230,157 @@ struct GlowSceneFrame {
     triangles: Vec<GlVertex>,
     lines: Vec<GlVertex>,
     view_proj: [f32; 16],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default, Clone)]
+struct WgpuSceneFrame {
+    triangles: Vec<GlVertex>,
+    lines: Vec<GlVertex>,
+    mesh_instances: Vec<MeshInstance>,
+    view_proj: [f32; 16],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeWgpuCallback {
+    rect: Rect,
+    renderer: Arc<Mutex<WgpuSceneRenderer>>,
+    scene: Arc<Mutex<WgpuSceneFrame>>,
+    target_format: wgpu::TextureFormat,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl egui_wgpu::CallbackTrait for NativeWgpuCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        _callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let render_result = (|| -> Result<wgpu::CommandBuffer, String> {
+            let scene = self
+                .scene
+                .lock()
+                .map_err(|_| "Failed to lock WGPU scene frame".to_string())?;
+            let mut renderer = self
+                .renderer
+                .lock()
+                .map_err(|_| "Failed to lock WGPU renderer".to_string())?;
+            renderer.prepare(
+                device,
+                queue,
+                self.rect,
+                screen_descriptor,
+                self.target_format,
+                &scene,
+            )
+        })();
+
+        match render_result {
+            Ok(command_buffer) => vec![command_buffer],
+            Err(err) => {
+                if let Ok(mut renderer) = self.renderer.lock() {
+                    if renderer.last_error.as_deref() != Some(err.as_str()) {
+                        debug_log(&format!("runtime.render_wgpu: prepare error: {err}"));
+                    }
+                    renderer.last_error = Some(err);
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        _callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        let render_result = (|| -> Result<(), String> {
+            let mut renderer = self
+                .renderer
+                .lock()
+                .map_err(|_| "Failed to lock WGPU renderer".to_string())?;
+            renderer.paint(render_pass)
+        })();
+
+        if let Err(err) = render_result {
+            if let Ok(mut renderer) = self.renderer.lock() {
+                if renderer.last_error.as_deref() != Some(err.as_str()) {
+                    debug_log(&format!("runtime.render_wgpu: paint error: {err}"));
+                }
+                renderer.last_error = Some(err);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct WgpuSceneUniform {
+    view_proj: [f32; 16],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MeshLocalVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MeshInstance {
+    model: [[f32; 4]; 4],
+    color: [f32; 4],
+    mesh_id: u32,
+    _padding: [u32; 3],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct MeshAssetCpu {
+    vertices: Vec<MeshLocalVertex>,
+    local_min: [f32; 3],
+    local_max: [f32; 3],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct MeshAssetGpu {
+    vertex_buffer: wgpu::Buffer,
+    vertex_count: u32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct WgpuSceneRenderer {
+    scene_pipeline: Option<wgpu::RenderPipeline>,
+    line_pipeline: Option<wgpu::RenderPipeline>,
+    mesh_pipeline: Option<wgpu::RenderPipeline>,
+    present_pipeline: Option<wgpu::RenderPipeline>,
+    uniform_buffer: Option<wgpu::Buffer>,
+    uniform_bind_group: Option<wgpu::BindGroup>,
+    triangle_buffer: Option<wgpu::Buffer>,
+    line_buffer: Option<wgpu::Buffer>,
+    mesh_instance_buffer: Option<wgpu::Buffer>,
+    triangle_capacity: u64,
+    line_capacity: u64,
+    mesh_instance_capacity: u64,
+    sampler: Option<wgpu::Sampler>,
+    present_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    present_bind_group: Option<wgpu::BindGroup>,
+    offscreen_texture: Option<wgpu::Texture>,
+    offscreen_view: Option<wgpu::TextureView>,
+    depth_texture: Option<wgpu::Texture>,
+    depth_view: Option<wgpu::TextureView>,
+    offscreen_size: [u32; 2],
+    mesh_assets: BTreeMap<usize, MeshAssetGpu>,
+    last_error: Option<String>,
+    last_render_ms_ms: f32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1897,6 +2403,571 @@ struct GlowSceneRenderer {
     u_present_texture: Option<glow::NativeUniformLocation>,
     last_error: Option<String>,
     last_render_ms_ms: f32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WgpuSceneRenderer {
+    fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rect: Rect,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        target_format: wgpu::TextureFormat,
+        scene: &WgpuSceneFrame,
+    ) -> Result<wgpu::CommandBuffer, String> {
+        let started = Instant::now();
+        let width = (rect.width() * screen_descriptor.pixels_per_point)
+            .round()
+            .max(2.0) as u32;
+        let height = (rect.height() * screen_descriptor.pixels_per_point)
+            .round()
+            .max(2.0) as u32;
+
+        self.ensure_initialized(device, target_format)?;
+        self.ensure_offscreen_target(device, width, height)?;
+        self.ensure_vertex_capacity(device, scene)?;
+
+        if let Some(buffer) = self.uniform_buffer.as_ref() {
+            let uniform = WgpuSceneUniform {
+                view_proj: scene.view_proj,
+            };
+            queue.write_buffer(buffer, 0, slice_as_u8(std::slice::from_ref(&uniform)));
+        }
+        if let Some(buffer) = self.triangle_buffer.as_ref() {
+            if !scene.triangles.is_empty() {
+                queue.write_buffer(buffer, 0, slice_as_u8(&scene.triangles));
+            }
+        }
+        if let Some(buffer) = self.line_buffer.as_ref() {
+            if !scene.lines.is_empty() {
+                queue.write_buffer(buffer, 0, slice_as_u8(&scene.lines));
+            }
+        }
+        if let Some(buffer) = self.mesh_instance_buffer.as_ref() {
+            if !scene.mesh_instances.is_empty() {
+                queue.write_buffer(buffer, 0, slice_as_u8(&scene.mesh_instances));
+            }
+        }
+
+        let offscreen_view = self
+            .offscreen_view
+            .as_ref()
+            .ok_or_else(|| "WGPU offscreen view missing".to_string())?;
+        let depth_view = self
+            .depth_view
+            .as_ref()
+            .ok_or_else(|| "WGPU depth view missing".to_string())?;
+        let scene_pipeline = self
+            .scene_pipeline
+            .as_ref()
+            .ok_or_else(|| "WGPU scene pipeline missing".to_string())?;
+        let line_pipeline = self
+            .line_pipeline
+            .as_ref()
+            .ok_or_else(|| "WGPU line pipeline missing".to_string())?;
+        let uniform_bind_group = self
+            .uniform_bind_group
+            .as_ref()
+            .ok_or_else(|| "WGPU uniform bind group missing".to_string())?;
+        let triangle_buffer = self
+            .triangle_buffer
+            .as_ref()
+            .ok_or_else(|| "WGPU triangle buffer missing".to_string())?;
+        let line_buffer = self
+            .line_buffer
+            .as_ref()
+            .ok_or_else(|| "WGPU line buffer missing".to_string())?;
+        let mesh_pipeline = self
+            .mesh_pipeline
+            .as_ref()
+            .ok_or_else(|| "WGPU mesh pipeline missing".to_string())?;
+        let mesh_instance_buffer = self
+            .mesh_instance_buffer
+            .as_ref()
+            .ok_or_else(|| "WGPU mesh instance buffer missing".to_string())?;
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mujoco_wgpu_prepare"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mujoco_wgpu_offscreen_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: offscreen_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.07,
+                            g: 0.09,
+                            b: 0.12,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+            pass.set_bind_group(0, uniform_bind_group, &[]);
+            if !scene.triangles.is_empty() {
+                pass.set_pipeline(scene_pipeline);
+                pass.set_vertex_buffer(
+                    0,
+                    triangle_buffer.slice(..(std::mem::size_of_val(scene.triangles.as_slice()) as u64)),
+                );
+                pass.draw(0..scene.triangles.len() as u32, 0..1);
+            }
+            if !scene.lines.is_empty() {
+                pass.set_pipeline(line_pipeline);
+                pass.set_bind_group(0, uniform_bind_group, &[]);
+                pass.set_vertex_buffer(
+                    0,
+                    line_buffer.slice(..(std::mem::size_of_val(scene.lines.as_slice()) as u64)),
+                );
+                pass.draw(0..scene.lines.len() as u32, 0..1);
+            }
+            if !scene.mesh_instances.is_empty() {
+                pass.set_pipeline(mesh_pipeline);
+                pass.set_bind_group(0, uniform_bind_group, &[]);
+                for (mesh_id, range) in mesh_instance_ranges(&scene.mesh_instances) {
+                    let Some(mesh_asset) = self.mesh_assets.get(&mesh_id) else {
+                        continue;
+                    };
+                    let start = range.start * std::mem::size_of::<MeshInstance>();
+                    let end = range.end * std::mem::size_of::<MeshInstance>();
+                    pass.set_vertex_buffer(0, mesh_asset.vertex_buffer.slice(..));
+                    pass.set_vertex_buffer(1, mesh_instance_buffer.slice(start as u64..end as u64));
+                    pass.draw(0..mesh_asset.vertex_count, 0..(range.end - range.start) as u32);
+                }
+            }
+        }
+
+        self.last_error = None;
+        self.last_render_ms_ms = started.elapsed().as_secs_f32() * 1000.0;
+        Ok(encoder.finish())
+    }
+
+    fn paint(&mut self, render_pass: &mut wgpu::RenderPass<'static>) -> Result<(), String> {
+        let present_pipeline = self
+            .present_pipeline
+            .as_ref()
+            .ok_or_else(|| "WGPU present pipeline missing".to_string())?;
+        let present_bind_group = self
+            .present_bind_group
+            .as_ref()
+            .ok_or_else(|| "WGPU present bind group missing".to_string())?;
+        render_pass.set_pipeline(present_pipeline);
+        render_pass.set_bind_group(0, present_bind_group, &[]);
+        render_pass.draw(0..4, 0..1);
+        Ok(())
+    }
+
+    fn ensure_initialized(
+        &mut self,
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<(), String> {
+        if self.scene_pipeline.is_some() && self.present_pipeline.is_some() {
+            return Ok(());
+        }
+
+        let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mujoco_wgpu_scene_shader"),
+            source: wgpu::ShaderSource::Wgsl(WGPU_SCENE_SHADER.into()),
+        });
+        let present_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mujoco_wgpu_present_shader"),
+            source: wgpu::ShaderSource::Wgsl(WGPU_PRESENT_SHADER.into()),
+        });
+
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mujoco_wgpu_uniform_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mujoco_wgpu_uniform_buffer"),
+            size: std::mem::size_of::<WgpuSceneUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mujoco_wgpu_uniform_bind_group"),
+            layout: &uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mujoco_wgpu_scene_layout"),
+            bind_group_layouts: &[&uniform_layout],
+            push_constant_ranges: &[],
+        });
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GlVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
+        };
+        let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mujoco_wgpu_scene_pipeline"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout.clone()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_lit"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mujoco_wgpu_line_pipeline"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_unlit"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let mesh_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<MeshLocalVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+        };
+        let mesh_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<MeshInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![
+                2 => Float32x4,
+                3 => Float32x4,
+                4 => Float32x4,
+                5 => Float32x4,
+                6 => Float32x4
+            ],
+        };
+        let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mujoco_wgpu_mesh_pipeline"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_mesh"),
+                buffers: &[mesh_vertex_layout, mesh_instance_layout],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_lit"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let present_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mujoco_wgpu_present_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let present_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mujoco_wgpu_present_layout"),
+            bind_group_layouts: &[&present_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mujoco_wgpu_present_pipeline"),
+            layout: Some(&present_layout),
+            vertex: wgpu::VertexState {
+                module: &present_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &present_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        self.scene_pipeline = Some(scene_pipeline);
+        self.line_pipeline = Some(line_pipeline);
+        self.mesh_pipeline = Some(mesh_pipeline);
+        self.present_pipeline = Some(present_pipeline);
+        self.uniform_buffer = Some(uniform_buffer);
+        self.uniform_bind_group = Some(uniform_bind_group);
+        self.present_bind_group_layout = Some(present_bind_group_layout);
+        self.mesh_instance_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mujoco_wgpu_mesh_instance_buffer"),
+            size: 1024,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.mesh_instance_capacity = 1024;
+        self.sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("mujoco_wgpu_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
+        Ok(())
+    }
+
+    fn ensure_offscreen_target(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        if self.offscreen_size == [width, height] && self.present_bind_group.is_some() {
+            return Ok(());
+        }
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mujoco_wgpu_offscreen"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+        });
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mujoco_wgpu_depth"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[wgpu::TextureFormat::Depth24Plus],
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let present_bind_group_layout = self
+            .present_bind_group_layout
+            .as_ref()
+            .ok_or_else(|| "WGPU present bind group layout missing".to_string())?;
+        let sampler = self
+            .sampler
+            .as_ref()
+            .ok_or_else(|| "WGPU sampler missing".to_string())?;
+        let present_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mujoco_wgpu_present_bind_group"),
+            layout: present_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+
+        self.offscreen_texture = Some(texture);
+        self.offscreen_view = Some(texture_view);
+        self.depth_texture = Some(depth_texture);
+        self.depth_view = Some(depth_view);
+        self.present_bind_group = Some(present_bind_group);
+        self.offscreen_size = [width, height];
+        Ok(())
+    }
+
+    fn ensure_vertex_capacity(
+        &mut self,
+        device: &wgpu::Device,
+        scene: &WgpuSceneFrame,
+    ) -> Result<(), String> {
+        let triangle_bytes = std::mem::size_of_val(scene.triangles.as_slice()) as u64;
+        let line_bytes = std::mem::size_of_val(scene.lines.as_slice()) as u64;
+        let mesh_instance_bytes = std::mem::size_of_val(scene.mesh_instances.as_slice()) as u64;
+
+        if self.triangle_buffer.is_none() || triangle_bytes > self.triangle_capacity {
+            self.triangle_capacity = triangle_bytes.max(1024).next_power_of_two();
+            self.triangle_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mujoco_wgpu_triangle_buffer"),
+                size: self.triangle_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if self.line_buffer.is_none() || line_bytes > self.line_capacity {
+            self.line_capacity = line_bytes.max(1024).next_power_of_two();
+            self.line_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mujoco_wgpu_line_buffer"),
+                size: self.line_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if self.mesh_instance_buffer.is_none() || mesh_instance_bytes > self.mesh_instance_capacity {
+            self.mesh_instance_capacity = mesh_instance_bytes.max(1024).next_power_of_two();
+            self.mesh_instance_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mujoco_wgpu_mesh_instance_buffer"),
+                size: self.mesh_instance_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        Ok(())
+    }
+
+    fn ensure_mesh_assets(
+        &mut self,
+        device: &wgpu::Device,
+        mesh_assets: &BTreeMap<usize, MeshAssetCpu>,
+    ) {
+        for (&mesh_id, asset) in mesh_assets {
+            let needs_upload = self
+                .mesh_assets
+                .get(&mesh_id)
+                .map(|gpu_asset| gpu_asset.vertex_count != asset.vertices.len() as u32)
+                .unwrap_or(true);
+            if needs_upload {
+                self.mesh_assets.insert(
+                    mesh_id,
+                    MeshAssetGpu {
+                        vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("mujoco_wgpu_mesh_asset_buffer"),
+                            contents: slice_as_u8(&asset.vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        }),
+                        vertex_count: asset.vertices.len() as u32,
+                    },
+                );
+            }
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2255,6 +3326,93 @@ impl MeshAssetStats {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn mesh_instance_ranges(instances: &[MeshInstance]) -> Vec<(usize, std::ops::Range<usize>)> {
+    let mut ranges = Vec::new();
+    if instances.is_empty() {
+        return ranges;
+    }
+    let mut start = 0usize;
+    let mut current = instances[0].mesh_id as usize;
+    for (idx, instance) in instances.iter().enumerate().skip(1) {
+        let mesh_id = instance.mesh_id as usize;
+        if mesh_id != current {
+            ranges.push((current, start..idx));
+            current = mesh_id;
+            start = idx;
+        }
+    }
+    ranges.push((current, start..instances.len()));
+    ranges
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_mesh_assets(model: *const mjModel) -> BTreeMap<usize, MeshAssetCpu> {
+    let mut assets = BTreeMap::new();
+    if model.is_null() {
+        return assets;
+    }
+    unsafe {
+        let all_vertices =
+            std::slice::from_raw_parts((*model).mesh_vert, (*model).nmeshvert as usize * 3);
+        let all_normals =
+            std::slice::from_raw_parts((*model).mesh_normal, (*model).nmeshvert as usize * 3);
+        let all_faces =
+            std::slice::from_raw_parts((*model).mesh_face, (*model).nmeshface as usize * 3);
+        for mesh_id in 0..(*model).nmesh as usize {
+            let vertadr = *(*model).mesh_vertadr.add(mesh_id) as usize;
+            let vertnum = *(*model).mesh_vertnum.add(mesh_id) as usize;
+            let faceadr = *(*model).mesh_faceadr.add(mesh_id) as usize;
+            let facenum = *(*model).mesh_facenum.add(mesh_id) as usize;
+            if vertnum == 0 || facenum == 0 {
+                continue;
+            }
+            let local_vertices = &all_vertices[vertadr * 3..(vertadr + vertnum) * 3];
+            let local_normals = &all_normals[vertadr * 3..(vertadr + vertnum) * 3];
+            let face_slice = &all_faces[faceadr * 3..(faceadr + facenum) * 3];
+            let mut vertices = Vec::with_capacity(facenum * 3);
+            let mut local_min = [f32::INFINITY; 3];
+            let mut local_max = [f32::NEG_INFINITY; 3];
+            for tri in face_slice.chunks_exact(3) {
+                for &i in tri {
+                    let idx = i as usize;
+                    if idx >= vertnum {
+                        continue;
+                    }
+                    let position = mesh_vertex(local_vertices, idx);
+                    let normal = mesh_vertex(local_normals, idx);
+                    extend_bounds3(&mut local_min, &mut local_max, position);
+                    vertices.push(MeshLocalVertex { position, normal });
+                }
+            }
+            assets.insert(
+                mesh_id,
+                MeshAssetCpu {
+                    vertices,
+                    local_min,
+                    local_max,
+                },
+            );
+        }
+    }
+    assets
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn extend_depth_points_with_mesh_bounds(
+    depth_points: &mut Vec<[f32; 3]>,
+    asset: &MeshAssetCpu,
+    model: &[[f32; 4]; 4],
+) {
+    for sx in [asset.local_min[0], asset.local_max[0]] {
+        for sy in [asset.local_min[1], asset.local_max[1]] {
+            for sz in [asset.local_min[2], asset.local_max[2]] {
+                depth_points.push(transform_point_mat4(model, [sx, sy, sz]));
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn vertex_bounds(vertices: &[GlVertex]) -> ([f32; 3], [f32; 3]) {
     if vertices.is_empty() {
         return ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
@@ -2450,6 +3608,47 @@ impl SoftwareCamera {
         }
     }
 
+    fn world_ray(&self, rect: Rect, pointer: Pos2) -> Option<([f32; 3], [f32; 3])> {
+        if rect.width() <= f32::EPSILON || rect.height() <= f32::EPSILON {
+            return None;
+        }
+        let ndc_x = ((pointer.x - rect.center().x) / (rect.width() * 0.5)).clamp(-1.0, 1.0);
+        let ndc_y = (-(pointer.y - rect.center().y) / (rect.height() * 0.5)).clamp(-1.0, 1.0);
+        let half_height = ((self.frustum_top - self.frustum_bottom) * 0.5)
+            .abs()
+            .max(1e-4);
+        let half_width = (half_height * self.viewport_aspect).max(1e-4);
+        let center_y = (self.frustum_top + self.frustum_bottom) * 0.5;
+        let near_x = self.frustum_center + ndc_x * half_width;
+        let near_y = center_y + ndc_y * half_height;
+
+        if self.orthographic {
+            let origin = add3(
+                add3(self.eye, scale3(self.right, near_x)),
+                scale3(self.up, near_y),
+            );
+            Some((origin, self.forward))
+        } else {
+            let dir = normalize3(add3(
+                add3(scale3(self.forward, self.frustum_near), scale3(self.right, near_x)),
+                scale3(self.up, near_y),
+            ));
+            Some((self.eye, dir))
+        }
+    }
+
+    fn intersect_plane_z(&self, rect: Rect, pointer: Pos2, z: f32) -> Option<[f32; 3]> {
+        let (origin, dir) = self.world_ray(rect, pointer)?;
+        if dir[2].abs() <= 1e-6 {
+            return None;
+        }
+        let t = (z - origin[2]) / dir[2];
+        if t <= 0.0 {
+            return None;
+        }
+        Some(add3(origin, scale3(dir, t)))
+    }
+
     fn view_projection_matrix(&self) -> [f32; 16] {
         mul_mat4(
             self.projection_matrix_with_depth_range(self.frustum_near, self.frustum_far),
@@ -2459,6 +3658,16 @@ impl SoftwareCamera {
 
     fn fitted_view_projection_matrix(&self, points: &[GlVertex]) -> [f32; 16] {
         let Some((near, far)) = self.fitted_depth_range(points) else {
+            return self.view_projection_matrix();
+        };
+        mul_mat4(
+            self.projection_matrix_with_depth_range(near, far),
+            self.view_matrix(),
+        )
+    }
+
+    fn fitted_view_projection_matrix_points(&self, points: &[[f32; 3]]) -> [f32; 16] {
+        let Some((near, far)) = self.fitted_depth_range_points(points) else {
             return self.view_projection_matrix();
         };
         mul_mat4(
@@ -2482,6 +3691,22 @@ impl SoftwareCamera {
 
         // Keep MuJoCo's original near plane so perspective scale stays stable.
         // Tighten only the far plane to improve depth precision.
+        let near = self.frustum_near.max(1e-3);
+        let far = (max_depth * 1.2).max(near + 1.0).min(self.frustum_far);
+        Some((near, far))
+    }
+
+    fn fitted_depth_range_points(&self, points: &[[f32; 3]]) -> Option<(f32, f32)> {
+        let mut max_depth = f32::NEG_INFINITY;
+        for &point in points {
+            let depth = self.depth_of(point);
+            if depth > 1e-4 {
+                max_depth = max_depth.max(depth);
+            }
+        }
+        if !max_depth.is_finite() {
+            return None;
+        }
         let near = self.frustum_near.max(1e-3);
         let far = (max_depth * 1.2).max(near + 1.0).min(self.frustum_far);
         Some((near, far))
@@ -2571,6 +3796,15 @@ fn mul_mat4(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
         }
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn transform_point_mat4(model: &[[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
+    [
+        model[0][0] * point[0] + model[1][0] * point[1] + model[2][0] * point[2] + model[3][0],
+        model[0][1] * point[0] + model[1][1] * point[1] + model[2][1] * point[2] + model[3][1],
+        model[0][2] * point[0] + model[1][2] * point[1] + model[2][2] * point[2] + model[3][2],
+    ]
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2819,6 +4053,25 @@ fn append_sphere_geom(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn world_sphere_geom(pos: [f32; 3], radius: f32, color: [f32; 4]) -> mjvGeom {
+    let mut geom = unsafe { std::mem::zeroed::<mjvGeom>() };
+    geom.type_ = MJ_GEOM_SPHERE;
+    geom.objid = -1;
+    geom.dataid = -1;
+    geom.pos = pos;
+    geom.size[0] = radius;
+    geom.size[1] = radius;
+    geom.size[2] = radius;
+    geom.mat = [
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    ];
+    geom.rgba = color;
+    geom
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn push_triangle(
     triangles: &mut Vec<GlVertex>,
     a: [f32; 3],
@@ -2889,34 +4142,6 @@ fn mesh_vertex(vertices: &[f32], index: usize) -> [f32; 3] {
         vertices[index * 3 + 1],
         vertices[index * 3 + 2],
     ]
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn transform_mesh_point(
-    point: [f32; 3],
-    scale: [f32; 3],
-    pos: [f32; 3],
-    quat: [f32; 4],
-) -> [f32; 3] {
-    add3(rotate_quat(scale3_components(point, scale), quat), pos)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn triangle_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    normalize3(cross3(sub3(b, a), sub3(c, a)))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn scale3_components(v: [f32; 3], scale: [f32; 3]) -> [f32; 3] {
-    [v[0] * scale[0], v[1] * scale[1], v[2] * scale[2]]
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn rotate_quat(v: [f32; 3], quat: [f32; 4]) -> [f32; 3] {
-    let q = normalize4(quat);
-    let qv = [q[1], q[2], q[3]];
-    let t = scale3(cross3(qv, v), 2.0);
-    add3(v, add3(scale3(t, q[0]), cross3(qv, t)))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3066,6 +4291,115 @@ fn slice_as_u8<T>(slice: &[T]) -> &[u8] {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+const WGPU_SCENE_SHADER: &str = r#"
+struct SceneUniform {
+    view_proj: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> u_scene: SceneUniform;
+
+struct VertexIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+};
+
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct MeshVertexIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) model_0: vec4<f32>,
+    @location(3) model_1: vec4<f32>,
+    @location(4) model_2: vec4<f32>,
+    @location(5) model_3: vec4<f32>,
+    @location(6) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(input: VertexIn) -> VertexOut {
+    var out: VertexOut;
+    out.position = u_scene.view_proj * vec4<f32>(input.position, 1.0);
+    out.normal = input.normal;
+    out.color = input.color;
+    return out;
+}
+
+@vertex
+fn vs_mesh(input: MeshVertexIn) -> VertexOut {
+    let model = mat4x4<f32>(
+        input.model_0,
+        input.model_1,
+        input.model_2,
+        input.model_3,
+    );
+    let world_pos = model * vec4<f32>(input.position, 1.0);
+    let world_normal = normalize((model * vec4<f32>(input.normal, 0.0)).xyz);
+    var out: VertexOut;
+    out.position = u_scene.view_proj * world_pos;
+    out.normal = world_normal;
+    out.color = input.color;
+    return out;
+}
+
+@fragment
+fn fs_lit(input: VertexOut) -> @location(0) vec4<f32> {
+    let light_dir = normalize(vec3<f32>(0.35, 0.55, 0.75));
+    let normal = normalize(input.normal);
+    let diffuse = max(dot(normal, light_dir), 0.0) * 0.75 + 0.25;
+    return vec4<f32>(input.color.rgb * diffuse, input.color.a);
+}
+
+@fragment
+fn fs_unlit(input: VertexOut) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;
+
+#[cfg(not(target_arch = "wasm32"))]
+const WGPU_PRESENT_SHADER: &str = r#"
+@group(0) @binding(0)
+var u_tex: texture_2d<f32>;
+@group(0) @binding(1)
+var u_sampler: sampler;
+
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOut;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    out.uv = uvs[vertex_index];
+    return out;
+}
+
+@fragment
+fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+    return textureSample(u_tex, u_sampler, input.uv);
+}
+"#;
+
+#[cfg(not(target_arch = "wasm32"))]
 const GLOW_VERTEX_SHADER: &str = r#"#version 150 core
 uniform mat4 u_view_proj;
 in vec3 a_pos;
@@ -3129,17 +4463,6 @@ fn geom_axes(geom: &mjvGeom) -> [[f32; 3]; 3] {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn orbit_forward(azimuth_deg: f32, elevation_deg: f32) -> [f32; 3] {
-    let azimuth = azimuth_deg.to_radians();
-    let elevation = elevation_deg.to_radians();
-    [
-        elevation.cos() * azimuth.cos(),
-        elevation.cos() * azimuth.sin(),
-        elevation.sin(),
-    ]
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -3188,16 +4511,6 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
         [0.0, 0.0, 0.0]
     } else {
         [v[0] / len, v[1] / len, v[2] / len]
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn normalize4(v: [f32; 4]) -> [f32; 4] {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]).sqrt();
-    if len <= f32::EPSILON {
-        [1.0, 0.0, 0.0, 0.0]
-    } else {
-        [v[0] / len, v[1] / len, v[2] / len, v[3] / len]
     }
 }
 
@@ -3370,6 +4683,13 @@ fn local_asset_path(file_name: &str) -> PathBuf {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn local_duck_asset_path(file_name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/mujoco/openduckmini")
+        .join(file_name)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn cstring_buffer_to_string(buffer: &[i8]) -> String {
     let bytes = buffer
         .iter()
@@ -3381,64 +4701,11 @@ fn cstring_buffer_to_string(buffer: &[i8]) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn oscillator(time_s: f32) -> [f32; 12] {
-    let omega = 4.0 * std::f32::consts::PI;
-    let phases = [
-        omega * time_s + std::f32::consts::PI,
-        omega * time_s,
-        omega * time_s,
-        omega * time_s + std::f32::consts::PI,
-    ];
-
-    [
-        phases[0].sin(),
-        phases[1].sin(),
-        phases[2].sin(),
-        phases[3].sin(),
-        phases[0].cos(),
-        phases[1].cos(),
-        phases[2].cos(),
-        phases[3].cos(),
-        omega,
-        omega,
-        omega,
-        omega,
-    ]
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn quaternion_yaw(q: [f32; 4]) -> f32 {
     let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
     let sinz_cosp = 2.0 * (w * z - x * y);
     let cosz_cosp = w * w + x * x - y * y - z * z;
     sinz_cosp.atan2(cosz_cosp)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn rotate_vector_by_inverse_quaternion(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
-    let inv = [q[0], -q[1], -q[2], -q[3]];
-    rotate_vector_by_quaternion(inv, v)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn rotate_vector_by_quaternion(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
-    let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
-    let uv = [
-        y * v[2] - z * v[1],
-        z * v[0] - x * v[2],
-        x * v[1] - y * v[0],
-    ];
-    let uuv = [
-        y * uv[2] - z * uv[1],
-        z * uv[0] - x * uv[2],
-        x * uv[1] - y * uv[0],
-    ];
-
-    [
-        v[0] + 2.0 * (w * uv[0] + uuv[0]),
-        v[1] + 2.0 * (w * uv[1] + uuv[1]),
-        v[2] + 2.0 * (w * uv[2] + uuv[2]),
-    ]
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3458,18 +4725,4 @@ fn flip_rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Vec<u8> {
         }
     }
     rgba
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn shift_history_3(history: &mut [[f32; 3]; 3], sample: [f32; 3]) {
-    history[2] = history[1];
-    history[1] = history[0];
-    history[0] = sample;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn shift_history_12(history: &mut [[f32; 12]; 3], sample: [f32; 12]) {
-    history[2] = history[1];
-    history[1] = history[0];
-    history[0] = sample;
 }
