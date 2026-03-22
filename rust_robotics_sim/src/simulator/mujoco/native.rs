@@ -1,8 +1,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 use egui::emath::GuiRounding;
 use egui::{
-    pos2, vec2, Align2, Color32, ColorImage, FontId, Painter, PointerButton, Pos2, Rect, Sense,
-    Shape, Slider, Stroke, TextEdit, TextureHandle, TextureOptions, Ui,
+    pos2, vec2, Align2, Color32, FontId, Painter, PointerButton, Pos2, Rect, Sense, Shape,
+    Slider, Stroke, TextEdit, Ui,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::cmp::Ordering;
@@ -18,9 +18,7 @@ use rust_robotics_algo::mujoco::{Command, PolicyOutput};
 use serde::Deserialize;
 
 #[cfg(not(target_arch = "wasm32"))]
-use eframe::glow::HasContext;
-#[cfg(not(target_arch = "wasm32"))]
-use eframe::{egui_glow, egui_wgpu, glow, wgpu};
+use eframe::{egui_wgpu, wgpu};
 #[cfg(not(target_arch = "wasm32"))]
 use wgpu::util::DeviceExt as _;
 
@@ -68,9 +66,6 @@ const MJ_OBJ_GEOM: i32 = mjtObj__mjOBJ_GEOM as i32;
 #[cfg(not(target_arch = "wasm32"))]
 const MJ_OBJ_MESH: i32 = mjtObj__mjOBJ_MESH as i32;
 #[cfg(not(target_arch = "wasm32"))]
-const MJ_FONTSCALE_100: i32 = mjtFontScale__mjFONTSCALE_100 as i32;
-#[cfg(not(target_arch = "wasm32"))]
-const MJ_FB_OFFSCREEN: i32 = mjtFramebuffer__mjFB_OFFSCREEN as i32;
 #[cfg(not(target_arch = "wasm32"))]
 const MJ_CAT_ALL: i32 = mjtCatBit__mjCAT_ALL as i32;
 #[cfg(not(target_arch = "wasm32"))]
@@ -362,60 +357,15 @@ impl NativeMujocoBackend {
                     self.render_error = Some(err.clone());
                     self.status = "MuJoCo running with native software fallback renderer".to_string();
                     if let Ok(runtime) = self.ensure_runtime() {
-                        runtime.render_software(ui, frame, desired, diagnostic_colors, mesh_filter);
+                        runtime.render_software(ui, desired);
                     }
                     return;
                 }
             }
         }
-        if self.render_error.is_some() {
-            let diagnostic_colors = self.diagnostic_colors;
-            let mesh_filter = normalize_mesh_filter(self.mesh_filter);
-            if let Ok(runtime) = self.ensure_runtime() {
-                runtime.render_software(ui, frame, desired, diagnostic_colors, mesh_filter);
-            }
-            return;
-        }
-        let render_result = if let Some(err) = &self.render_error {
-            Err(err.clone())
-        } else {
-            (|| -> Result<Option<egui::TextureId>, String> {
-                let runtime = self.ensure_runtime()?;
-                let Some(frame) = frame else {
-                    return Err("Native renderer needs access to the eframe frame.".to_string());
-                };
-
-                let Some(gl) = frame.gl() else {
-                    return Err(
-                        "OpenGL context unavailable; MuJoCo viewport is disabled.".to_string()
-                    );
-                };
-
-                runtime.ensure_gl(gl)?;
-                runtime.render(gl, ui.ctx(), desired)?;
-                Ok(runtime.texture.as_ref().map(|texture| texture.id()))
-            })()
-        };
-
-        match render_result {
-            Ok(Some(texture_id)) => {
-                self.render_error = None;
-                ui.image((texture_id, desired));
-            }
-            Ok(None) => {
-                self.render_error = None;
-                ui.label("MuJoCo texture is not ready yet.");
-            }
-            Err(err) => {
-                debug_log(&format!("ui_native: render error: {err}"));
-                self.render_error = Some(err.clone());
-                self.status = "MuJoCo running with native software fallback renderer".to_string();
-                let diagnostic_colors = self.diagnostic_colors;
-                let mesh_filter = normalize_mesh_filter(self.mesh_filter);
-                if let Ok(runtime) = self.ensure_runtime() {
-                    runtime.render_software(ui, frame, desired, diagnostic_colors, mesh_filter);
-                }
-            }
+        if let Ok(runtime) = self.ensure_runtime() {
+            runtime.render_software(ui, desired);
+            self.status = "MuJoCo running with native software fallback renderer".to_string();
         }
 
         let _ = frame;
@@ -589,12 +539,6 @@ enum NativePolicyKind {
 
 #[cfg(not(target_arch = "wasm32"))]
 static ORT_INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
-#[cfg(not(target_arch = "wasm32"))]
-static GLOW_SCENE_LOGGED: OnceLock<()> = OnceLock::new();
-#[cfg(not(target_arch = "wasm32"))]
-static GLOW_CALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
-#[cfg(not(target_arch = "wasm32"))]
-static MESH_DIAGNOSTICS_LOGGED: OnceLock<()> = OnceLock::new();
 
 #[cfg(not(target_arch = "wasm32"))]
 impl MujocoPolicy {
@@ -882,16 +826,11 @@ struct MujocoRuntime {
     scene: mjvScene,
     cam: mjvCamera,
     opt: mjvOption,
-    con: mjrContext,
-    gl_ready: bool,
-    texture: Option<TextureHandle>,
     policy: MujocoPolicy,
     robot: NativeRobotController,
     command: Command,
     mujoco_time_ms: f32,
     diagnostics: MujocoDiagnostics,
-    glow_renderer: Arc<Mutex<GlowSceneRenderer>>,
-    glow_scene: Arc<Mutex<GlowSceneFrame>>,
     wgpu_scene: Arc<Mutex<WgpuSceneFrame>>,
     mesh_assets: BTreeMap<usize, MeshAssetCpu>,
     wgpu_renderer: Arc<Mutex<WgpuSceneRenderer>>,
@@ -947,9 +886,6 @@ struct MujocoDiagnostics {
 impl Drop for MujocoRuntime {
     fn drop(&mut self) {
         unsafe {
-            if self.gl_ready {
-                mjr_freeContext(&mut self.con);
-            }
             mjv_freeScene(&mut self.scene);
         }
     }
@@ -1030,15 +966,12 @@ impl MujocoRuntime {
         let mut scene = unsafe { std::mem::zeroed::<mjvScene>() };
         let mut cam = unsafe { std::mem::zeroed::<mjvCamera>() };
         let mut opt = unsafe { std::mem::zeroed::<mjvOption>() };
-        let mut con = unsafe { std::mem::zeroed::<mjrContext>() };
-
         unsafe {
             mjv_defaultScene(&mut scene);
             mjv_makeScene(sim.model_ptr(), &mut scene, 3000);
             mjv_defaultCamera(&mut cam);
             mjv_defaultFreeCamera(sim.model_ptr(), &mut cam);
             mjv_defaultOption(&mut opt);
-            mjr_defaultContext(&mut con);
         }
         fit_camera_to_model_stat(sim.model_ptr(), &mut cam);
 
@@ -1102,9 +1035,6 @@ impl MujocoRuntime {
             scene,
             cam,
             opt,
-            con,
-            gl_ready: false,
-            texture: None,
             policy,
             robot,
             command: Command {
@@ -1121,47 +1051,10 @@ impl MujocoRuntime {
                 ),
                 ..Default::default()
             },
-            glow_renderer: Arc::new(Mutex::new(GlowSceneRenderer::default())),
-            glow_scene: Arc::new(Mutex::new(GlowSceneFrame::default())),
             wgpu_scene: Arc::new(Mutex::new(WgpuSceneFrame::default())),
             mesh_assets,
             wgpu_renderer: Arc::new(Mutex::new(WgpuSceneRenderer::default())),
         })
-    }
-
-    fn ensure_gl(&mut self, gl: &Arc<glow::Context>) -> Result<(), String> {
-        if self.gl_ready {
-            return Ok(());
-        }
-
-        let started = Instant::now();
-        let version = gl.version().clone();
-        let extensions = gl.supported_extensions();
-        let has_arb_fbo = extensions.contains("GL_ARB_framebuffer_object");
-        let has_ext_fbo = extensions.contains("GL_EXT_framebuffer_object");
-        debug_log(&format!(
-            "runtime.ensure_gl: context version={:?} ARB_fbo={} EXT_fbo={}",
-            version, has_arb_fbo, has_ext_fbo
-        ));
-        if version.is_embedded || !(has_arb_fbo || has_ext_fbo) {
-            let err = format!(
-                "MuJoCo native rendering is not available on this OpenGL context. MuJoCo requires ARB/EXT framebuffer-object support and the current context is {:?} (ARB_fbo={}, EXT_fbo={}). The simulation is still running; only native MuJoCo rendering is unavailable in this eframe/glow context.",
-                version, has_arb_fbo, has_ext_fbo,
-            );
-            debug_log(&format!("runtime.ensure_gl: rejected context: {err}"));
-            return Err(err);
-        }
-        debug_log("runtime.ensure_gl: mjr_makeContext start");
-        unsafe {
-            mjr_makeContext(self.sim.model_ptr(), &mut self.con, MJ_FONTSCALE_100);
-        }
-        self.gl_ready = true;
-        self.diagnostics.last_gl_init_ms = started.elapsed().as_secs_f32() * 1000.0;
-        debug_log(&format!(
-            "runtime.ensure_gl: mjr_makeContext done in {}",
-            fmt_duration(started.elapsed())
-        ));
-        Ok(())
     }
 
     fn reset(&mut self) -> Result<(), String> {
@@ -1248,174 +1141,9 @@ impl MujocoRuntime {
         let _ = self.sim.apply_actuation(&actuation);
     }
 
-    fn render(
-        &mut self,
-        gl: &Arc<glow::Context>,
-        ctx: &egui::Context,
-        desired_size: egui::Vec2,
-    ) -> Result<(), String> {
-        let started = Instant::now();
-        debug_log("runtime.render: begin");
-        self.ensure_gl(gl)?;
-
-        let width = desired_size.x.max(2.0).round() as i32;
-        let height = desired_size.y.max(2.0).round() as i32;
-        unsafe {
-            mjr_resizeOffscreen(width, height, &mut self.con);
-            mjr_setBuffer(MJ_FB_OFFSCREEN, &mut self.con);
-        }
-
-        let viewport = mjrRect {
-            left: 0,
-            bottom: 0,
-            width,
-            height,
-        };
-
-        unsafe {
-            mjv_updateScene(
-                self.sim.model_ptr(),
-                self.sim.data_ptr(),
-                &self.opt,
-                std::ptr::null::<mjvPerturb>(),
-                &mut self.cam,
-                MJ_CAT_ALL,
-                &mut self.scene,
-            );
-            mjr_render(viewport, &mut self.scene, &self.con);
-        }
-
-        let mut rgb = vec![0u8; (width as usize) * (height as usize) * 3];
-        unsafe {
-            mjr_readPixels(
-                rgb.as_mut_ptr(),
-                std::ptr::null_mut::<f32>(),
-                viewport,
-                &self.con,
-            );
-            mjr_restoreBuffer(&self.con);
-        }
-
-        let rgba = flip_rgb_to_rgba(&rgb, width as usize, height as usize);
-        let image = ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
-
-        match self.texture.as_mut() {
-            Some(texture) => texture.set(image, TextureOptions::LINEAR),
-            None => {
-                self.texture =
-                    Some(ctx.load_texture("mujoco-render", image, TextureOptions::LINEAR));
-            }
-        }
-
-        self.diagnostics.last_render_ms = started.elapsed().as_secs_f32() * 1000.0;
-        self.diagnostics.frame_count += 1;
-        debug_log(&format!(
-            "runtime.render: done in {}",
-            fmt_duration(started.elapsed())
-        ));
-        Ok(())
-    }
-
-    fn render_software(
-        &mut self,
-        ui: &mut Ui,
-        frame: Option<&eframe::Frame>,
-        desired_size: egui::Vec2,
-        diagnostic_colors: bool,
-        mesh_filter: Option<usize>,
-    ) {
-        let Some(frame) = frame else {
-            self.render_software_2d(ui, desired_size);
-            ui.label("Native glow frame unavailable; showing simplified 2D fallback.");
-            return;
-        };
-        let Some(gl) = frame.gl() else {
-            self.render_software_2d(ui, desired_size);
-            ui.label("OpenGL context unavailable; showing simplified 2D fallback.");
-            return;
-        };
-
-        if let Err(err) = self.ensure_glow_renderer(gl) {
-            debug_log(&format!("runtime.render_glow: init error: {err}"));
-            self.render_software_2d(ui, desired_size);
-            ui.label(format!("Custom glow renderer init failed: {err}"));
-            return;
-        }
-
-        if let Err(err) = self.render_glow_scene(ui, desired_size, diagnostic_colors, mesh_filter) {
-            debug_log(&format!("runtime.render_glow: build error: {err}"));
-            self.render_software_2d(ui, desired_size);
-            ui.label(format!("Custom glow renderer failed: {err}"));
-        }
-    }
-
-    fn render_glow_scene(
-        &mut self,
-        ui: &mut Ui,
-        _desired_size: egui::Vec2,
-        diagnostic_colors: bool,
-        mesh_filter: Option<usize>,
-    ) -> Result<(), String> {
-        let started = Instant::now();
-        let rect = aligned_viewport_rect(ui);
-        let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        self.update_software_camera(ui, &response);
-        self.update_visual_scene();
-        let frame = self.build_gl_scene_frame(
-            (rect.width() / rect.height()).max(0.1),
-            diagnostic_colors,
-            mesh_filter,
-        )?;
-        {
-            let mut scene = self
-                .glow_scene
-                .lock()
-                .map_err(|_| "Failed to lock glow scene state".to_string())?;
-            *scene = frame;
-        }
-
-        let renderer = self.glow_renderer.clone();
-        let scene = self.glow_scene.clone();
-        ui.painter().add(egui::PaintCallback {
-            rect,
-            callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
-                let render_result = (|| -> Result<(), String> {
-                    let scene = scene
-                        .lock()
-                        .map_err(|_| "Failed to lock glow scene frame".to_string())?;
-                    let mut renderer = renderer
-                        .lock()
-                        .map_err(|_| "Failed to lock glow renderer".to_string())?;
-                    renderer.paint(painter.gl(), info, &scene)
-                })();
-
-                if let Err(err) = render_result {
-                    if let Ok(mut renderer) = renderer.lock() {
-                        if renderer.last_error.as_deref() != Some(err.as_str()) {
-                            debug_log(&format!("runtime.render_glow: callback error: {err}"));
-                        }
-                        renderer.last_error = Some(err);
-                    }
-                }
-            })),
-        });
-
-        let overlay = self.software_overlay_text();
-        ui.painter().text(
-            rect.left_top() + vec2(12.0, 12.0),
-            Align2::LEFT_TOP,
-            &overlay,
-            FontId::monospace(12.0),
-            Color32::from_gray(210),
-        );
-
-        if let Ok(renderer) = self.glow_renderer.lock() {
-            self.diagnostics.last_render_ms = renderer.last_render_ms_ms;
-        } else {
-            self.diagnostics.last_render_ms = started.elapsed().as_secs_f32() * 1000.0;
-        }
-        self.diagnostics.frame_count += 1;
-        Ok(())
+    fn render_software(&mut self, ui: &mut Ui, desired_size: egui::Vec2) {
+        self.render_software_2d(ui, desired_size);
+        ui.label("WGPU viewport unavailable; showing simplified 2D fallback.");
     }
 
     fn render_wgpu(
@@ -1605,9 +1333,21 @@ impl MujocoRuntime {
         let yaw_deg = quaternion_yaw(raw.base_quat).to_degrees();
         let planar_speed = raw.base_lin_vel[0].hypot(raw.base_lin_vel[1]);
         let (triangles, lines) = self
-            .glow_scene
+            .wgpu_scene
             .lock()
-            .map(|scene| (scene.triangles.len() / 3, scene.lines.len() / 2))
+            .map(|scene| {
+                let mesh_tris = scene
+                    .mesh_instances
+                    .iter()
+                    .map(|instance| {
+                        self.mesh_assets
+                            .get(&(instance.mesh_id as usize))
+                            .map(|asset| asset.vertices.len() / 3)
+                            .unwrap_or(0)
+                    })
+                    .sum::<usize>();
+                ((scene.triangles.len() / 3) + mesh_tris, scene.lines.len() / 2)
+            })
             .unwrap_or((0, 0));
 
         let command_hint = if self.robot.uses_setpoint_ball() {
@@ -1806,106 +1546,6 @@ impl MujocoRuntime {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl MujocoRuntime {
-    fn ensure_glow_renderer(&mut self, gl: &Arc<glow::Context>) -> Result<(), String> {
-        let mut renderer = self
-            .glow_renderer
-            .lock()
-            .map_err(|_| "Failed to lock glow renderer".to_string())?;
-        renderer.ensure_initialized(gl)
-    }
-
-    fn build_gl_scene_frame(
-        &self,
-        aspect: f32,
-        diagnostic_colors: bool,
-        mesh_filter: Option<usize>,
-    ) -> Result<GlowSceneFrame, String> {
-        let camera = SoftwareCamera::from_gl(&self.scene.camera[0], aspect)
-            .ok_or_else(|| "MuJoCo scene camera is not available for glow fallback".to_string())?;
-        let mut frame = GlowSceneFrame::default();
-
-        append_grid_lines(&mut frame.lines);
-
-        let mut mesh_diagnostics = Vec::new();
-        let mut mesh_assets = BTreeMap::<usize, MeshAssetStats>::new();
-        let model = self.sim.model_ptr();
-        let ngeom = unsafe { (*model).ngeom as usize };
-        for geom_id in 0..ngeom {
-            let Some(geom) = self.model_geom_instance(geom_id) else {
-                continue;
-            };
-
-            match geom.type_ {
-                MJ_GEOM_PLANE => {}
-                MJ_GEOM_SPHERE => {
-                    append_sphere_geom(&mut frame.triangles, &geom, 12, 20, diagnostic_colors)
-                }
-                MJ_GEOM_CAPSULE => {
-                    append_capsule_geom(&mut frame.triangles, &geom, 10, 18, diagnostic_colors)
-                }
-                MJ_GEOM_CYLINDER => {
-                    append_cylinder_geom(&mut frame.triangles, &geom, 18, diagnostic_colors)
-                }
-                MJ_GEOM_BOX => append_box_geom(&mut frame.triangles, &geom, diagnostic_colors),
-                MJ_GEOM_MESH => {
-                    if let Some(filter) = mesh_filter {
-                        if self.resolve_mesh_id(&geom) != Some(filter) {
-                            continue;
-                        }
-                    }
-                    if MESH_DIAGNOSTICS_LOGGED.get().is_none() {
-                        mesh_diagnostics.push(self.describe_mesh_geom(&geom));
-                    }
-                    if let Some(stats) =
-                        self.append_mesh_geom(&mut frame.triangles, &geom, diagnostic_colors)
-                    {
-                        mesh_assets
-                            .entry(stats.mesh_id)
-                            .or_insert_with(|| MeshAssetStats::new(stats.mesh_id))
-                            .record(&stats);
-                    }
-                }
-                MJ_GEOM_LINE => append_line_geom(&mut frame.lines, &geom, diagnostic_colors),
-                _ => {}
-            }
-        }
-
-        self.append_command_setpoint_scene(&mut frame.triangles, &mut frame.lines);
-
-        frame.view_proj = camera.fitted_view_projection_matrix(&frame.triangles);
-
-        if GLOW_SCENE_LOGGED.get().is_none() {
-            let (min, max) = vertex_bounds(&frame.triangles);
-            debug_log(&format!(
-                "runtime.render_glow: scene built triangles={} lines={} world_min=({:.2},{:.2},{:.2}) world_max=({:.2},{:.2},{:.2})",
-                frame.triangles.len() / 3,
-                frame.lines.len() / 2,
-                min[0],
-                min[1],
-                min[2],
-                max[0],
-                max[1],
-                max[2],
-            ));
-            let _ = GLOW_SCENE_LOGGED.set(());
-        }
-        if MESH_DIAGNOSTICS_LOGGED.get().is_none() {
-            debug_log(&format!(
-                "runtime.render_glow: mesh geoms seen={}",
-                mesh_diagnostics.len()
-            ));
-            for line in mesh_diagnostics.iter().take(48) {
-                debug_log(line);
-            }
-            for stats in mesh_assets.values() {
-                debug_log(&stats.describe(model));
-            }
-            let _ = MESH_DIAGNOSTICS_LOGGED.set(());
-        }
-
-        Ok(frame)
-    }
-
     fn build_wgpu_scene_frame(
         &self,
         aspect: f32,
@@ -2065,76 +1705,6 @@ impl MujocoRuntime {
         }
     }
 
-    fn append_mesh_geom(
-        &self,
-        triangles: &mut Vec<GlVertex>,
-        geom: &mjvGeom,
-        diagnostic_colors: bool,
-    ) -> Option<MeshGeomStats> {
-        let Some(mesh_id) = self.resolve_mesh_id(geom) else {
-            return None;
-        };
-
-        unsafe {
-            let model = self.sim.model_ptr();
-            let vertadr = *(*model).mesh_vertadr.add(mesh_id) as usize;
-            let vertnum = *(*model).mesh_vertnum.add(mesh_id) as usize;
-            let faceadr = *(*model).mesh_faceadr.add(mesh_id) as usize;
-            let facenum = *(*model).mesh_facenum.add(mesh_id) as usize;
-            if vertnum == 0 || facenum == 0 {
-                return None;
-            }
-
-            let all_vertices =
-                std::slice::from_raw_parts((*model).mesh_vert, (*model).nmeshvert as usize * 3);
-            let all_normals =
-                std::slice::from_raw_parts((*model).mesh_normal, (*model).nmeshvert as usize * 3);
-            let all_faces =
-                std::slice::from_raw_parts((*model).mesh_face, (*model).nmeshface as usize * 3);
-            let local_vertices = &all_vertices[vertadr * 3..(vertadr + vertnum) * 3];
-            let local_normals = &all_normals[vertadr * 3..(vertadr + vertnum) * 3];
-            let face_slice = &all_faces[faceadr * 3..(faceadr + facenum) * 3];
-            let mut world_min = [f32::INFINITY; 3];
-            let mut world_max = [f32::NEG_INFINITY; 3];
-            let starting_vertices = triangles.len();
-            let color = display_geom_color(geom, diagnostic_colors);
-
-            for tri in face_slice.chunks_exact(3) {
-                let ia = tri[0] as usize;
-                let ib = tri[1] as usize;
-                let ic = tri[2] as usize;
-                if ia >= vertnum || ib >= vertnum || ic >= vertnum {
-                    continue;
-                }
-
-                let a_local = mesh_vertex(local_vertices, ia);
-                let b_local = mesh_vertex(local_vertices, ib);
-                let c_local = mesh_vertex(local_vertices, ic);
-                let a_normal = transform_geom_vector(geom, mesh_vertex(local_normals, ia));
-                let b_normal = transform_geom_vector(geom, mesh_vertex(local_normals, ib));
-                let c_normal = transform_geom_vector(geom, mesh_vertex(local_normals, ic));
-
-                let a_world = transform_geom_point(geom, a_local);
-                let b_world = transform_geom_point(geom, b_local);
-                let c_world = transform_geom_point(geom, c_local);
-                extend_bounds3(&mut world_min, &mut world_max, a_world);
-                extend_bounds3(&mut world_min, &mut world_max, b_world);
-                extend_bounds3(&mut world_min, &mut world_max, c_world);
-
-                triangles.push(GlVertex::world(a_world, a_normal, color));
-                triangles.push(GlVertex::world(b_world, b_normal, color));
-                triangles.push(GlVertex::world(c_world, c_normal, color));
-            }
-
-            Some(MeshGeomStats {
-                mesh_id,
-                triangle_count: (triangles.len() - starting_vertices) / 3,
-                world_min,
-                world_max,
-            })
-        }
-    }
-
     fn build_mesh_instance(&self, geom: &mjvGeom, diagnostic_colors: bool) -> Option<MeshInstance> {
         let mesh_id = self.resolve_mesh_id(geom)? as u32;
         let color = display_geom_color(geom, diagnostic_colors);
@@ -2170,66 +1740,11 @@ impl MujocoRuntime {
         None
     }
 
-    fn describe_mesh_geom(&self, geom: &mjvGeom) -> String {
-        let resolved = self.resolve_mesh_id(geom);
-        let geom_name = object_name(self.sim.model_ptr(), MJ_OBJ_GEOM, geom.objid)
-            .unwrap_or_else(|| "-".to_string());
-        let (vertnum, facenum, vertadr, faceadr, local_mode) = if let Some(mesh_id) = resolved {
-            unsafe {
-                let model = self.sim.model_ptr();
-                let vertadr = *(*model).mesh_vertadr.add(mesh_id) as usize;
-                let vertnum = *(*model).mesh_vertnum.add(mesh_id) as usize;
-                let faceadr = *(*model).mesh_faceadr.add(mesh_id) as usize;
-                let facenum = *(*model).mesh_facenum.add(mesh_id) as usize;
-                let all_faces =
-                    std::slice::from_raw_parts((*model).mesh_face, (*model).nmeshface as usize * 3);
-                let face_slice = &all_faces[faceadr * 3..(faceadr + facenum) * 3];
-                let local_mode = face_slice
-                    .iter()
-                    .copied()
-                    .max()
-                    .map(|max_index| (max_index as usize) < vertnum)
-                    .unwrap_or(true);
-                (vertnum, facenum, vertadr, faceadr, local_mode)
-            }
-        } else {
-            (0, 0, 0, 0, false)
-        };
-
-        format!(
-            "mesh geom name={} objid={} objtype={} dataid={} resolved_mesh={} vertadr={} vertnum={} faceadr={} facenum={} local_faces={} rgba=({:.2},{:.2},{:.2},{:.2})",
-            geom_name,
-            geom.objid,
-            geom.objtype,
-            geom.dataid,
-            resolved
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "none".to_string()),
-            vertadr,
-            vertnum,
-            faceadr,
-            facenum,
-            local_mode,
-            geom.rgba[0],
-            geom.rgba[1],
-            geom.rgba[2],
-            geom.rgba[3],
-        )
-    }
-
     fn mesh_filter_label(&self, mesh_filter: i32) -> String {
         normalize_mesh_filter(mesh_filter)
             .and_then(|mesh_id| object_name(self.sim.model_ptr(), MJ_OBJ_MESH, mesh_id as i32))
             .unwrap_or_else(|| "unknown".to_string())
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Default, Clone)]
-struct GlowSceneFrame {
-    triangles: Vec<GlVertex>,
-    lines: Vec<GlVertex>,
-    view_proj: [f32; 16],
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2379,28 +1894,6 @@ struct WgpuSceneRenderer {
     depth_view: Option<wgpu::TextureView>,
     offscreen_size: [u32; 2],
     mesh_assets: BTreeMap<usize, MeshAssetGpu>,
-    last_error: Option<String>,
-    last_render_ms_ms: f32,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Default)]
-struct GlowSceneRenderer {
-    program: Option<glow::NativeProgram>,
-    triangle_vao: Option<glow::NativeVertexArray>,
-    triangle_vbo: Option<glow::NativeBuffer>,
-    line_vao: Option<glow::NativeVertexArray>,
-    line_vbo: Option<glow::NativeBuffer>,
-    present_program: Option<glow::NativeProgram>,
-    present_vao: Option<glow::NativeVertexArray>,
-    present_vbo: Option<glow::NativeBuffer>,
-    offscreen_fbo: Option<glow::NativeFramebuffer>,
-    offscreen_color: Option<glow::NativeTexture>,
-    offscreen_depth: Option<glow::NativeRenderbuffer>,
-    offscreen_size: [i32; 2],
-    u_view_proj: Option<glow::NativeUniformLocation>,
-    u_unlit: Option<glow::NativeUniformLocation>,
-    u_present_texture: Option<glow::NativeUniformLocation>,
     last_error: Option<String>,
     last_render_ms_ms: f32,
 }
@@ -2971,285 +2464,6 @@ impl WgpuSceneRenderer {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl GlowSceneRenderer {
-    fn ensure_initialized(&mut self, gl: &Arc<glow::Context>) -> Result<(), String> {
-        if self.program.is_some() {
-            return Ok(());
-        }
-
-        unsafe {
-            let program = create_gl_program(gl, GLOW_VERTEX_SHADER, GLOW_FRAGMENT_SHADER)?;
-            let triangle_vao = gl
-                .create_vertex_array()
-                .map_err(|err| format!("Failed to create triangle VAO: {err}"))?;
-            let triangle_vbo = gl
-                .create_buffer()
-                .map_err(|err| format!("Failed to create triangle VBO: {err}"))?;
-            let line_vao = gl
-                .create_vertex_array()
-                .map_err(|err| format!("Failed to create line VAO: {err}"))?;
-            let line_vbo = gl
-                .create_buffer()
-                .map_err(|err| format!("Failed to create line VBO: {err}"))?;
-            let present_program =
-                create_gl_program(gl, PRESENT_VERTEX_SHADER, PRESENT_FRAGMENT_SHADER)?;
-            let present_vao = gl
-                .create_vertex_array()
-                .map_err(|err| format!("Failed to create present VAO: {err}"))?;
-            let present_vbo = gl
-                .create_buffer()
-                .map_err(|err| format!("Failed to create present VBO: {err}"))?;
-            let offscreen_fbo = gl
-                .create_framebuffer()
-                .map_err(|err| format!("Failed to create offscreen FBO: {err}"))?;
-            let offscreen_color = gl
-                .create_texture()
-                .map_err(|err| format!("Failed to create offscreen color texture: {err}"))?;
-            let offscreen_depth = gl
-                .create_renderbuffer()
-                .map_err(|err| format!("Failed to create offscreen depth renderbuffer: {err}"))?;
-
-            setup_vertex_array(gl, program, triangle_vao, triangle_vbo)?;
-            setup_vertex_array(gl, program, line_vao, line_vbo)?;
-            setup_present_quad(gl, present_program, present_vao, present_vbo)?;
-
-            self.u_view_proj = gl.get_uniform_location(program, "u_view_proj");
-            self.u_unlit = gl.get_uniform_location(program, "u_unlit");
-            self.u_present_texture = gl.get_uniform_location(present_program, "u_texture");
-            self.program = Some(program);
-            self.triangle_vao = Some(triangle_vao);
-            self.triangle_vbo = Some(triangle_vbo);
-            self.line_vao = Some(line_vao);
-            self.line_vbo = Some(line_vbo);
-            self.present_program = Some(present_program);
-            self.present_vao = Some(present_vao);
-            self.present_vbo = Some(present_vbo);
-            self.offscreen_fbo = Some(offscreen_fbo);
-            self.offscreen_color = Some(offscreen_color);
-            self.offscreen_depth = Some(offscreen_depth);
-            self.offscreen_size = [0, 0];
-            self.last_error = None;
-        }
-
-        Ok(())
-    }
-
-    fn ensure_offscreen_target(
-        &mut self,
-        gl: &Arc<glow::Context>,
-        width: i32,
-        height: i32,
-    ) -> Result<(), String> {
-        let width = width.max(2);
-        let height = height.max(2);
-        if self.offscreen_size == [width, height] {
-            return Ok(());
-        }
-
-        let fbo = self
-            .offscreen_fbo
-            .ok_or_else(|| "Offscreen FBO is not initialized".to_string())?;
-        let color = self
-            .offscreen_color
-            .ok_or_else(|| "Offscreen color texture is not initialized".to_string())?;
-        let depth = self
-            .offscreen_depth
-            .ok_or_else(|| "Offscreen depth renderbuffer is not initialized".to_string())?;
-
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(color));
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                width,
-                height,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),
-            );
-            gl.bind_texture(glow::TEXTURE_2D, None);
-
-            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
-            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, width, height);
-            gl.bind_renderbuffer(glow::RENDERBUFFER, None);
-
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(color),
-                0,
-            );
-            gl.framebuffer_renderbuffer(
-                glow::FRAMEBUFFER,
-                glow::DEPTH_ATTACHMENT,
-                glow::RENDERBUFFER,
-                Some(depth),
-            );
-            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            if status != glow::FRAMEBUFFER_COMPLETE {
-                return Err(format!("Offscreen framebuffer incomplete: 0x{status:04x}"));
-            }
-        }
-
-        self.offscreen_size = [width, height];
-        Ok(())
-    }
-
-    fn paint(
-        &mut self,
-        gl: &Arc<glow::Context>,
-        info: egui::PaintCallbackInfo,
-        scene: &GlowSceneFrame,
-    ) -> Result<(), String> {
-        self.ensure_initialized(gl)?;
-
-        let started = Instant::now();
-        let viewport = info.viewport_in_pixels();
-        let clip = info.clip_rect_in_pixels();
-        if GLOW_CALLBACK_LOGGED.get().is_none() {
-            debug_log(&format!(
-                "runtime.render_glow: callback viewport=({},{} {}x{}) clip=({},{} {}x{}) triangles={} lines={}",
-                viewport.left_px,
-                viewport.from_bottom_px,
-                viewport.width_px,
-                viewport.height_px,
-                clip.left_px,
-                clip.from_bottom_px,
-                clip.width_px,
-                clip.height_px,
-                scene.triangles.len() / 3,
-                scene.lines.len() / 2
-            ));
-            let _ = GLOW_CALLBACK_LOGGED.set(());
-        }
-        let program = self
-            .program
-            .ok_or_else(|| "Glow program is not initialized".to_string())?;
-        let present_program = self
-            .present_program
-            .ok_or_else(|| "Present program is not initialized".to_string())?;
-        let fbo = self
-            .offscreen_fbo
-            .ok_or_else(|| "Offscreen FBO is not initialized".to_string())?;
-        let offscreen_color = self
-            .offscreen_color
-            .ok_or_else(|| "Offscreen color texture is not initialized".to_string())?;
-        self.ensure_offscreen_target(gl, viewport.width_px, viewport.height_px)?;
-
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.viewport(0, 0, viewport.width_px, viewport.height_px);
-            gl.enable(glow::DEPTH_TEST);
-            gl.depth_func(glow::LEQUAL);
-            gl.depth_mask(true);
-            gl.disable(glow::BLEND);
-            gl.disable(glow::CULL_FACE);
-            gl.clear_color(0.07, 0.09, 0.12, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-
-            gl.use_program(Some(program));
-            if let Some(location) = self.u_view_proj.as_ref() {
-                gl.uniform_matrix_4_f32_slice(Some(location), false, &scene.view_proj);
-            }
-
-            if !scene.triangles.is_empty() {
-                if let Some(location) = self.u_unlit.as_ref() {
-                    gl.uniform_1_i32(Some(location), 0);
-                }
-                gl.enable(glow::CULL_FACE);
-                gl.cull_face(glow::BACK);
-                gl.bind_vertex_array(self.triangle_vao);
-                gl.bind_buffer(glow::ARRAY_BUFFER, self.triangle_vbo);
-                gl.buffer_data_u8_slice(
-                    glow::ARRAY_BUFFER,
-                    slice_as_u8(&scene.triangles),
-                    glow::DYNAMIC_DRAW,
-                );
-                gl.draw_arrays(glow::TRIANGLES, 0, scene.triangles.len() as i32);
-                gl.disable(glow::CULL_FACE);
-            }
-
-            if !scene.lines.is_empty() {
-                if let Some(location) = self.u_unlit.as_ref() {
-                    gl.uniform_1_i32(Some(location), 1);
-                }
-                gl.bind_vertex_array(self.line_vao);
-                gl.bind_buffer(glow::ARRAY_BUFFER, self.line_vbo);
-                gl.buffer_data_u8_slice(
-                    glow::ARRAY_BUFFER,
-                    slice_as_u8(&scene.lines),
-                    glow::DYNAMIC_DRAW,
-                );
-                gl.draw_arrays(glow::LINES, 0, scene.lines.len() as i32);
-            }
-
-            gl.bind_vertex_array(None);
-            gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            gl.use_program(None);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            gl.viewport(
-                viewport.left_px,
-                viewport.from_bottom_px,
-                viewport.width_px,
-                viewport.height_px,
-            );
-            gl.enable(glow::SCISSOR_TEST);
-            gl.scissor(
-                clip.left_px,
-                clip.from_bottom_px,
-                clip.width_px,
-                clip.height_px,
-            );
-            gl.disable(glow::DEPTH_TEST);
-            gl.disable(glow::CULL_FACE);
-            gl.disable(glow::BLEND);
-            gl.use_program(Some(present_program));
-            if let Some(location) = self.u_present_texture.as_ref() {
-                gl.uniform_1_i32(Some(location), 0);
-            }
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(offscreen_color));
-            gl.bind_vertex_array(self.present_vao);
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            gl.bind_vertex_array(None);
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.use_program(None);
-            gl.disable(glow::SCISSOR_TEST);
-            gl.enable(glow::BLEND);
-        }
-
-        self.last_error = None;
-        self.last_render_ms_ms = started.elapsed().as_secs_f32() * 1000.0;
-        Ok(())
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct GlVertex {
@@ -3266,62 +2480,6 @@ impl GlVertex {
             normal,
             color,
         }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy)]
-struct MeshGeomStats {
-    mesh_id: usize,
-    triangle_count: usize,
-    world_min: [f32; 3],
-    world_max: [f32; 3],
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct MeshAssetStats {
-    mesh_id: usize,
-    instances: usize,
-    triangle_count: usize,
-    world_min: [f32; 3],
-    world_max: [f32; 3],
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl MeshAssetStats {
-    fn new(mesh_id: usize) -> Self {
-        Self {
-            mesh_id,
-            instances: 0,
-            triangle_count: 0,
-            world_min: [f32::INFINITY; 3],
-            world_max: [f32::NEG_INFINITY; 3],
-        }
-    }
-
-    fn record(&mut self, stats: &MeshGeomStats) {
-        self.instances += 1;
-        self.triangle_count += stats.triangle_count;
-        extend_bounds3(&mut self.world_min, &mut self.world_max, stats.world_min);
-        extend_bounds3(&mut self.world_min, &mut self.world_max, stats.world_max);
-    }
-
-    fn describe(&self, model: *const mjModel) -> String {
-        let mesh_name =
-            object_name(model, MJ_OBJ_MESH, self.mesh_id as i32).unwrap_or_else(|| "-".to_string());
-        format!(
-            "mesh asset name={} id={} instances={} tris={} world_min=({:.2},{:.2},{:.2}) world_max=({:.2},{:.2},{:.2})",
-            mesh_name,
-            self.mesh_id,
-            self.instances,
-            self.triangle_count,
-            self.world_min[0],
-            self.world_min[1],
-            self.world_min[2],
-            self.world_max[0],
-            self.world_max[1],
-            self.world_max[2],
-        )
     }
 }
 
@@ -3410,24 +2568,6 @@ fn extend_depth_points_with_mesh_bounds(
             }
         }
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn vertex_bounds(vertices: &[GlVertex]) -> ([f32; 3], [f32; 3]) {
-    if vertices.is_empty() {
-        return ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
-    }
-
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for vertex in vertices {
-        for axis in 0..3 {
-            let value = vertex.position[axis];
-            min[axis] = min[axis].min(value);
-            max[axis] = max[axis].max(value);
-        }
-    }
-    (min, max)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3656,16 +2796,6 @@ impl SoftwareCamera {
         )
     }
 
-    fn fitted_view_projection_matrix(&self, points: &[GlVertex]) -> [f32; 16] {
-        let Some((near, far)) = self.fitted_depth_range(points) else {
-            return self.view_projection_matrix();
-        };
-        mul_mat4(
-            self.projection_matrix_with_depth_range(near, far),
-            self.view_matrix(),
-        )
-    }
-
     fn fitted_view_projection_matrix_points(&self, points: &[[f32; 3]]) -> [f32; 16] {
         let Some((near, far)) = self.fitted_depth_range_points(points) else {
             return self.view_projection_matrix();
@@ -3674,26 +2804,6 @@ impl SoftwareCamera {
             self.projection_matrix_with_depth_range(near, far),
             self.view_matrix(),
         )
-    }
-
-    fn fitted_depth_range(&self, points: &[GlVertex]) -> Option<(f32, f32)> {
-        let mut max_depth = f32::NEG_INFINITY;
-        for vertex in points {
-            let depth = self.depth_of(vertex.position);
-            if depth > 1e-4 {
-                max_depth = max_depth.max(depth);
-            }
-        }
-
-        if !max_depth.is_finite() {
-            return None;
-        }
-
-        // Keep MuJoCo's original near plane so perspective scale stays stable.
-        // Tighten only the far plane to improve depth precision.
-        let near = self.frustum_near.max(1e-3);
-        let far = (max_depth * 1.2).max(near + 1.0).min(self.frustum_far);
-        Some((near, far))
     }
 
     fn fitted_depth_range_points(&self, points: &[[f32; 3]]) -> Option<(f32, f32)> {
@@ -4163,129 +3273,6 @@ fn transform_geom_vector(geom: &mjvGeom, local: [f32; 3]) -> [f32; 3] {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn create_gl_program(
-    gl: &glow::Context,
-    vertex_src: &str,
-    fragment_src: &str,
-) -> Result<glow::NativeProgram, String> {
-    unsafe {
-        let program = gl
-            .create_program()
-            .map_err(|err| format!("Failed to create GL program: {err}"))?;
-        let shaders = [
-            (glow::VERTEX_SHADER, vertex_src),
-            (glow::FRAGMENT_SHADER, fragment_src),
-        ];
-        let mut compiled = Vec::new();
-
-        for (shader_type, source) in shaders {
-            let shader = gl
-                .create_shader(shader_type)
-                .map_err(|err| format!("Failed to create shader: {err}"))?;
-            gl.shader_source(shader, source);
-            gl.compile_shader(shader);
-            if !gl.get_shader_compile_status(shader) {
-                let log = gl.get_shader_info_log(shader);
-                gl.delete_shader(shader);
-                gl.delete_program(program);
-                return Err(format!("GL shader compilation failed: {log}"));
-            }
-            gl.attach_shader(program, shader);
-            compiled.push(shader);
-        }
-
-        gl.link_program(program);
-        if !gl.get_program_link_status(program) {
-            let log = gl.get_program_info_log(program);
-            for shader in compiled {
-                gl.detach_shader(program, shader);
-                gl.delete_shader(shader);
-            }
-            gl.delete_program(program);
-            return Err(format!("GL program link failed: {log}"));
-        }
-
-        for shader in compiled {
-            gl.detach_shader(program, shader);
-            gl.delete_shader(shader);
-        }
-
-        Ok(program)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn setup_vertex_array(
-    gl: &glow::Context,
-    program: glow::NativeProgram,
-    vao: glow::NativeVertexArray,
-    vbo: glow::NativeBuffer,
-) -> Result<(), String> {
-    unsafe {
-        gl.bind_vertex_array(Some(vao));
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        let stride = std::mem::size_of::<GlVertex>() as i32;
-
-        let position = gl
-            .get_attrib_location(program, "a_pos")
-            .ok_or_else(|| "Glow shader is missing a_pos attribute".to_string())?;
-        let normal = gl
-            .get_attrib_location(program, "a_normal")
-            .ok_or_else(|| "Glow shader is missing a_normal attribute".to_string())?;
-        let color = gl
-            .get_attrib_location(program, "a_color")
-            .ok_or_else(|| "Glow shader is missing a_color attribute".to_string())?;
-
-        gl.enable_vertex_attrib_array(position);
-        gl.vertex_attrib_pointer_f32(position, 3, glow::FLOAT, false, stride, 0);
-        gl.enable_vertex_attrib_array(normal);
-        gl.vertex_attrib_pointer_f32(normal, 3, glow::FLOAT, false, stride, 12);
-        gl.enable_vertex_attrib_array(color);
-        gl.vertex_attrib_pointer_f32(color, 4, glow::FLOAT, false, stride, 24);
-
-        gl.bind_vertex_array(None);
-        gl.bind_buffer(glow::ARRAY_BUFFER, None);
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn setup_present_quad(
-    gl: &glow::Context,
-    program: glow::NativeProgram,
-    vao: glow::NativeVertexArray,
-    vbo: glow::NativeBuffer,
-) -> Result<(), String> {
-    const QUAD: [f32; 16] = [
-        -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    ];
-
-    unsafe {
-        gl.bind_vertex_array(Some(vao));
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, slice_as_u8(&QUAD), glow::STATIC_DRAW);
-
-        let position = gl
-            .get_attrib_location(program, "a_pos")
-            .ok_or_else(|| "Present shader is missing a_pos attribute".to_string())?;
-        let uv = gl
-            .get_attrib_location(program, "a_uv")
-            .ok_or_else(|| "Present shader is missing a_uv attribute".to_string())?;
-
-        gl.enable_vertex_attrib_array(position);
-        gl.vertex_attrib_pointer_f32(position, 2, glow::FLOAT, false, 16, 0);
-        gl.enable_vertex_attrib_array(uv);
-        gl.vertex_attrib_pointer_f32(uv, 2, glow::FLOAT, false, 16, 8);
-
-        gl.bind_vertex_array(None);
-        gl.bind_buffer(glow::ARRAY_BUFFER, None);
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn slice_as_u8<T>(slice: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
@@ -4396,60 +3383,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     return textureSample(u_tex, u_sampler, input.uv);
-}
-"#;
-
-#[cfg(not(target_arch = "wasm32"))]
-const GLOW_VERTEX_SHADER: &str = r#"#version 150 core
-uniform mat4 u_view_proj;
-in vec3 a_pos;
-in vec3 a_normal;
-in vec4 a_color;
-out vec3 v_normal;
-out vec4 v_color;
-
-void main() {
-    gl_Position = u_view_proj * vec4(a_pos, 1.0);
-    v_normal = a_normal;
-    v_color = a_color;
-}
-"#;
-
-#[cfg(not(target_arch = "wasm32"))]
-const GLOW_FRAGMENT_SHADER: &str = r#"#version 150 core
-in vec3 v_normal;
-in vec4 v_color;
-uniform int u_unlit;
-out vec4 out_color;
-
-void main() {
-    vec3 n = normalize(v_normal);
-    vec3 light_dir = normalize(vec3(0.35, 0.45, 0.82));
-    float lit = (u_unlit != 0) ? 1.0 : (0.22 + 0.78 * max(dot(n, light_dir), 0.0));
-    out_color = vec4(v_color.rgb * lit, v_color.a);
-}
-"#;
-
-#[cfg(not(target_arch = "wasm32"))]
-const PRESENT_VERTEX_SHADER: &str = r#"#version 150 core
-in vec2 a_pos;
-in vec2 a_uv;
-out vec2 v_uv;
-
-void main() {
-    gl_Position = vec4(a_pos, 0.0, 1.0);
-    v_uv = a_uv;
-}
-"#;
-
-#[cfg(not(target_arch = "wasm32"))]
-const PRESENT_FRAGMENT_SHADER: &str = r#"#version 150 core
-uniform sampler2D u_texture;
-in vec2 v_uv;
-out vec4 out_color;
-
-void main() {
-    out_color = texture(u_texture, v_uv);
 }
 "#;
 
@@ -4706,23 +3639,4 @@ fn quaternion_yaw(q: [f32; 4]) -> f32 {
     let sinz_cosp = 2.0 * (w * z - x * y);
     let cosz_cosp = w * w + x * x - y * y - z * z;
     sinz_cosp.atan2(cosz_cosp)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn flip_rgb_to_rgba(rgb: &[u8], width: usize, height: usize) -> Vec<u8> {
-    let mut rgba = vec![0u8; width * height * 4];
-    for y in 0..height {
-        let src_y = height - 1 - y;
-        let src_row = src_y * width * 3;
-        let dst_row = y * width * 4;
-        for x in 0..width {
-            let src = src_row + x * 3;
-            let dst = dst_row + x * 4;
-            rgba[dst] = rgb[src];
-            rgba[dst + 1] = rgb[src + 1];
-            rgba[dst + 2] = rgb[src + 2];
-            rgba[dst + 3] = 255;
-        }
-    }
-    rgba
 }
