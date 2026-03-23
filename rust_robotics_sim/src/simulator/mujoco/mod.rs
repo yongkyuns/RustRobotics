@@ -52,7 +52,6 @@ impl MujocoPanel {
         self.backend.ui(ui, frame);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn ui_split(
         &mut self,
         controls_ui: &mut Ui,
@@ -62,12 +61,10 @@ impl MujocoPanel {
         self.backend.ui_split(controls_ui, viewport_ui, frame);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn ui_controls(&mut self, ui: &mut Ui) {
         self.backend.ui_controls(ui);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
         self.backend.ui_viewport(ui, frame);
     }

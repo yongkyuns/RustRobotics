@@ -5,6 +5,7 @@ pub mod data;
 pub mod item;
 pub mod math;
 pub mod simulator;
+pub mod theme;
 pub mod time;
 
 pub use app::App;

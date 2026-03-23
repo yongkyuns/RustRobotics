@@ -620,97 +620,109 @@ impl WasmMujocoBackend {
         show_stacked_layout(
             ui,
             self,
-            |this, ui| {
-                let previous_robot = this.selected_robot;
-                let selected_index = match this.selected_robot {
-                    BrowserRobotPreset::Go2 => 0,
-                    BrowserRobotPreset::OpenDuckMini => 1,
-                };
-                let description = match this.selected_robot {
-                    BrowserRobotPreset::Go2 => {
-                        "Go2 runs the facet policy and uses the draggable setpoint ball as the command input."
-                    }
-                    BrowserRobotPreset::OpenDuckMini => {
-                        "Open Duck Mini runs the BEST_WALK_ONNX policy and uses the draggable setpoint ball to generate walking commands."
-                    }
-                };
-                let outcome = show_shared_panel(
-                    ui,
-                    selected_index,
-                    &["Go2", "Open Duck Mini"],
-                    description,
-                    |ui| {
-                        ui.label(match this.selected_robot {
-                            BrowserRobotPreset::Go2 => "Policy: facet",
-                            BrowserRobotPreset::OpenDuckMini => "Policy: BEST_WALK_ONNX",
-                        });
-
-                        if this.active {
-                            this.ensure_browser_assets_started();
-                        }
-
-                        let asset_state_kind = {
-                            let state = this.asset_state.borrow();
-                            match &*state {
-                                BrowserAssetState::Idle => BrowserAssetUiState::Idle,
-                                BrowserAssetState::Loading => BrowserAssetUiState::Loading,
-                                BrowserAssetState::Ready(bundle) => {
-                                    BrowserAssetUiState::Ready(Rc::clone(bundle))
-                                }
-                                BrowserAssetState::Error(err) => {
-                                    BrowserAssetUiState::Error(err.clone())
-                                }
-                            }
-                        };
-
-                        match asset_state_kind {
-                            BrowserAssetUiState::Idle => {
-                                if this.active {
-                                    ui.label("Loading robot runtime...");
-                                }
-                            }
-                            BrowserAssetUiState::Loading => {
-                                ui.label("Loading robot runtime...");
-                            }
-                            BrowserAssetUiState::Ready(bundle) => {
-                                if this.active {
-                                    this.ensure_ort_smoke_test_started(bundle.as_ref());
-                                    this.ensure_mujoco_runtime_started(bundle.as_ref());
-                                }
-                                if let Some(message) = this.browser_panel_status_message() {
-                                    match message {
-                                        BrowserPanelStatus::Info(text) => {
-                                            ui.label(text);
-                                        }
-                                        BrowserPanelStatus::Error(text) => {
-                                            ui.colored_label(Color32::LIGHT_RED, text);
-                                        }
-                                    }
-                                }
-                            }
-                            BrowserAssetUiState::Error(err) => {
-                                ui.colored_label(
-                                    Color32::LIGHT_RED,
-                                    format!("Failed to load robot assets: {err}"),
-                                );
-                            }
-                        }
-                    },
-                );
-                this.selected_robot = match outcome.selected_index {
-                    1 => BrowserRobotPreset::OpenDuckMini,
-                    _ => BrowserRobotPreset::Go2,
-                };
-                if this.selected_robot != previous_robot {
-                    this.reset_selected_robot_state();
-                }
-                if outcome.reset_view {
-                    this.camera = BrowserOrbitCamera::default();
-                    this.camera_initialized = false;
-                }
-            },
+            |this, ui| this.ui_controls(ui),
             |this, ui| this.ui_viewport(ui, frame),
         );
+    }
+
+    pub fn ui_split(
+        &mut self,
+        controls_ui: &mut Ui,
+        viewport_ui: &mut Ui,
+        frame: Option<&eframe::Frame>,
+    ) {
+        self.ui_controls(controls_ui);
+        self.ui_viewport(viewport_ui, frame);
+    }
+
+    pub fn ui_controls(&mut self, ui: &mut Ui) {
+        let previous_robot = self.selected_robot;
+        let selected_index = match self.selected_robot {
+            BrowserRobotPreset::Go2 => 0,
+            BrowserRobotPreset::OpenDuckMini => 1,
+        };
+        let description = match self.selected_robot {
+            BrowserRobotPreset::Go2 => {
+                "Go2 runs the facet policy and uses the draggable setpoint ball as the command input."
+            }
+            BrowserRobotPreset::OpenDuckMini => {
+                "Open Duck Mini runs the BEST_WALK_ONNX policy and uses the draggable setpoint ball to generate walking commands."
+            }
+        };
+        let outcome = show_shared_panel(
+            ui,
+            selected_index,
+            &["Go2", "Open Duck Mini"],
+            description,
+            |ui| {
+                ui.label(match self.selected_robot {
+                    BrowserRobotPreset::Go2 => "Policy: facet",
+                    BrowserRobotPreset::OpenDuckMini => "Policy: BEST_WALK_ONNX",
+                });
+
+                if self.active {
+                    self.ensure_browser_assets_started();
+                }
+
+                let asset_state_kind = {
+                    let state = self.asset_state.borrow();
+                    match &*state {
+                        BrowserAssetState::Idle => BrowserAssetUiState::Idle,
+                        BrowserAssetState::Loading => BrowserAssetUiState::Loading,
+                        BrowserAssetState::Ready(bundle) => {
+                            BrowserAssetUiState::Ready(Rc::clone(bundle))
+                        }
+                        BrowserAssetState::Error(err) => {
+                            BrowserAssetUiState::Error(err.clone())
+                        }
+                    }
+                };
+
+                match asset_state_kind {
+                    BrowserAssetUiState::Idle => {
+                        if self.active {
+                            ui.label("Loading robot runtime...");
+                        }
+                    }
+                    BrowserAssetUiState::Loading => {
+                        ui.label("Loading robot runtime...");
+                    }
+                    BrowserAssetUiState::Ready(bundle) => {
+                        if self.active {
+                            self.ensure_ort_smoke_test_started(bundle.as_ref());
+                            self.ensure_mujoco_runtime_started(bundle.as_ref());
+                        }
+                        if let Some(message) = self.browser_panel_status_message() {
+                            match message {
+                                BrowserPanelStatus::Info(text) => {
+                                    ui.label(text);
+                                }
+                                BrowserPanelStatus::Error(text) => {
+                                    ui.colored_label(Color32::LIGHT_RED, text);
+                                }
+                            }
+                        }
+                    }
+                    BrowserAssetUiState::Error(err) => {
+                        ui.colored_label(
+                            Color32::LIGHT_RED,
+                            format!("Failed to load robot assets: {err}"),
+                        );
+                    }
+                }
+            },
+        );
+        self.selected_robot = match outcome.selected_index {
+            1 => BrowserRobotPreset::OpenDuckMini,
+            _ => BrowserRobotPreset::Go2,
+        };
+        if self.selected_robot != previous_robot {
+            self.reset_selected_robot_state();
+        }
+        if outcome.reset_view {
+            self.camera = BrowserOrbitCamera::default();
+            self.camera_initialized = false;
+        }
     }
 
     pub fn set_active(&mut self, active: bool) {
@@ -1047,7 +1059,7 @@ impl WasmMujocoBackend {
         });
     }
 
-    fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
+    pub fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
         let rect = aligned_viewport_rect(ui);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let state_binding = self.mujoco_state.borrow();

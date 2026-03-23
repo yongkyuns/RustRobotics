@@ -1144,235 +1144,283 @@ impl Simulator {
         self.help_controls_rect = Some(controls_response.response.rect);
 
         ui.separator();
+        let content_height = ui.available_height().max(360.0);
+        let total_width = ui.available_width();
+        let min_viewport_width = (total_width * 0.5).max(360.0);
+        let max_sidebar_width = (total_width - min_viewport_width).max(280.0);
+        let sidebar_width = (total_width * 0.34).clamp(280.0, max_sidebar_width);
 
-        // Options panel for current simulations
-        let options_response = ui.scope(|ui| match self.mode {
-            SimMode::InvertedPendulum => {
-                ui.horizontal(|ui| {
-                    self.pendulums.retain_mut(|sim| sim.options(ui));
-                });
-            }
-            SimMode::Localization => {
-                ui.horizontal(|ui| {
-                    self.vehicles.retain_mut(|sim| sim.options(ui));
-                });
-            }
-            SimMode::Mujoco => {
-                self.mujoco_panel.ui(ui, frame);
-            }
-            SimMode::PathPlanning => {
-                // Common settings
-                ui.horizontal(|ui| {
-                    ui.label("Env:");
-                    if ui
-                        .selectable_label(self.env_mode == EnvironmentMode::Grid, "Grid")
-                        .clicked()
-                    {
-                        self.env_mode = EnvironmentMode::Grid;
-                    }
-                    if ui
-                        .selectable_label(
-                            self.env_mode == EnvironmentMode::Continuous,
-                            "Continuous",
-                        )
-                        .clicked()
-                    {
-                        self.env_mode = EnvironmentMode::Continuous;
-                    }
+        ui.horizontal_top(|ui| {
+            let options_response = ui.allocate_ui_with_layout(
+                vec2(sidebar_width, content_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            match self.mode {
+                                SimMode::InvertedPendulum => {
+                                    egui::ScrollArea::horizontal()
+                                        .id_salt("pendulum_cards")
+                                        .max_height(300.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                self.pendulums.retain_mut(|sim| sim.options(ui));
+                                            });
+                                        });
+                                }
+                                SimMode::Localization => {
+                                    egui::ScrollArea::horizontal()
+                                        .id_salt("localization_cards")
+                                        .max_height(320.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                self.vehicles.retain_mut(|sim| sim.options(ui));
+                                            });
+                                        });
+                                }
+                                SimMode::Mujoco => {
+                                    self.mujoco_panel.ui_controls(ui);
+                                }
+                                SimMode::PathPlanning => {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Env:");
+                                        if ui
+                                            .selectable_label(
+                                                self.env_mode == EnvironmentMode::Grid,
+                                                "Grid",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.env_mode = EnvironmentMode::Grid;
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                self.env_mode == EnvironmentMode::Continuous,
+                                                "Continuous",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.env_mode = EnvironmentMode::Continuous;
+                                        }
 
-                    if self.env_mode == EnvironmentMode::Continuous {
-                        ui.label("Obs Radius:");
-                        ui.add(
-                            DragValue::new(&mut self.continuous_obstacle_radius)
-                                .range(0.1..=5.0)
-                                .speed(0.1),
-                        );
-                    }
-                });
+                                        if self.env_mode == EnvironmentMode::Continuous {
+                                            ui.label("Obs Radius:");
+                                            ui.add(
+                                                DragValue::new(&mut self.continuous_obstacle_radius)
+                                                    .range(0.1..=5.0)
+                                                    .speed(0.1),
+                                            );
+                                        }
+                                    });
 
-                if self.env_mode == EnvironmentMode::Grid {
-                    ui.horizontal(|ui| {
-                        ui.label("Grid:");
-                        ui.label("Width:");
-                        let width_changed = ui
-                            .add(DragValue::new(&mut self.grid_width).range(10..=100))
-                            .changed();
-                        ui.label("Height:");
-                        let height_changed = ui
-                            .add(DragValue::new(&mut self.grid_height).range(10..=100))
-                            .changed();
-                        ui.label("Resolution:");
-                        let res_changed = ui
-                            .add(
-                                DragValue::new(&mut self.grid_resolution)
-                                    .range(0.1..=5.0)
-                                    .speed(0.1),
-                            )
-                            .changed();
+                                    if self.env_mode == EnvironmentMode::Grid {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Grid:");
+                                            ui.label("Width:");
+                                            let width_changed = ui
+                                                .add(
+                                                    DragValue::new(&mut self.grid_width)
+                                                        .range(10..=100),
+                                                )
+                                                .changed();
+                                            ui.label("Height:");
+                                            let height_changed = ui
+                                                .add(
+                                                    DragValue::new(&mut self.grid_height)
+                                                        .range(10..=100),
+                                                )
+                                                .changed();
+                                            ui.label("Resolution:");
+                                            let res_changed = ui
+                                                .add(
+                                                    DragValue::new(&mut self.grid_resolution)
+                                                        .range(0.1..=5.0)
+                                                        .speed(0.1),
+                                                )
+                                                .changed();
 
-                        // Update all planners if any setting changed
-                        for planner in &mut self.planners {
-                            if width_changed || height_changed || res_changed {
-                                planner.update_grid_settings(
-                                    self.grid_width,
-                                    self.grid_height,
-                                    self.grid_resolution,
-                                );
+                                            for planner in &mut self.planners {
+                                                if width_changed || height_changed || res_changed {
+                                                    planner.update_grid_settings(
+                                                        self.grid_width,
+                                                        self.grid_height,
+                                                        self.grid_resolution,
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    }
+
+                                    for planner in &mut self.planners {
+                                        planner.set_env_mode(self.env_mode);
+                                        planner.set_continuous_obstacle_radius(
+                                            self.continuous_obstacle_radius,
+                                        );
+                                    }
+
+                                    ui.separator();
+
+                                    egui::ScrollArea::horizontal()
+                                        .id_salt("path_planning_cards")
+                                        .max_height(320.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                self.planners.retain_mut(|sim| sim.options(ui));
+                                            });
+                                        });
+                                }
+                                SimMode::Slam => {
+                                    egui::ScrollArea::horizontal()
+                                        .id_salt("slam_cards")
+                                        .max_height(260.0)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                self.slam_demos.retain_mut(|sim| sim.options(ui));
+                                            });
+                                        });
+                                }
+                            }
+
+                            if self.mode == SimMode::Localization
+                                && self.vehicles.iter().any(|v| v.is_dynamic_mode())
+                            {
+                                ui.collapsing("Keyboard Controls", |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("← → : Steering");
+                                        ui.label("   ↑ ↓ : Accelerate/Brake");
+                                        ui.label("   Space : Pause");
+                                        ui.label("   Enter : Restart");
+                                    });
+                                });
+                            }
+
+                            if self.mode == SimMode::Slam
+                                && self.slam_demos.iter().any(|s| s.is_manual_mode())
+                            {
+                                ui.collapsing("Keyboard Controls", |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("← → : Turn Left/Right");
+                                        ui.label("   ↑ ↓ : Speed Up/Slow Down");
+                                        ui.label("   Space : Pause");
+                                        ui.label("   Enter : Restart");
+                                    });
+                                });
+                            }
+
+                            ui.separator();
+
+                            ui.collapsing("Instructions", |ui| {
+                                match self.mode {
+                                    SimMode::PathPlanning => {
+                                        ui.label(RichText::new("1. Start & Goal").strong());
+                                        ui.label("• Left-click on the map to set the Start point (Green).");
+                                        ui.label("• Left-click again to set the Goal point (Red).");
+                                        ui.label("• Once both are set, all active planners will run automatically.");
+
+                                        ui.add_space(5.0);
+                                        ui.label(RichText::new("2. Environment").strong());
+                                        if self.env_mode == EnvironmentMode::Grid {
+                                            ui.label("• Grid Mode: Discrete cells.");
+                                            ui.label("• Right-click (or drag): Paint/Erase obstacle cells.");
+                                        } else {
+                                            ui.label("• Continuous Mode: Free space.");
+                                            ui.label("• Right-click: Add a circular obstacle at cursor.");
+                                            ui.label("• Right-click on existing obstacle: Remove it.");
+                                        }
+
+                                        ui.add_space(5.0);
+                                        ui.label(RichText::new("3. Planners").strong());
+                                        ui.label("• Click 'Add Planner' (top) to compare multiple algorithms.");
+                                        ui.label("• Select different algorithms (A*, RRT, Theta*) for each planner.");
+                                        ui.label("• Compare Path Length, Execution Time, and Optimality Ratio.");
+                                    }
+                                    SimMode::Localization | SimMode::Slam => {
+                                        ui.label("• Use Keyboard arrows to drive.");
+                                    }
+                                    SimMode::Mujoco => {
+                                        ui.label("• The MuJoCo tab runs the native MuJoCo model and ONNX policy inside Rust.");
+                                        ui.label("• The viewport uses the shared Rust-owned 3D renderer path across native and web.");
+                                    }
+                                    _ => {}
+                                }
+
+                                ui.add_space(5.0);
+                                ui.label(RichText::new("Navigation").strong());
+                                ui.label("• Pan by dragging, or scroll (+ shift = horizontal).");
+                                ui.label("• Box zooming: Right click to zoom in and zoom out using a selection.");
+                                if cfg!(target_arch = "wasm32") {
+                                    ui.label("• Zoom with ctrl / ⌘ + pointer wheel, or with pinch gesture.");
+                                } else if cfg!(target_os = "macos") {
+                                    ui.label("• Zoom with ctrl / ⌘ + scroll.");
+                                } else {
+                                    ui.label("• Zoom with ctrl + scroll.");
+                                }
+                                ui.label("• Reset view with double-click.");
+                            });
+                        });
+                },
+            );
+            self.help_options_rect = Some(options_response.response.rect);
+
+            ui.add_space(14.0);
+
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), content_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    if self.mode == SimMode::Mujoco {
+                        self.mujoco_panel.ui_viewport(ui, frame);
+                        self.help_scene_rect = Some(ui.min_rect());
+                    } else if self.mode == SimMode::InvertedPendulum {
+                        self.help_scene_rect = Some(self.render_pendulum_scene(ui));
+                    } else {
+                        let mut plot = Plot::new("Scene")
+                            .legend(Legend::default().position(Corner::RightTop))
+                            .show_x(false)
+                            .show_y(false)
+                            .data_aspect(1.0)
+                            .allow_boxed_zoom(self.mode != SimMode::PathPlanning);
+
+                        if self.mode == SimMode::PathPlanning {
+                            plot = plot
+                                .show_grid(false)
+                                .allow_drag(false)
+                                .allow_scroll(false)
+                                .allow_zoom(false);
+                        }
+
+                        let plot_response = plot.show(ui, |plot_ui| match self.mode {
+                            SimMode::InvertedPendulum => {
+                                self.pendulums.iter().for_each(|sim| sim.scene(plot_ui));
+                            }
+                            SimMode::Localization => {
+                                self.vehicles.iter().for_each(|sim| sim.scene(plot_ui));
+                            }
+                            SimMode::Slam => {
+                                self.slam_demos.iter().for_each(|sim| sim.scene(plot_ui));
+                            }
+                            SimMode::PathPlanning => {
+                                self.planners.iter().for_each(|sim| sim.scene(plot_ui));
+                            }
+                            SimMode::Mujoco => unreachable!(),
+                        });
+
+                        if self.mode == SimMode::PathPlanning {
+                            if let Some((first, rest)) = self.planners.split_first_mut() {
+                                first.handle_mouse(&plot_response);
+                                rest.iter_mut().for_each(|sim| sim.match_state_with(first));
                             }
                         }
-                    });
-                }
-
-                // Sync env mode and radius always
-                for planner in &mut self.planners {
-                    planner.set_env_mode(self.env_mode);
-                    planner.set_continuous_obstacle_radius(self.continuous_obstacle_radius);
-                }
-
-                ui.separator();
-
-                // Planners side by side, but each planner's UI is vertical
-                ui.horizontal(|ui| {
-                    self.planners.retain_mut(|sim| sim.options(ui));
-                });
-            }
-            SimMode::Slam => {
-                ui.horizontal(|ui| {
-                    self.slam_demos.retain_mut(|sim| sim.options(ui));
-                });
-            }
-        });
-        self.help_options_rect = Some(options_response.response.rect);
-
-        // Show keyboard controls hint if any vehicle is in dynamic mode
-        if self.mode == SimMode::Localization && self.vehicles.iter().any(|v| v.is_dynamic_mode()) {
-            ui.collapsing("Keyboard Controls", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("← → : Steering");
-                    ui.label("   ↑ ↓ : Accelerate/Brake");
-                    ui.label("   Space : Pause");
-                    ui.label("   Enter : Restart");
-                });
-            });
-        }
-
-        // Show keyboard controls hint for SLAM manual mode
-        if self.mode == SimMode::Slam && self.slam_demos.iter().any(|s| s.is_manual_mode()) {
-            ui.collapsing("Keyboard Controls", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("← → : Turn Left/Right");
-                    ui.label("   ↑ ↓ : Speed Up/Slow Down");
-                    ui.label("   Space : Pause");
-                    ui.label("   Enter : Restart");
-                });
-            });
-        }
-
-        ui.separator();
-
-        // Instructions (collapsible)
-        ui.collapsing("Instructions", |ui| {
-            match self.mode {
-                SimMode::PathPlanning => {
-                    ui.label(RichText::new("1. Start & Goal").strong());
-                    ui.label("• Left-click on the map to set the Start point (Green).");
-                    ui.label("• Left-click again to set the Goal point (Red).");
-                    ui.label("• Once both are set, all active planners will run automatically.");
-
-                    ui.add_space(5.0);
-                    ui.label(RichText::new("2. Environment").strong());
-                    if self.env_mode == EnvironmentMode::Grid {
-                        ui.label("• Grid Mode: Discrete cells.");
-                        ui.label("• Right-click (or drag): Paint/Erase obstacle cells.");
-                    } else {
-                        ui.label("• Continuous Mode: Free space.");
-                        ui.label("• Right-click: Add a circular obstacle at cursor.");
-                        ui.label("• Right-click on existing obstacle: Remove it.");
+                        self.help_scene_rect = Some(plot_response.response.rect);
                     }
-
-                    ui.add_space(5.0);
-                    ui.label(RichText::new("3. Planners").strong());
-                    ui.label("• Click 'Add Planner' (top) to compare multiple algorithms.");
-                    ui.label("• Select different algorithms (A*, RRT, Theta*) for each planner.");
-                    ui.label("• Compare Path Length, Execution Time, and Optimality Ratio.");
-                }
-                SimMode::Localization | SimMode::Slam => {
-                    ui.label("• Use Keyboard arrows to drive.");
-                }
-                SimMode::Mujoco => {
-                    ui.label("• The MuJoCo tab runs the native MuJoCo model and ONNX policy inside Rust.");
-                    ui.label("• The viewport uses the shared Rust-owned 3D renderer path across native and web.");
-                }
-                _ => {}
-            }
-
-            ui.add_space(5.0);
-            ui.label(RichText::new("Navigation").strong());
-            ui.label("• Pan by dragging, or scroll (+ shift = horizontal).");
-            ui.label("• Box zooming: Right click to zoom in and zoom out using a selection.");
-            if cfg!(target_arch = "wasm32") {
-                ui.label("• Zoom with ctrl / ⌘ + pointer wheel, or with pinch gesture.");
-            } else if cfg!(target_os = "macos") {
-                ui.label("• Zoom with ctrl / ⌘ + scroll.");
-            } else {
-                ui.label("• Zoom with ctrl + scroll.");
-            }
-            ui.label("• Reset view with double-click.");
+                },
+            );
         });
-
-        if self.mode == SimMode::Mujoco {
-            ui.separator();
-            let scene_response = ui.group(|ui| {
-                ui.label("MuJoCo viewport");
-                ui.label("The MuJoCo tab above owns the live simulator state and viewport.");
-                ui.label("Use drag to orbit, right-drag to pan, and mouse wheel to zoom.");
-            });
-            self.help_scene_rect = Some(scene_response.response.rect);
-        } else if self.mode == SimMode::InvertedPendulum {
-            self.help_scene_rect = Some(self.render_pendulum_scene(ui));
-        } else {
-            // Main scene plot
-            let mut plot = Plot::new("Scene")
-                .legend(Legend::default().position(Corner::RightTop))
-                .show_x(false)
-                .show_y(false)
-                .data_aspect(1.0)
-                .allow_boxed_zoom(self.mode != SimMode::PathPlanning); // Disable box zoom for path planning to allow right-click
-
-            // For path planning: hide default grid and lock pan/zoom
-            if self.mode == SimMode::PathPlanning {
-                plot = plot
-                    .show_grid(false)
-                    .allow_drag(false)
-                    .allow_scroll(false)
-                    .allow_zoom(false);
-            }
-
-            let plot_response = plot.show(ui, |plot_ui| match self.mode {
-                SimMode::InvertedPendulum => {
-                    self.pendulums.iter().for_each(|sim| sim.scene(plot_ui));
-                }
-                SimMode::Localization => {
-                    self.vehicles.iter().for_each(|sim| sim.scene(plot_ui));
-                }
-                SimMode::Slam => {
-                    self.slam_demos.iter().for_each(|sim| sim.scene(plot_ui));
-                }
-                SimMode::PathPlanning => {
-                    self.planners.iter().for_each(|sim| sim.scene(plot_ui));
-                }
-                SimMode::Mujoco => unreachable!(),
-            });
-
-            // Handle mouse interactions for path planning
-            if self.mode == SimMode::PathPlanning {
-                if let Some((first, rest)) = self.planners.split_first_mut() {
-                    first.handle_mouse(&plot_response);
-                    rest.iter_mut().for_each(|sim| sim.match_state_with(first));
-                }
-            }
-            self.help_scene_rect = Some(plot_response.response.rect);
-        }
 
         self.paint_help_highlight(ui);
         self.sync_mujoco_overlay_active();
