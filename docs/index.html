@@ -192,6 +192,15 @@
           runtime.rustRoboticsMujocoReset();
         });
       };
+
+      window.rustRoboticsMujocoSetCommandSetpoint = function (x, y, z) {
+        if (!rustRoboticsBrowserRuntimePromise) {
+          return;
+        }
+        getRustRoboticsBrowserRuntime().then((runtime) => {
+          runtime.rustRoboticsMujocoSetCommandSetpoint(x, y, z);
+        });
+      };
     </script>
 
     <script type="module">

@@ -2,7 +2,7 @@
 use egui::emath::GuiRounding;
 use egui_plot::{Line, PlotUi};
 use egui::{
-    pos2, vec2, Align2, Color32, FontId, Painter, PointerButton, Pos2, Rect, Sense, Shape,
+    pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Shape,
     Stroke, Ui,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -43,6 +43,9 @@ use super::render_scene::{
     geom_model_matrix as shared_geom_model_matrix, SharedGeomSnapshot, GEOM_BOX, GEOM_CAPSULE,
     GEOM_CYLINDER, GEOM_LINE, GEOM_MESH, GEOM_PLANE, GEOM_SPHERE,
 };
+use super::shared_layout::show_stacked_layout;
+use super::shared_panel::show_shared_panel;
+use super::viewport_interaction::gather_viewport_interaction;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(
@@ -259,27 +262,40 @@ impl NativeMujocoBackend {
     }
 
     fn ui_native(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
-        ui.vertical(|ui| {
-            self.ui_native_controls(ui);
-            ui.separator();
-            self.ui_native_viewport(ui, frame);
-        });
+        show_stacked_layout(
+            ui,
+            self,
+            |this, ui| this.ui_native_controls(ui),
+            |this, ui| this.ui_native_viewport(ui, frame),
+        );
     }
 
     fn ui_native_controls(&mut self, ui: &mut Ui) {
-        ui.heading("mujoco");
-        ui.label("Native MuJoCo running inside RustRobotics.");
         let previous_robot = self.selected_robot;
-        egui::ComboBox::from_label("Robot")
-            .selected_text(self.selected_robot.label())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.selected_robot, NativeRobotPreset::Go2, "Go2");
-                ui.selectable_value(
-                    &mut self.selected_robot,
-                    NativeRobotPreset::OpenDuckMini,
-                    "Open Duck Mini",
-                );
-            });
+        let selected_index = match self.selected_robot {
+            NativeRobotPreset::Go2 => 0,
+            NativeRobotPreset::OpenDuckMini => 1,
+        };
+        let description = match self.selected_robot {
+            NativeRobotPreset::Go2 => "Go2 runs the facet policy and uses the draggable setpoint ball as the command input.",
+            NativeRobotPreset::OpenDuckMini => "Open Duck Mini runs the BEST_WALK_ONNX policy and uses the draggable setpoint ball to generate walking commands.",
+        };
+        let outcome = show_shared_panel(
+            ui,
+            selected_index,
+            &["Go2", "Open Duck Mini"],
+            description,
+            |ui| {
+                ui.label(match self.selected_robot {
+                    NativeRobotPreset::Go2 => "Policy: facet",
+                    NativeRobotPreset::OpenDuckMini => "Policy: BEST_WALK_ONNX",
+                });
+            },
+        );
+        self.selected_robot = match outcome.selected_index {
+            1 => NativeRobotPreset::OpenDuckMini,
+            _ => NativeRobotPreset::Go2,
+        };
         if self.selected_robot != previous_robot {
             self.scene_path = self
                 .selected_robot
@@ -296,13 +312,7 @@ impl NativeMujocoBackend {
             self.render_error = None;
             self.status = format!("Switching to {}...", self.selected_robot.label());
         }
-        ui.label(match self.selected_robot {
-            NativeRobotPreset::Go2 => "Policy: facet",
-            NativeRobotPreset::OpenDuckMini => "Policy: BEST_WALK_ONNX",
-        });
-        ui.label("Control: drag the red setpoint ball in the viewport.");
-
-        if ui.button("Reset view").clicked() {
+        if outcome.reset_view {
             if let Some(runtime) = self.runtime.as_mut() {
                 runtime.reset_camera();
             }
@@ -886,50 +896,36 @@ impl MujocoRuntime {
     }
 
     fn update_software_camera(&mut self, ui: &Ui, response: &egui::Response) {
-        if response.double_clicked() {
+        let software_camera = SoftwareCamera::from_gl(&self.scene.camera[0], response.rect.aspect_ratio());
+        let interaction = gather_viewport_interaction(
+            self.robot.uses_setpoint_ball(),
+            ui,
+            response,
+            |pointer| {
+                software_camera
+                    .as_ref()
+                    .and_then(|camera| camera.intersect_plane_z(response.rect, pointer, 0.05))
+            },
+        );
+
+        if interaction.reset_view {
             self.reset_camera();
         }
-
-        let software_camera = SoftwareCamera::from_gl(&self.scene.camera[0], response.rect.aspect_ratio());
-        if self.robot.uses_setpoint_ball() {
-            if response.clicked_by(PointerButton::Primary) {
-                if let (Some(pointer), Some(camera)) =
-                    (response.interact_pointer_pos(), software_camera.as_ref())
-                {
-                    if let Some(world) = camera.intersect_plane_z(response.rect, pointer, 0.05) {
-                        self.command.setpoint_world = Some(world);
-                        self.command.vel_x = world[0] - self.sim.read_raw_state().base_pos[0];
-                        self.command.vel_y = world[1] - self.sim.read_raw_state().base_pos[1];
-                    }
-                }
-            }
-            if response.dragged_by(PointerButton::Primary) {
-                if let (Some(pointer), Some(camera)) = (response.interact_pointer_pos(), software_camera.as_ref()) {
-                    if let Some(world) = camera.intersect_plane_z(response.rect, pointer, 0.05) {
-                        self.command.setpoint_world = Some(world);
-                        self.command.vel_x = world[0] - self.sim.read_raw_state().base_pos[0];
-                        self.command.vel_y = world[1] - self.sim.read_raw_state().base_pos[1];
-                    }
-                }
-            }
-        } else if response.dragged_by(PointerButton::Primary) {
-            let delta = response.drag_delta();
+        if let Some(world) = interaction.setpoint_world {
+            self.command.setpoint_world = Some(world);
+            self.command.vel_x = world[0] - self.sim.read_raw_state().base_pos[0];
+            self.command.vel_y = world[1] - self.sim.read_raw_state().base_pos[1];
+        }
+        if let Some(delta) = interaction.primary_orbit_delta {
             self.cam.azimuth -= delta.x as f64 * 0.25;
             self.cam.elevation = (self.cam.elevation + delta.y as f64 * 0.2).clamp(-89.0, 89.0);
         }
-
-        if response.dragged_by(PointerButton::Secondary) {
-            let delta = response.drag_delta();
+        if let Some(delta) = interaction.secondary_orbit_delta {
             self.cam.azimuth -= delta.x as f64 * 0.25;
             self.cam.elevation = (self.cam.elevation - delta.y as f64 * 0.2).clamp(-89.0, 89.0);
         }
-
-        if response.hovered() {
-            let scroll_y = ui.input(|input| input.raw_scroll_delta.y);
-            if scroll_y.abs() > f32::EPSILON {
-                let zoom = (1.0 - scroll_y * 0.0015).clamp(0.8, 1.25);
-                self.cam.distance = (self.cam.distance * zoom as f64).clamp(0.35, 40.0);
-            }
+        if let Some(zoom) = interaction.zoom_factor {
+            self.cam.distance = (self.cam.distance * zoom as f64).clamp(0.35, 40.0);
         }
     }
 

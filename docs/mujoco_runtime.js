@@ -66,14 +66,18 @@ export async function rustRoboticsOrtSmokeTest(modelBytes, wasmBasePath, config 
       throw new Error(`unexpected input count: ${inputNames.length}`);
     }
     const commandDim = Number(config?.command_dim) || 16;
-    const inputKeys = Array.isArray(config?.input_keys) ? config.input_keys : inputNames;
-    const nameFor = (predicate) => inputNames.find(predicate) ?? inputKeys.find(predicate);
-    const policyName = nameFor((name) => name === "policy");
-    const isInitName = nameFor((name) => name === "is_init");
-    const adaptHxName = nameFor((name) => name.includes("adapt_hx"));
-    const commandName = inputNames.find(
-      (name) => name !== policyName && name !== isInitName && name !== adaptHxName,
-    );
+    const resolveInputName = (semanticKey, matcher) => {
+      const configuredKeys = Array.isArray(config?.input_keys) ? config.input_keys : [];
+      const semanticIndex = configuredKeys.findIndex((key) => key === semanticKey);
+      if (semanticIndex >= 0 && semanticIndex < inputNames.length) {
+        return inputNames[semanticIndex];
+      }
+      return inputNames.find((name) => matcher(name));
+    };
+    const policyName = resolveInputName("policy", (name) => name === "policy" || name.includes("policy"));
+    const isInitName = resolveInputName("is_init", (name) => name === "is_init" || name.includes("is_init"));
+    const adaptHxName = resolveInputName("adapt_hx", (name) => name.includes("adapt_hx"));
+    const commandName = resolveInputName("command", (name) => name.includes("command"));
     if (!policyName || !isInitName || !adaptHxName || !commandName) {
       throw new Error(`failed to resolve ONNX smoke-test inputs from ${inputNames.join(", ")}`);
     }
@@ -513,6 +517,7 @@ function buildMujocoReport(runtime, includeMeshAssets = false) {
     avg_physics_wall_ms: Number(runtime.avgPhysicsWallMs ?? 0.0),
     last_overlay_wall_ms: Number(runtime.lastOverlayWallMs ?? 0.0),
     avg_overlay_wall_ms: Number(runtime.avgOverlayWallMs ?? 0.0),
+    geoms: collectGeomSnapshots(runtime),
   };
   if (includeMeshAssets) {
     report.mesh_assets = collectMeshAssets(runtime);
@@ -826,6 +831,18 @@ export function rustRoboticsMujocoReset() {
     rustRoboticsMujocoOverlay.cameraInitialized = false;
     rustRoboticsMujocoOverlay.needsRender = true;
   }
+}
+
+export function rustRoboticsMujocoSetCommandSetpoint(x, y, z = COMMAND_BALL_HEIGHT) {
+  if (!rustRoboticsMujocoRuntime?.commandSetpoint) {
+    return;
+  }
+  rustRoboticsMujocoRuntime.commandSetpoint.x = Number(x) || 0.0;
+  rustRoboticsMujocoRuntime.commandSetpoint.y = Number(y) || 0.0;
+  rustRoboticsMujocoRuntime.commandSetpoint.z = Number.isFinite(Number(z))
+    ? Number(z)
+    : COMMAND_BALL_HEIGHT;
+  requestMujocoOverlayRender();
 }
 
 function ensureMujocoOverlay() {

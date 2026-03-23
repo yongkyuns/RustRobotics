@@ -4,6 +4,9 @@ use egui_plot::PlotUi;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 mod render_scene;
+mod shared_layout;
+mod shared_panel;
+mod viewport_interaction;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 

@@ -4,25 +4,33 @@ use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use std::sync::{Arc, Mutex};
 
 use eframe::emath::GuiRounding;
-#[cfg(feature = "web_glow_viewport")]
-use eframe::{egui_glow, glow};
-use egui::{pos2, vec2, Align2, Color32, FontId, Rect, RichText, Sense, Ui};
+use egui::{vec2, Align2, Color32, FontId, Rect, RichText, Sense, Ui};
 use egui_plot::{Line, PlotUi};
 #[cfg(feature = "web_glow_viewport")]
-use glow::HasContext;
+use egui_wgpu;
+#[cfg(feature = "web_glow_viewport")]
+use eframe::wgpu;
 use js_sys::{ArrayBuffer, Function, Promise, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
+#[cfg(feature = "web_glow_viewport")]
+use web_time::Instant;
+#[cfg(feature = "web_glow_viewport")]
+use wgpu::util::DeviceExt as _;
 use crate::data::{IntoValues, TimeTable};
+use super::shared_layout::show_stacked_layout;
 #[cfg(feature = "web_glow_viewport")]
 use super::render_scene::{
     append_grid_lines as append_shared_grid_lines, append_primitive_geom,
+    geom_model_matrix as shared_geom_model_matrix,
     display_geom_color as shared_display_geom_color,
-    transform_geom_point as shared_transform_geom_point,
-    transform_geom_vector as shared_transform_geom_vector,
     GlVertex, SharedGeomSnapshot, GEOM_MESH,
 };
+#[cfg(feature = "web_glow_viewport")]
+use super::shared_panel::show_shared_panel;
+#[cfg(feature = "web_glow_viewport")]
+use super::viewport_interaction::gather_viewport_interaction;
 
 const GO2_ASSET_FILES: &[&str] = &[
     "scene.xml",
@@ -154,14 +162,18 @@ pub(super) struct WasmMujocoBackend {
     pending_mujoco_steps: Rc<RefCell<usize>>,
     compiled_mesh_assets: Rc<RefCell<Vec<BrowserMeshAsset>>>,
     #[cfg(feature = "web_glow_viewport")]
-    glow_renderer: Arc<Mutex<BrowserGlowRenderer>>,
+    wgpu_renderer: Arc<Mutex<BrowserWgpuRenderer>>,
     #[cfg(feature = "web_glow_viewport")]
-    glow_scene: Arc<Mutex<BrowserGlowSceneFrame>>,
+    wgpu_scene: Arc<Mutex<BrowserWgpuSceneFrame>>,
     camera: BrowserOrbitCamera,
     camera_initialized: bool,
     plot_history: Rc<RefCell<TimeTable>>,
     overlay_occlusions: Vec<Rect>,
     overlay_interactive: bool,
+    #[cfg(feature = "web_glow_viewport")]
+    render_display_fps: f32,
+    #[cfg(feature = "web_glow_viewport")]
+    last_render_frame_at: Option<Instant>,
 }
 
 impl Default for WasmMujocoBackend {
@@ -177,9 +189,9 @@ impl Default for WasmMujocoBackend {
             pending_mujoco_steps: Rc::new(RefCell::new(0)),
             compiled_mesh_assets: Rc::new(RefCell::new(Vec::new())),
             #[cfg(feature = "web_glow_viewport")]
-            glow_renderer: Arc::new(Mutex::new(BrowserGlowRenderer::default())),
+            wgpu_renderer: Arc::new(Mutex::new(BrowserWgpuRenderer::default())),
             #[cfg(feature = "web_glow_viewport")]
-            glow_scene: Arc::new(Mutex::new(BrowserGlowSceneFrame::default())),
+            wgpu_scene: Arc::new(Mutex::new(BrowserWgpuSceneFrame::default())),
             camera: BrowserOrbitCamera::default(),
             camera_initialized: false,
             plot_history: Rc::new(RefCell::new(TimeTable::init_with_names(vec![
@@ -189,6 +201,10 @@ impl Default for WasmMujocoBackend {
             ]))),
             overlay_occlusions: Vec::new(),
             overlay_interactive: true,
+            #[cfg(feature = "web_glow_viewport")]
+            render_display_fps: 0.0,
+            #[cfg(feature = "web_glow_viewport")]
+            last_render_frame_at: None,
         }
     }
 }
@@ -313,6 +329,11 @@ enum BrowserAssetUiState {
     Idle,
     Loading,
     Ready(Rc<BrowserAssetBundle>),
+    Error(String),
+}
+
+enum BrowserPanelStatus {
+    Info(String),
     Error(String),
 }
 
@@ -452,7 +473,9 @@ struct BrowserOcclusionRect {
 #[cfg_attr(not(feature = "web_glow_viewport"), allow(dead_code))]
 #[derive(Clone)]
 struct BrowserMeshAsset {
-    triangles: Vec<LocalMeshVertex>,
+    vertices: Vec<LocalMeshVertex>,
+    local_min: [f32; 3],
+    local_max: [f32; 3],
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -471,39 +494,133 @@ struct LocalMeshVertex {
 
 #[cfg(feature = "web_glow_viewport")]
 #[derive(Default, Clone)]
-struct BrowserGlowSceneFrame {
+struct BrowserWgpuSceneFrame {
     triangles: Vec<GlVertex>,
     lines: Vec<GlVertex>,
+    mesh_instances: Vec<MeshInstance>,
+    view_proj: [f32; 16],
+}
+
+#[cfg(feature = "web_glow_viewport")]
+struct BrowserWgpuCallback {
+    rect: Rect,
+    renderer: Arc<Mutex<BrowserWgpuRenderer>>,
+    scene: Arc<Mutex<BrowserWgpuSceneFrame>>,
+    target_format: wgpu::TextureFormat,
+}
+
+#[cfg(feature = "web_glow_viewport")]
+impl egui_wgpu::CallbackTrait for BrowserWgpuCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        _callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let render_result = (|| -> Result<wgpu::CommandBuffer, String> {
+            let scene = self
+                .scene
+                .lock()
+                .map_err(|_| "Failed to lock wasm wgpu scene frame".to_string())?;
+            let mut renderer = self
+                .renderer
+                .lock()
+                .map_err(|_| "Failed to lock wasm wgpu renderer".to_string())?;
+            renderer.prepare(
+                device,
+                queue,
+                self.rect,
+                screen_descriptor,
+                self.target_format,
+                &scene,
+            )
+        })();
+
+        match render_result {
+            Ok(command_buffer) => vec![command_buffer],
+            Err(err) => {
+                if let Ok(mut renderer) = self.renderer.lock() {
+                    renderer.last_error = Some(err);
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        _callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        let render_result = (|| -> Result<(), String> {
+            let mut renderer = self
+                .renderer
+                .lock()
+                .map_err(|_| "Failed to lock wasm wgpu renderer".to_string())?;
+            renderer.paint(render_pass)
+        })();
+
+        if let Err(err) = render_result {
+            if let Ok(mut renderer) = self.renderer.lock() {
+                renderer.last_error = Some(err);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "web_glow_viewport")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct BrowserWgpuSceneUniform {
     view_proj: [f32; 16],
 }
 
 #[cfg(feature = "web_glow_viewport")]
 #[derive(Default)]
-struct BrowserGlowRenderer {
-    program: Option<glow::Program>,
-    triangle_vao: Option<glow::VertexArray>,
-    triangle_vbo: Option<glow::Buffer>,
-    line_vao: Option<glow::VertexArray>,
-    line_vbo: Option<glow::Buffer>,
-    present_program: Option<glow::Program>,
-    present_vao: Option<glow::VertexArray>,
-    present_vbo: Option<glow::Buffer>,
-    offscreen_fbo: Option<glow::Framebuffer>,
-    offscreen_color: Option<glow::Texture>,
-    offscreen_depth: Option<glow::Renderbuffer>,
-    offscreen_size: [i32; 2],
-    u_view_proj: Option<glow::UniformLocation>,
-    u_unlit: Option<glow::UniformLocation>,
-    u_present_texture: Option<glow::UniformLocation>,
+struct BrowserWgpuRenderer {
+    scene_pipeline: Option<wgpu::RenderPipeline>,
+    line_pipeline: Option<wgpu::RenderPipeline>,
+    mesh_pipeline: Option<wgpu::RenderPipeline>,
+    present_pipeline: Option<wgpu::RenderPipeline>,
+    uniform_buffer: Option<wgpu::Buffer>,
+    uniform_bind_group: Option<wgpu::BindGroup>,
+    triangle_buffer: Option<wgpu::Buffer>,
+    line_buffer: Option<wgpu::Buffer>,
+    mesh_instance_buffer: Option<wgpu::Buffer>,
+    triangle_capacity: u64,
+    line_capacity: u64,
+    mesh_instance_capacity: u64,
+    sampler: Option<wgpu::Sampler>,
+    present_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    present_bind_group: Option<wgpu::BindGroup>,
+    offscreen_texture: Option<wgpu::Texture>,
+    offscreen_view: Option<wgpu::TextureView>,
+    depth_texture: Option<wgpu::Texture>,
+    depth_view: Option<wgpu::TextureView>,
+    offscreen_size: [u32; 2],
+    mesh_assets: BTreeMap<usize, MeshAssetGpu>,
     last_error: Option<String>,
+    last_render_ms_ms: f32,
 }
 
-// The web build uses this renderer only on the single browser main thread, but
-// egui_glow's callback API requires the captured state to be Send + Sync.
 #[cfg(feature = "web_glow_viewport")]
-unsafe impl Send for BrowserGlowRenderer {}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MeshInstance {
+    model: [[f32; 4]; 4],
+    color: [f32; 4],
+    mesh_id: u32,
+    _padding: [u32; 3],
+}
+
 #[cfg(feature = "web_glow_viewport")]
-unsafe impl Sync for BrowserGlowRenderer {}
+struct MeshAssetGpu {
+    vertex_buffer: wgpu::Buffer,
+    vertex_count: u32,
+}
 
 #[cfg_attr(not(feature = "web_glow_viewport"), allow(dead_code))]
 #[derive(Clone, Copy)]
@@ -549,119 +666,101 @@ impl WasmMujocoBackend {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
-        let outer = ui.available_rect_before_wrap();
-        let gap = 12.0;
-        let controls_width = outer.width().min(360.0).max(300.0);
-        let controls_rect =
-            Rect::from_min_size(outer.min, vec2(controls_width, outer.height().max(280.0)));
-        let viewport_rect = Rect::from_min_max(
-            pos2((controls_rect.max.x + gap).min(outer.max.x), outer.min.y),
-            outer.max,
-        );
-
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(controls_rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| {
-                ui.heading("mujoco");
-                ui.label("Browser app shell is active.");
-                let previous_robot = self.selected_robot;
-                egui::ComboBox::from_label("Robot")
-                    .selected_text(self.selected_robot.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.selected_robot,
-                            BrowserRobotPreset::Go2,
-                            BrowserRobotPreset::Go2.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.selected_robot,
-                            BrowserRobotPreset::OpenDuckMini,
-                            BrowserRobotPreset::OpenDuckMini.label(),
-                        );
-                    });
-                if self.selected_robot != previous_robot {
-                    self.reset_selected_robot_state();
-                }
-                ui.label(match self.selected_robot {
+        show_stacked_layout(
+            ui,
+            self,
+            |this, ui| {
+                let previous_robot = this.selected_robot;
+                let selected_index = match this.selected_robot {
+                    BrowserRobotPreset::Go2 => 0,
+                    BrowserRobotPreset::OpenDuckMini => 1,
+                };
+                let description = match this.selected_robot {
                     BrowserRobotPreset::Go2 => {
                         "Go2 runs the facet policy and uses the draggable setpoint ball as the command input."
                     }
                     BrowserRobotPreset::OpenDuckMini => {
                         "Open Duck Mini runs the BEST_WALK_ONNX policy and uses the draggable setpoint ball to generate walking commands."
                     }
-                });
-                ui.label("Control: drag the red setpoint ball in the viewport.");
-                if ui.button("Reset view").clicked() {
-                    self.camera = BrowserOrbitCamera::default();
-                    self.camera_initialized = false;
-                    #[cfg(not(feature = "web_glow_viewport"))]
-                    self.reset_browser_viewport_camera();
-                }
-                ui.separator();
-
-                if self.active {
-                    self.ensure_browser_assets_started();
-                }
-
-                let asset_state_kind = {
-                    let state = self.asset_state.borrow();
-                    match &*state {
-                        BrowserAssetState::Idle => BrowserAssetUiState::Idle,
-                        BrowserAssetState::Loading => BrowserAssetUiState::Loading,
-                        BrowserAssetState::Ready(bundle) => {
-                            BrowserAssetUiState::Ready(Rc::clone(bundle))
-                        }
-                        BrowserAssetState::Error(err) => BrowserAssetUiState::Error(err.clone()),
-                    }
                 };
+                let outcome = show_shared_panel(
+                    ui,
+                    selected_index,
+                    &["Go2", "Open Duck Mini"],
+                    description,
+                    |ui| {
+                        ui.label(match this.selected_robot {
+                            BrowserRobotPreset::Go2 => "Policy: facet",
+                            BrowserRobotPreset::OpenDuckMini => "Policy: BEST_WALK_ONNX",
+                        });
 
-                match asset_state_kind {
-                    BrowserAssetUiState::Idle => {
-                        ui.label("Browser asset bundle: idle");
-                    }
-                    BrowserAssetUiState::Loading => {
-                        ui.label("Browser asset bundle: loading...");
-                        if self.active {
-                            ui.ctx().request_repaint();
+                        if this.active {
+                            this.ensure_browser_assets_started();
                         }
-                    }
-                    BrowserAssetUiState::Ready(bundle) => {
-                        if self.active {
-                            self.ensure_ort_smoke_test_started(bundle.as_ref());
-                            self.ensure_mujoco_runtime_started(bundle.as_ref());
-                            ui.ctx().request_repaint();
+
+                        let asset_state_kind = {
+                            let state = this.asset_state.borrow();
+                            match &*state {
+                                BrowserAssetState::Idle => BrowserAssetUiState::Idle,
+                                BrowserAssetState::Loading => BrowserAssetUiState::Loading,
+                                BrowserAssetState::Ready(bundle) => {
+                                    BrowserAssetUiState::Ready(Rc::clone(bundle))
+                                }
+                                BrowserAssetState::Error(err) => {
+                                    BrowserAssetUiState::Error(err.clone())
+                                }
+                            }
+                        };
+
+                        match asset_state_kind {
+                            BrowserAssetUiState::Idle => {
+                                if this.active {
+                                    ui.label("Loading robot runtime...");
+                                }
+                            }
+                            BrowserAssetUiState::Loading => {
+                                ui.label("Loading robot runtime...");
+                            }
+                            BrowserAssetUiState::Ready(bundle) => {
+                                if this.active {
+                                    this.ensure_ort_smoke_test_started(bundle.as_ref());
+                                    this.ensure_mujoco_runtime_started(bundle.as_ref());
+                                }
+                                if let Some(message) = this.browser_panel_status_message() {
+                                    match message {
+                                        BrowserPanelStatus::Info(text) => {
+                                            ui.label(text);
+                                        }
+                                        BrowserPanelStatus::Error(text) => {
+                                            ui.colored_label(Color32::LIGHT_RED, text);
+                                        }
+                                    }
+                                }
+                            }
+                            BrowserAssetUiState::Error(err) => {
+                                ui.colored_label(
+                                    Color32::LIGHT_RED,
+                                    format!("Failed to load robot assets: {err}"),
+                                );
+                            }
                         }
-                        self.ui_asset_report(ui, bundle.as_ref());
-                        ui.separator();
-                        self.ui_ort_report(ui);
-                        ui.separator();
-                        self.ui_mujoco_report(ui);
-                    }
-                    BrowserAssetUiState::Error(err) => {
-                        ui.colored_label(Color32::LIGHT_RED, format!("Asset bundle error: {err}"));
-                    }
+                    },
+                );
+                this.selected_robot = match outcome.selected_index {
+                    1 => BrowserRobotPreset::OpenDuckMini,
+                    _ => BrowserRobotPreset::Go2,
+                };
+                if this.selected_robot != previous_robot {
+                    this.reset_selected_robot_state();
+                }
+                if outcome.reset_view {
+                    this.camera = BrowserOrbitCamera::default();
+                    this.camera_initialized = false;
+                    #[cfg(not(feature = "web_glow_viewport"))]
+                    this.reset_browser_viewport_camera();
                 }
             },
-        );
-
-        ui.painter().rect_filled(
-            Rect::from_min_max(
-                pos2(controls_rect.max.x, outer.min.y),
-                pos2((controls_rect.max.x + gap).min(outer.max.x), outer.max.y),
-            ),
-            0.0,
-            ui.visuals().panel_fill,
-        );
-
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(viewport_rect)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| {
-                self.ui_viewport(ui, frame);
-            },
+            |this, ui| this.ui_viewport(ui, frame),
         );
     }
 
@@ -747,7 +846,6 @@ impl WasmMujocoBackend {
         *self.pending_mujoco_steps.borrow_mut() = 0;
         self.compiled_mesh_assets.borrow_mut().clear();
         self.plot_history.borrow_mut().clear();
-        #[cfg(not(feature = "web_glow_viewport"))]
         self.reset_browser_runtime();
     }
 
@@ -759,6 +857,34 @@ impl WasmMujocoBackend {
         self.camera_initialized = false;
         #[cfg(not(feature = "web_glow_viewport"))]
         self.hide_browser_viewport();
+    }
+
+    fn browser_panel_status_message(&self) -> Option<BrowserPanelStatus> {
+        if let BrowserAssetState::Error(err) = &*self.asset_state.borrow() {
+            return Some(BrowserPanelStatus::Error(format!(
+                "Failed to load robot assets: {err}"
+            )));
+        }
+
+        match &*self.ort_state.borrow() {
+            BrowserOrtState::Loading => {
+                return Some(BrowserPanelStatus::Info(
+                    "Loading ONNX policy runtime...".to_string(),
+                ));
+            }
+            BrowserOrtState::Error(err) => {
+                return Some(BrowserPanelStatus::Error(err.clone()));
+            }
+            BrowserOrtState::Idle | BrowserOrtState::Ready(_) => {}
+        }
+
+        match &*self.mujoco_state.borrow() {
+            BrowserMujocoState::Idle | BrowserMujocoState::Loading => Some(
+                BrowserPanelStatus::Info("Loading robot runtime...".to_string()),
+            ),
+            BrowserMujocoState::Ready(_) => None,
+            BrowserMujocoState::Error(err) => Some(BrowserPanelStatus::Error(err.clone())),
+        }
     }
 
     fn ui_asset_report(&self, ui: &mut Ui, bundle: &BrowserAssetBundle) {
@@ -1103,8 +1229,19 @@ impl WasmMujocoBackend {
                 return;
             }
             *step_in_flight.borrow_mut() = false;
+            let latest_setpoint_preview = match &*state.borrow() {
+                BrowserMujocoState::Ready(current) if current.use_setpoint_ball => {
+                    Some(current.setpoint_preview.clone())
+                }
+                _ => None,
+            };
             *state.borrow_mut() = match result {
-                Ok(report) => {
+                Ok(mut report) => {
+                    if let Some(setpoint_preview) = latest_setpoint_preview {
+                        if setpoint_preview.len() >= 3 {
+                            report.setpoint_preview = setpoint_preview;
+                        }
+                    }
                     let command_input_x = report
                         .setpoint_preview
                         .first()
@@ -1128,14 +1265,12 @@ impl WasmMujocoBackend {
     fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
         let rect = aligned_viewport_rect(ui);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        #[cfg(feature = "web_glow_viewport")]
-        self.update_camera(ui, &response);
         #[cfg(not(feature = "web_glow_viewport"))]
         let _ = response;
 
         let state_binding = self.mujoco_state.borrow();
         #[cfg(feature = "web_glow_viewport")]
-        let report = match &*state_binding {
+        let mut report = match &*state_binding {
             BrowserMujocoState::Ready(report) => report.clone(),
             BrowserMujocoState::Idle => {
                 #[cfg(not(feature = "web_glow_viewport"))]
@@ -1255,8 +1390,12 @@ impl WasmMujocoBackend {
 
         #[cfg(feature = "web_glow_viewport")]
         {
-            let mesh_assets = self.compiled_mesh_assets.borrow().clone();
-            if mesh_assets.is_empty() {
+            self.update_camera(ui, &response, &report);
+            if let BrowserMujocoState::Ready(updated_report) = &*self.mujoco_state.borrow() {
+                report = updated_report.clone();
+            }
+            let mesh_assets_empty = self.compiled_mesh_assets.borrow().is_empty();
+            if mesh_assets_empty {
                 ui.painter()
                     .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
                 ui.painter().text(
@@ -1273,12 +1412,13 @@ impl WasmMujocoBackend {
                 self.fit_camera_to_report(&report);
                 self.camera_initialized = true;
             }
-            let scene = self.build_gl_scene_frame(
+            let mesh_assets = self.compiled_mesh_assets.borrow();
+            let scene = self.build_wgpu_scene_frame(
                 &report,
                 mesh_assets.as_slice(),
                 rect.width() / rect.height(),
             );
-            if let Ok(mut scene_state) = self.glow_scene.lock() {
+            if let Ok(mut scene_state) = self.wgpu_scene.lock() {
                 *scene_state = scene;
             }
 
@@ -1286,39 +1426,44 @@ impl WasmMujocoBackend {
                 self.render_software_2d(ui, rect, &report, mesh_assets.as_slice());
                 return;
             };
-            let Some(gl) = frame.gl() else {
+            let Some(render_state) = frame.wgpu_render_state() else {
                 self.render_software_2d(ui, rect, &report, mesh_assets.as_slice());
                 return;
             };
+            if let Ok(mut renderer) = self.wgpu_renderer.lock() {
+                let _ = renderer.ensure_mesh_assets(&render_state.device, mesh_assets.as_slice());
+            }
 
-            let renderer = self.glow_renderer.clone();
-            let scene = self.glow_scene.clone();
-            ui.painter().add(egui::PaintCallback {
+            let callback = BrowserWgpuCallback {
                 rect,
-                callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
-                    let render_result = (|| -> Result<(), String> {
-                        let scene = scene
-                            .lock()
-                            .map_err(|_| "Failed to lock wasm glow scene".to_string())?;
-                        let mut renderer = renderer
-                            .lock()
-                            .map_err(|_| "Failed to lock wasm glow renderer".to_string())?;
-                        renderer.paint(painter.gl(), info, &scene)
-                    })();
+                renderer: self.wgpu_renderer.clone(),
+                scene: self.wgpu_scene.clone(),
+                target_format: render_state.target_format,
+            };
+            ui.painter()
+                .add(egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
+                    rect, callback,
+                )));
 
-                    if let Err(err) = render_result {
-                        if let Ok(mut renderer) = renderer.lock() {
-                            renderer.last_error = Some(err);
-                        }
-                    }
-                })),
-            });
+            let now = Instant::now();
+            if let Some(last_frame_at) = self.last_render_frame_at {
+                let dt_ms = (now - last_frame_at).as_secs_f32() * 1000.0;
+                if dt_ms > f32::EPSILON {
+                    let instant_fps = 1000.0 / dt_ms.max(1.0);
+                    self.render_display_fps = if self.render_display_fps > 0.0 {
+                        self.render_display_fps * 0.9 + instant_fps * 0.1
+                    } else {
+                        instant_fps
+                    };
+                }
+            }
+            self.last_render_frame_at = Some(now);
 
             let overlay = format!(
                 concat!(
-                    "Browser glow viewport\n",
+                    "Browser rust wgpu viewport\n",
                     "Sim t={:.2}s  steps={}  cmd=({:+.2}, {:+.2})\n",
-                    "Setpoint {:?}  policy={}  FPS {:.1}\n",
+                    "Setpoint {:?}  policy={}  Viewport FPS {:.1}\n",
                     "Step {:.2}/{:.2} ms  Policy {:.2}/{:.2} ms  Physics {:.2}/{:.2} ms\n",
                     "Overlay {:.2}/{:.2} ms  Drag {} d={} m={}\n",
                     "Drag: orbit | Right-drag: pan | Wheel: zoom | Double-click: reset view"
@@ -1329,7 +1474,7 @@ impl WasmMujocoBackend {
                 report.command_vel_y,
                 report.setpoint_preview,
                 report.command_mode,
-                report.display_fps,
+                self.render_display_fps,
                 report.last_step_wall_ms,
                 report.avg_step_wall_ms,
                 report.last_policy_wall_ms,
@@ -1349,7 +1494,6 @@ impl WasmMujocoBackend {
                 FontId::monospace(12.0),
                 Color32::from_gray(210),
             );
-            let _ = gl;
         }
     }
 
@@ -1379,14 +1523,16 @@ impl WasmMujocoBackend {
     }
 
     #[cfg(feature = "web_glow_viewport")]
-    fn build_gl_scene_frame(
+    fn build_wgpu_scene_frame(
         &self,
         report: &BrowserMujocoReport,
         mesh_assets: &[BrowserMeshAsset],
         aspect: f32,
-    ) -> BrowserGlowSceneFrame {
-        let mut frame = BrowserGlowSceneFrame::default();
+    ) -> BrowserWgpuSceneFrame {
+        let mut frame = BrowserWgpuSceneFrame::default();
         append_shared_grid_lines(&mut frame.lines);
+        let mut depth_points = Vec::new();
+        depth_points.extend(frame.lines.iter().map(|v| v.position));
 
         for geom in &report.geoms {
             let shared_geom = SharedGeomSnapshot {
@@ -1398,12 +1544,18 @@ impl WasmMujocoBackend {
                 mat: geom.mat,
             };
             match geom.type_id {
-                GEOM_MESH => append_mesh_geom(
-                    &mut frame.triangles,
-                    &shared_geom,
-                    mesh_assets,
-                    false,
-                ),
+                GEOM_MESH => {
+                    if let Some(instance) = build_mesh_instance(&shared_geom, false) {
+                        if let Some(asset) = mesh_assets.get(instance.mesh_id as usize) {
+                            extend_depth_points_with_mesh_bounds(
+                                &mut depth_points,
+                                asset,
+                                &instance.model,
+                            );
+                        }
+                        frame.mesh_instances.push(instance);
+                    }
+                }
                 _ => append_primitive_geom(
                     &mut frame.triangles,
                     &mut frame.lines,
@@ -1413,43 +1565,105 @@ impl WasmMujocoBackend {
             }
         }
 
-        frame.view_proj = self.camera.view_projection_matrix(aspect.max(0.1));
+        self.append_command_setpoint_scene(&mut frame.triangles, report);
+
+        depth_points.extend(frame.triangles.iter().map(|v| v.position));
+        depth_points.extend(frame.lines.iter().map(|v| v.position));
+        if let Some(setpoint) = report_setpoint(report) {
+            let marker_radius = 0.05;
+            for sx in [-marker_radius, marker_radius] {
+                for sy in [-marker_radius, marker_radius] {
+                    for sz in [-marker_radius, marker_radius] {
+                        depth_points.push([setpoint[0] + sx, setpoint[1] + sy, setpoint[2] + sz]);
+                    }
+                }
+            }
+        }
+        frame
+            .mesh_instances
+            .sort_by_key(|instance| instance.mesh_id);
+
+        frame.view_proj = self
+            .camera
+            .fitted_view_projection_matrix_points(aspect.max(0.1), &depth_points);
         frame
     }
 
     #[cfg(feature = "web_glow_viewport")]
-    fn update_camera(&mut self, ui: &Ui, response: &egui::Response) {
-        if response.double_clicked() {
+    fn append_command_setpoint_scene(
+        &self,
+        triangles: &mut Vec<GlVertex>,
+        report: &BrowserMujocoReport,
+    ) {
+        let Some(setpoint) = report_setpoint(report) else {
+            return;
+        };
+        super::render_scene::append_world_sphere(
+            triangles,
+            setpoint,
+            0.05,
+            [0.92, 0.24, 0.24, 1.0],
+        );
+    }
+
+    #[cfg(feature = "web_glow_viewport")]
+    fn update_camera(&mut self, ui: &Ui, response: &egui::Response, report: &BrowserMujocoReport) {
+        let interaction = gather_viewport_interaction(report.use_setpoint_ball, ui, response, |pointer| {
+            self.camera.intersect_plane_z(response.rect, pointer, 0.05)
+        });
+
+        if interaction.reset_view {
             self.camera = BrowserOrbitCamera::default();
             self.camera_initialized = false;
         }
-
-        if response.dragged_by(egui::PointerButton::Primary) {
-            let delta = response.drag_delta();
+        if let Some(world) = interaction.setpoint_world {
+            self.set_command_setpoint(world);
+        }
+        if let Some(delta) = interaction.primary_orbit_delta {
             self.camera.azimuth_deg -= delta.x * 0.25;
             self.camera.elevation_deg =
                 (self.camera.elevation_deg + delta.y * 0.2).clamp(-89.0, 89.0);
         }
 
-        if response.dragged_by(egui::PointerButton::Secondary) {
-            let delta = response.drag_delta();
-            let forward = orbit_forward(self.camera.azimuth_deg, self.camera.elevation_deg);
-            let right = normalize3(cross3(forward, [0.0, 0.0, 1.0]));
-            let up = normalize3(cross3(right, forward));
-            let pan_scale = self.camera.distance * 0.0025;
-            for axis in 0..3 {
-                self.camera.target[axis] -=
-                    (right[axis] * delta.x + up[axis] * delta.y) * pan_scale;
-            }
+        if let Some(delta) = interaction.secondary_orbit_delta {
+            self.camera.azimuth_deg -= delta.x * 0.25;
+            self.camera.elevation_deg =
+                (self.camera.elevation_deg - delta.y * 0.2).clamp(-89.0, 89.0);
         }
 
-        if response.hovered() {
-            let scroll_y = ui.input(|input| input.raw_scroll_delta.y);
-            if scroll_y.abs() > f32::EPSILON {
-                let zoom = (1.0 - scroll_y * 0.0015).clamp(0.8, 1.25);
-                self.camera.distance = (self.camera.distance * zoom).clamp(0.35, 40.0);
-            }
+        if let Some(zoom) = interaction.zoom_factor {
+            self.camera.distance = (self.camera.distance * zoom).clamp(0.35, 40.0);
         }
+    }
+
+    #[cfg(feature = "web_glow_viewport")]
+    fn set_command_setpoint(&mut self, world: [f32; 3]) {
+        if let BrowserMujocoState::Ready(report) = &mut *self.mujoco_state.borrow_mut() {
+            report.setpoint_preview = vec![world[0], world[1], world[2]];
+        }
+        self.set_browser_command_setpoint(world);
+    }
+
+    #[cfg(feature = "web_glow_viewport")]
+    fn set_browser_command_setpoint(&self, world: [f32; 3]) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(function) = Reflect::get(
+            window.as_ref(),
+            &JsValue::from_str("rustRoboticsMujocoSetCommandSetpoint"),
+        ) else {
+            return;
+        };
+        let Ok(function) = function.dyn_into::<Function>() else {
+            return;
+        };
+        let _ = function.call3(
+            &JsValue::NULL,
+            &JsValue::from_f64(world[0] as f64),
+            &JsValue::from_f64(world[1] as f64),
+            &JsValue::from_f64(world[2] as f64),
+        );
     }
 
     #[allow(dead_code)]
@@ -1581,7 +1795,6 @@ impl WasmMujocoBackend {
         let _ = function.call0(&JsValue::NULL);
     }
 
-    #[cfg(not(feature = "web_glow_viewport"))]
     fn reset_browser_runtime(&self) {
         let Some(window) = web_sys::window() else {
             return;
@@ -1925,7 +2138,9 @@ fn convert_browser_mesh_assets(meshes: &[BrowserMeshAssetSnapshot]) -> Vec<Brows
     meshes
         .iter()
         .map(|mesh| {
-            let mut triangles = Vec::new();
+            let mut vertices = Vec::new();
+            let mut local_min = [f32::INFINITY; 3];
+            let mut local_max = [f32::NEG_INFINITY; 3];
             let vertnum = mesh.positions.len() / 3;
             for tri in mesh.faces.chunks_exact(3) {
                 let ia = tri[0] as usize;
@@ -1977,22 +2192,46 @@ fn convert_browser_mesh_assets(meshes: &[BrowserMeshAssetSnapshot]) -> Vec<Brows
                 } else {
                     face_normal
                 };
-                triangles.push(LocalMeshVertex {
+                extend_bounds3(&mut local_min, &mut local_max, a);
+                extend_bounds3(&mut local_min, &mut local_max, b);
+                extend_bounds3(&mut local_min, &mut local_max, c);
+                vertices.push(LocalMeshVertex {
                     position: a,
                     normal: na,
                 });
-                triangles.push(LocalMeshVertex {
+                vertices.push(LocalMeshVertex {
                     position: b,
                     normal: nb,
                 });
-                triangles.push(LocalMeshVertex {
+                vertices.push(LocalMeshVertex {
                     position: c,
                     normal: nc,
                 });
             }
-            BrowserMeshAsset { triangles }
+            if !local_min[0].is_finite() {
+                local_min = [0.0; 3];
+                local_max = [0.0; 3];
+            }
+            BrowserMeshAsset {
+                vertices,
+                local_min,
+                local_max,
+            }
         })
         .collect()
+}
+
+#[cfg(feature = "web_glow_viewport")]
+fn report_setpoint(report: &BrowserMujocoReport) -> Option<[f32; 3]> {
+    if report.setpoint_preview.len() >= 3 {
+        Some([
+            report.setpoint_preview[0],
+            report.setpoint_preview[1],
+            report.setpoint_preview[2],
+        ])
+    } else {
+        None
+    }
 }
 
 #[cfg(feature = "web_glow_viewport")]
@@ -2025,6 +2264,13 @@ fn aligned_viewport_rect(ui: &Ui) -> Rect {
 impl BrowserOrbitCamera {
     fn view_projection_matrix(&self, aspect: f32) -> [f32; 16] {
         mul_mat4(self.projection_matrix(aspect), self.view_matrix())
+    }
+
+    fn fitted_view_projection_matrix_points(&self, aspect: f32, points: &[[f32; 3]]) -> [f32; 16] {
+        let Some((near, far)) = self.fitted_depth_range_points(points) else {
+            return self.view_projection_matrix(aspect);
+        };
+        mul_mat4(self.projection_matrix_with_depth_range(aspect, near, far), self.view_matrix())
     }
 
     fn eye(&self) -> [f32; 3] {
@@ -2060,9 +2306,13 @@ impl BrowserOrbitCamera {
     }
 
     fn projection_matrix(&self, aspect: f32) -> [f32; 16] {
+        self.projection_matrix_with_depth_range(aspect, 0.02, 50.0)
+    }
+
+    fn projection_matrix_with_depth_range(&self, aspect: f32, near: f32, far: f32) -> [f32; 16] {
         let fov_y = 45.0_f32.to_radians();
-        let near = 0.02;
-        let far = 50.0;
+        let near = near.max(1e-4);
+        let far = far.max(near + 0.1);
         let f = 1.0 / (fov_y * 0.5).tan();
 
         [
@@ -2084,264 +2334,623 @@ impl BrowserOrbitCamera {
             0.0,
         ]
     }
+
+    fn fitted_depth_range_points(&self, points: &[[f32; 3]]) -> Option<(f32, f32)> {
+        let eye = self.eye();
+        let forward = normalize3(sub3(self.target, eye));
+        let mut max_depth = f32::NEG_INFINITY;
+        for &point in points {
+            let depth = dot3(sub3(point, eye), forward);
+            if depth > 1e-4 {
+                max_depth = max_depth.max(depth);
+            }
+        }
+        if !max_depth.is_finite() {
+            return None;
+        }
+        let near = 0.02;
+        let far = (max_depth * 1.2).max(near + 1.0).min(50.0);
+        Some((near, far))
+    }
+
+    fn intersect_plane_z(&self, rect: Rect, pointer: egui::Pos2, z: f32) -> Option<[f32; 3]> {
+        let (origin, dir) = self.world_ray(rect, pointer)?;
+        if dir[2].abs() <= 1e-6 {
+            return None;
+        }
+        let t = (z - origin[2]) / dir[2];
+        if t <= 0.0 {
+            return None;
+        }
+        Some(add3(origin, scale3(dir, t)))
+    }
+
+    fn world_ray(&self, rect: Rect, pointer: egui::Pos2) -> Option<([f32; 3], [f32; 3])> {
+        if rect.width() <= f32::EPSILON || rect.height() <= f32::EPSILON {
+            return None;
+        }
+        let ndc_x = ((pointer.x - rect.center().x) / (rect.width() * 0.5)).clamp(-1.0, 1.0);
+        let ndc_y = (-(pointer.y - rect.center().y) / (rect.height() * 0.5)).clamp(-1.0, 1.0);
+        let aspect = (rect.width() / rect.height()).max(0.1);
+        let fov_y = 45.0_f32.to_radians();
+        let half_height = (fov_y * 0.5).tan();
+        let half_width = half_height * aspect;
+        let eye = self.eye();
+        let forward = normalize3(sub3(self.target, eye));
+        let world_up = [0.0, 0.0, 1.0];
+        let right = normalize3(cross3(forward, world_up));
+        let up = normalize3(cross3(right, forward));
+        let dir = normalize3(add3(
+            add3(forward, scale3(right, ndc_x * half_width)),
+            scale3(up, ndc_y * half_height),
+        ));
+        Some((eye, dir))
+    }
 }
 
 #[cfg(feature = "web_glow_viewport")]
-impl BrowserGlowRenderer {
-    fn ensure_initialized(&mut self, gl: &Arc<glow::Context>) -> Result<(), String> {
-        if self.program.is_some() {
+impl BrowserWgpuRenderer {
+    fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rect: Rect,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        target_format: wgpu::TextureFormat,
+        scene: &BrowserWgpuSceneFrame,
+    ) -> Result<wgpu::CommandBuffer, String> {
+        let started = Instant::now();
+        let width = (rect.width() * screen_descriptor.pixels_per_point)
+            .round()
+            .max(2.0) as u32;
+        let height = (rect.height() * screen_descriptor.pixels_per_point)
+            .round()
+            .max(2.0) as u32;
+
+        self.ensure_initialized(device, target_format)?;
+        self.ensure_offscreen_target(device, width, height)?;
+        self.ensure_vertex_capacity(device, scene)?;
+
+        if let Some(buffer) = self.uniform_buffer.as_ref() {
+            let uniform = BrowserWgpuSceneUniform {
+                view_proj: scene.view_proj,
+            };
+            queue.write_buffer(buffer, 0, slice_as_u8(std::slice::from_ref(&uniform)));
+        }
+        if let Some(buffer) = self.triangle_buffer.as_ref() {
+            if !scene.triangles.is_empty() {
+                queue.write_buffer(buffer, 0, slice_as_u8(&scene.triangles));
+            }
+        }
+        if let Some(buffer) = self.line_buffer.as_ref() {
+            if !scene.lines.is_empty() {
+                queue.write_buffer(buffer, 0, slice_as_u8(&scene.lines));
+            }
+        }
+        if let Some(buffer) = self.mesh_instance_buffer.as_ref() {
+            if !scene.mesh_instances.is_empty() {
+                queue.write_buffer(buffer, 0, slice_as_u8(&scene.mesh_instances));
+            }
+        }
+
+        let offscreen_view = self
+            .offscreen_view
+            .as_ref()
+            .ok_or_else(|| "WGPU offscreen view missing".to_string())?;
+        let depth_view = self
+            .depth_view
+            .as_ref()
+            .ok_or_else(|| "WGPU depth view missing".to_string())?;
+        let scene_pipeline = self
+            .scene_pipeline
+            .as_ref()
+            .ok_or_else(|| "WGPU scene pipeline missing".to_string())?;
+        let line_pipeline = self
+            .line_pipeline
+            .as_ref()
+            .ok_or_else(|| "WGPU line pipeline missing".to_string())?;
+        let mesh_pipeline = self
+            .mesh_pipeline
+            .as_ref()
+            .ok_or_else(|| "WGPU mesh pipeline missing".to_string())?;
+        let uniform_bind_group = self
+            .uniform_bind_group
+            .as_ref()
+            .ok_or_else(|| "WGPU uniform bind group missing".to_string())?;
+        let triangle_buffer = self
+            .triangle_buffer
+            .as_ref()
+            .ok_or_else(|| "WGPU triangle buffer missing".to_string())?;
+        let line_buffer = self
+            .line_buffer
+            .as_ref()
+            .ok_or_else(|| "WGPU line buffer missing".to_string())?;
+        let mesh_instance_buffer = self
+            .mesh_instance_buffer
+            .as_ref()
+            .ok_or_else(|| "WGPU mesh instance buffer missing".to_string())?;
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("browser_mujoco_wgpu_prepare"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("browser_mujoco_wgpu_offscreen_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: offscreen_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.07,
+                            g: 0.09,
+                            b: 0.12,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+            pass.set_bind_group(0, uniform_bind_group, &[]);
+            if !scene.triangles.is_empty() {
+                pass.set_pipeline(scene_pipeline);
+                pass.set_vertex_buffer(
+                    0,
+                    triangle_buffer
+                        .slice(..(std::mem::size_of_val(scene.triangles.as_slice()) as u64)),
+                );
+                pass.draw(0..scene.triangles.len() as u32, 0..1);
+            }
+            if !scene.lines.is_empty() {
+                pass.set_pipeline(line_pipeline);
+                pass.set_bind_group(0, uniform_bind_group, &[]);
+                pass.set_vertex_buffer(
+                    0,
+                    line_buffer.slice(..(std::mem::size_of_val(scene.lines.as_slice()) as u64)),
+                );
+                pass.draw(0..scene.lines.len() as u32, 0..1);
+            }
+            if !scene.mesh_instances.is_empty() {
+                pass.set_pipeline(mesh_pipeline);
+                pass.set_bind_group(0, uniform_bind_group, &[]);
+                for (mesh_id, range) in mesh_instance_ranges(&scene.mesh_instances) {
+                    let Some(mesh_asset) = self.mesh_assets.get(&mesh_id) else {
+                        continue;
+                    };
+                    let start = range.start * std::mem::size_of::<MeshInstance>();
+                    let end = range.end * std::mem::size_of::<MeshInstance>();
+                    pass.set_vertex_buffer(0, mesh_asset.vertex_buffer.slice(..));
+                    pass.set_vertex_buffer(1, mesh_instance_buffer.slice(start as u64..end as u64));
+                    pass.draw(0..mesh_asset.vertex_count, 0..(range.end - range.start) as u32);
+                }
+            }
+        }
+
+        self.last_error = None;
+        self.last_render_ms_ms = started.elapsed().as_secs_f32() * 1000.0;
+        Ok(encoder.finish())
+    }
+
+    fn paint(&mut self, render_pass: &mut wgpu::RenderPass<'static>) -> Result<(), String> {
+        let present_pipeline = self
+            .present_pipeline
+            .as_ref()
+            .ok_or_else(|| "WGPU present pipeline missing".to_string())?;
+        let present_bind_group = self
+            .present_bind_group
+            .as_ref()
+            .ok_or_else(|| "WGPU present bind group missing".to_string())?;
+        render_pass.set_pipeline(present_pipeline);
+        render_pass.set_bind_group(0, present_bind_group, &[]);
+        render_pass.draw(0..4, 0..1);
+        Ok(())
+    }
+
+    fn ensure_initialized(
+        &mut self,
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Result<(), String> {
+        if self.scene_pipeline.is_some() && self.present_pipeline.is_some() {
             return Ok(());
         }
 
-        unsafe {
-            let program = create_gl_program(gl, GLOW_VERTEX_SHADER, GLOW_FRAGMENT_SHADER)?;
-            let triangle_vao = gl
-                .create_vertex_array()
-                .map_err(|err| format!("Failed to create triangle VAO: {err}"))?;
-            let triangle_vbo = gl
-                .create_buffer()
-                .map_err(|err| format!("Failed to create triangle VBO: {err}"))?;
-            let line_vao = gl
-                .create_vertex_array()
-                .map_err(|err| format!("Failed to create line VAO: {err}"))?;
-            let line_vbo = gl
-                .create_buffer()
-                .map_err(|err| format!("Failed to create line VBO: {err}"))?;
-            let present_program =
-                create_gl_program(gl, PRESENT_VERTEX_SHADER, PRESENT_FRAGMENT_SHADER)?;
-            let present_vao = gl
-                .create_vertex_array()
-                .map_err(|err| format!("Failed to create present VAO: {err}"))?;
-            let present_vbo = gl
-                .create_buffer()
-                .map_err(|err| format!("Failed to create present VBO: {err}"))?;
-            let offscreen_fbo = gl
-                .create_framebuffer()
-                .map_err(|err| format!("Failed to create offscreen FBO: {err}"))?;
-            let offscreen_color = gl
-                .create_texture()
-                .map_err(|err| format!("Failed to create offscreen color texture: {err}"))?;
-            let offscreen_depth = gl
-                .create_renderbuffer()
-                .map_err(|err| format!("Failed to create offscreen depth renderbuffer: {err}"))?;
+        let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("browser_mujoco_wgpu_scene_shader"),
+            source: wgpu::ShaderSource::Wgsl(WGPU_SCENE_SHADER.into()),
+        });
+        let present_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("browser_mujoco_wgpu_present_shader"),
+            source: wgpu::ShaderSource::Wgsl(WGPU_PRESENT_SHADER.into()),
+        });
 
-            setup_vertex_array(gl, program, triangle_vao, triangle_vbo)?;
-            setup_vertex_array(gl, program, line_vao, line_vbo)?;
-            setup_present_quad(gl, present_program, present_vao, present_vbo)?;
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("browser_mujoco_wgpu_uniform_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("browser_mujoco_wgpu_uniform_buffer"),
+            size: std::mem::size_of::<BrowserWgpuSceneUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("browser_mujoco_wgpu_uniform_bind_group"),
+            layout: &uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
 
-            self.u_view_proj = gl.get_uniform_location(program, "u_view_proj");
-            self.u_unlit = gl.get_uniform_location(program, "u_unlit");
-            self.u_present_texture = gl.get_uniform_location(present_program, "u_texture");
-            self.program = Some(program);
-            self.triangle_vao = Some(triangle_vao);
-            self.triangle_vbo = Some(triangle_vbo);
-            self.line_vao = Some(line_vao);
-            self.line_vbo = Some(line_vbo);
-            self.present_program = Some(present_program);
-            self.present_vao = Some(present_vao);
-            self.present_vbo = Some(present_vbo);
-            self.offscreen_fbo = Some(offscreen_fbo);
-            self.offscreen_color = Some(offscreen_color);
-            self.offscreen_depth = Some(offscreen_depth);
-            self.offscreen_size = [0, 0];
-            self.last_error = None;
-        }
+        let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("browser_mujoco_wgpu_scene_layout"),
+            bind_group_layouts: &[&uniform_layout],
+            push_constant_ranges: &[],
+        });
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GlVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
+        };
+        let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("browser_mujoco_wgpu_scene_pipeline"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main"),
+                buffers: std::slice::from_ref(&vertex_layout),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_lit"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("browser_mujoco_wgpu_line_pipeline"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_unlit"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let mesh_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<LocalMeshVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+        };
+        let mesh_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<MeshInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![
+                2 => Float32x4,
+                3 => Float32x4,
+                4 => Float32x4,
+                5 => Float32x4,
+                6 => Float32x4
+            ],
+        };
+        let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("browser_mujoco_wgpu_mesh_pipeline"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_mesh"),
+                buffers: &[mesh_vertex_layout, mesh_instance_layout],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_lit"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
 
+        let present_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("browser_mujoco_wgpu_present_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let present_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("browser_mujoco_wgpu_present_layout"),
+            bind_group_layouts: &[&present_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("browser_mujoco_wgpu_present_pipeline"),
+            layout: Some(&present_layout),
+            vertex: wgpu::VertexState {
+                module: &present_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &present_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        self.scene_pipeline = Some(scene_pipeline);
+        self.line_pipeline = Some(line_pipeline);
+        self.mesh_pipeline = Some(mesh_pipeline);
+        self.present_pipeline = Some(present_pipeline);
+        self.uniform_buffer = Some(uniform_buffer);
+        self.uniform_bind_group = Some(uniform_bind_group);
+        self.present_bind_group_layout = Some(present_bind_group_layout);
+        self.mesh_instance_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("browser_mujoco_wgpu_mesh_instance_buffer"),
+            size: 1024,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.mesh_instance_capacity = 1024;
+        self.sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("browser_mujoco_wgpu_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
         Ok(())
     }
 
     fn ensure_offscreen_target(
         &mut self,
-        gl: &Arc<glow::Context>,
-        width: i32,
-        height: i32,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
     ) -> Result<(), String> {
-        let width = width.max(2);
-        let height = height.max(2);
-        if self.offscreen_size == [width, height] {
+        if self.offscreen_size == [width, height] && self.present_bind_group.is_some() {
             return Ok(());
         }
 
-        let fbo = self
-            .offscreen_fbo
-            .ok_or_else(|| "Offscreen FBO missing".to_string())?;
-        let color = self
-            .offscreen_color
-            .ok_or_else(|| "Offscreen color texture missing".to_string())?;
-        let depth = self
-            .offscreen_depth
-            .ok_or_else(|| "Offscreen depth buffer missing".to_string())?;
-
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(color));
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("browser_mujoco_wgpu_offscreen"),
+            size: wgpu::Extent3d {
                 width,
                 height,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),
-            );
-            gl.bind_texture(glow::TEXTURE_2D, None);
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+        });
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("browser_mujoco_wgpu_depth"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[wgpu::TextureFormat::Depth24Plus],
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
-            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH_COMPONENT24, width, height);
-            gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+        let present_bind_group_layout = self
+            .present_bind_group_layout
+            .as_ref()
+            .ok_or_else(|| "WGPU present bind group layout missing".to_string())?;
+        let sampler = self
+            .sampler
+            .as_ref()
+            .ok_or_else(|| "WGPU sampler missing".to_string())?;
+        let present_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("browser_mujoco_wgpu_present_bind_group"),
+            layout: present_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
 
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(color),
-                0,
-            );
-            gl.framebuffer_renderbuffer(
-                glow::FRAMEBUFFER,
-                glow::DEPTH_ATTACHMENT,
-                glow::RENDERBUFFER,
-                Some(depth),
-            );
-            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            if status != glow::FRAMEBUFFER_COMPLETE {
-                return Err(format!("Offscreen framebuffer incomplete: 0x{status:04x}"));
-            }
-        }
-
+        self.offscreen_texture = Some(texture);
+        self.offscreen_view = Some(texture_view);
+        self.depth_texture = Some(depth_texture);
+        self.depth_view = Some(depth_view);
+        self.present_bind_group = Some(present_bind_group);
         self.offscreen_size = [width, height];
         Ok(())
     }
 
-    fn paint(
+    fn ensure_vertex_capacity(
         &mut self,
-        gl: &Arc<glow::Context>,
-        info: egui::PaintCallbackInfo,
-        scene: &BrowserGlowSceneFrame,
+        device: &wgpu::Device,
+        scene: &BrowserWgpuSceneFrame,
     ) -> Result<(), String> {
-        self.ensure_initialized(gl)?;
-        let viewport = info.viewport_in_pixels();
-        let clip = info.clip_rect_in_pixels();
-        let program = self
-            .program
-            .ok_or_else(|| "Glow program missing".to_string())?;
-        let present_program = self
-            .present_program
-            .ok_or_else(|| "Present program missing".to_string())?;
-        let fbo = self
-            .offscreen_fbo
-            .ok_or_else(|| "Offscreen FBO missing".to_string())?;
-        let offscreen_color = self
-            .offscreen_color
-            .ok_or_else(|| "Offscreen color missing".to_string())?;
-        self.ensure_offscreen_target(gl, viewport.width_px, viewport.height_px)?;
+        let triangle_bytes = std::mem::size_of_val(scene.triangles.as_slice()) as u64;
+        let line_bytes = std::mem::size_of_val(scene.lines.as_slice()) as u64;
+        let mesh_instance_bytes = std::mem::size_of_val(scene.mesh_instances.as_slice()) as u64;
 
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.viewport(0, 0, viewport.width_px, viewport.height_px);
-            gl.enable(glow::DEPTH_TEST);
-            gl.depth_func(glow::LEQUAL);
-            gl.depth_mask(true);
-            gl.disable(glow::BLEND);
-            gl.disable(glow::CULL_FACE);
-            gl.clear_color(0.07, 0.09, 0.12, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-
-            gl.use_program(Some(program));
-            if let Some(location) = self.u_view_proj.as_ref() {
-                gl.uniform_matrix_4_f32_slice(Some(location), false, &scene.view_proj);
-            }
-
-            if !scene.triangles.is_empty() {
-                if let Some(location) = self.u_unlit.as_ref() {
-                    gl.uniform_1_i32(Some(location), 0);
-                }
-                gl.enable(glow::CULL_FACE);
-                gl.cull_face(glow::BACK);
-                gl.bind_vertex_array(self.triangle_vao);
-                gl.bind_buffer(glow::ARRAY_BUFFER, self.triangle_vbo);
-                gl.buffer_data_u8_slice(
-                    glow::ARRAY_BUFFER,
-                    slice_as_u8(&scene.triangles),
-                    glow::DYNAMIC_DRAW,
-                );
-                gl.draw_arrays(glow::TRIANGLES, 0, scene.triangles.len() as i32);
-                gl.disable(glow::CULL_FACE);
-            }
-
-            if !scene.lines.is_empty() {
-                if let Some(location) = self.u_unlit.as_ref() {
-                    gl.uniform_1_i32(Some(location), 1);
-                }
-                gl.bind_vertex_array(self.line_vao);
-                gl.bind_buffer(glow::ARRAY_BUFFER, self.line_vbo);
-                gl.buffer_data_u8_slice(
-                    glow::ARRAY_BUFFER,
-                    slice_as_u8(&scene.lines),
-                    glow::DYNAMIC_DRAW,
-                );
-                gl.draw_arrays(glow::LINES, 0, scene.lines.len() as i32);
-            }
-
-            gl.bind_vertex_array(None);
-            gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            gl.use_program(None);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            gl.viewport(
-                viewport.left_px,
-                viewport.from_bottom_px,
-                viewport.width_px,
-                viewport.height_px,
-            );
-            gl.enable(glow::SCISSOR_TEST);
-            gl.scissor(
-                clip.left_px,
-                clip.from_bottom_px,
-                clip.width_px,
-                clip.height_px,
-            );
-            gl.disable(glow::DEPTH_TEST);
-            gl.disable(glow::CULL_FACE);
-            gl.disable(glow::BLEND);
-            gl.use_program(Some(present_program));
-            if let Some(location) = self.u_present_texture.as_ref() {
-                gl.uniform_1_i32(Some(location), 0);
-            }
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(offscreen_color));
-            gl.bind_vertex_array(self.present_vao);
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            gl.bind_vertex_array(None);
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.use_program(None);
-            gl.disable(glow::SCISSOR_TEST);
-            gl.enable(glow::BLEND);
+        if self.triangle_buffer.is_none() || triangle_bytes > self.triangle_capacity {
+            self.triangle_capacity = triangle_bytes.max(1024).next_power_of_two();
+            self.triangle_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("browser_mujoco_wgpu_triangle_buffer"),
+                size: self.triangle_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
         }
+        if self.line_buffer.is_none() || line_bytes > self.line_capacity {
+            self.line_capacity = line_bytes.max(1024).next_power_of_two();
+            self.line_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("browser_mujoco_wgpu_line_buffer"),
+                size: self.line_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if self.mesh_instance_buffer.is_none() || mesh_instance_bytes > self.mesh_instance_capacity {
+            self.mesh_instance_capacity = mesh_instance_bytes.max(1024).next_power_of_two();
+            self.mesh_instance_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("browser_mujoco_wgpu_mesh_instance_buffer"),
+                size: self.mesh_instance_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        Ok(())
+    }
 
-        self.last_error = None;
+    fn ensure_mesh_assets(
+        &mut self,
+        device: &wgpu::Device,
+        mesh_assets: &[BrowserMeshAsset],
+    ) -> Result<(), String> {
+        for (mesh_id, asset) in mesh_assets.iter().enumerate() {
+            let needs_upload = self
+                .mesh_assets
+                .get(&mesh_id)
+                .map(|gpu_asset| gpu_asset.vertex_count != asset.vertices.len() as u32)
+                .unwrap_or(true);
+            if needs_upload {
+                self.mesh_assets.insert(
+                    mesh_id,
+                    MeshAssetGpu {
+                        vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("browser_mujoco_wgpu_mesh_asset_buffer"),
+                            contents: slice_as_u8(&asset.vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        }),
+                        vertex_count: asset.vertices.len() as u32,
+                    },
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -2598,23 +3207,48 @@ fn append_sphere_geom(
 }
 
 #[cfg(feature = "web_glow_viewport")]
-fn append_mesh_geom(
-    triangles: &mut Vec<GlVertex>,
-    geom: &SharedGeomSnapshot,
-    mesh_assets: &[BrowserMeshAsset],
-    diagnostic_colors: bool,
+fn build_mesh_instance(geom: &SharedGeomSnapshot, diagnostic_colors: bool) -> Option<MeshInstance> {
+    let mesh_id = geom.data_id.max(0) as u32;
+    Some(MeshInstance {
+        model: shared_geom_model_matrix(geom),
+        color: shared_display_geom_color(geom, diagnostic_colors),
+        mesh_id,
+        _padding: [0; 3],
+    })
+}
+
+#[cfg(feature = "web_glow_viewport")]
+fn mesh_instance_ranges(instances: &[MeshInstance]) -> Vec<(usize, std::ops::Range<usize>)> {
+    let mut ranges = Vec::new();
+    if instances.is_empty() {
+        return ranges;
+    }
+    let mut start = 0usize;
+    let mut current = instances[0].mesh_id as usize;
+    for (idx, instance) in instances.iter().enumerate().skip(1) {
+        let mesh_id = instance.mesh_id as usize;
+        if mesh_id != current {
+            ranges.push((current, start..idx));
+            current = mesh_id;
+            start = idx;
+        }
+    }
+    ranges.push((current, start..instances.len()));
+    ranges
+}
+
+#[cfg(feature = "web_glow_viewport")]
+fn extend_depth_points_with_mesh_bounds(
+    depth_points: &mut Vec<[f32; 3]>,
+    asset: &BrowserMeshAsset,
+    model: &[[f32; 4]; 4],
 ) {
-    let mesh_id = geom.data_id.max(0) as usize;
-    let Some(mesh) = mesh_assets.get(mesh_id) else {
-        return;
-    };
-    let color = shared_display_geom_color(geom, diagnostic_colors);
-    for vertex in &mesh.triangles {
-        triangles.push(GlVertex::world(
-            shared_transform_geom_point(geom, vertex.position),
-            shared_transform_geom_vector(geom, vertex.normal),
-            color,
-        ));
+    for sx in [asset.local_min[0], asset.local_max[0]] {
+        for sy in [asset.local_min[1], asset.local_max[1]] {
+            for sz in [asset.local_min[2], asset.local_max[2]] {
+                depth_points.push(transform_point_mat4(model, [sx, sy, sz]));
+            }
+        }
     }
 }
 
@@ -2729,6 +3363,15 @@ fn mul_mat4(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
     out
 }
 
+#[cfg(feature = "web_glow_viewport")]
+fn transform_point_mat4(model: &[[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
+    [
+        model[0][0] * point[0] + model[1][0] * point[1] + model[2][0] * point[2] + model[3][0],
+        model[0][1] * point[0] + model[1][1] * point[1] + model[2][1] * point[2] + model[3][1],
+        model[0][2] * point[0] + model[1][2] * point[1] + model[2][2] * point[2] + model[3][2],
+    ]
+}
+
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -2755,6 +3398,13 @@ fn scale3(v: [f32; 3], scalar: f32) -> [f32; 3] {
     [v[0] * scalar, v[1] * scalar, v[2] * scalar]
 }
 
+fn extend_bounds3(min: &mut [f32; 3], max: &mut [f32; 3], point: [f32; 3]) {
+    for axis in 0..3 {
+        min[axis] = min[axis].min(point[axis]);
+        max[axis] = max[axis].max(point[axis]);
+    }
+}
+
 fn length3(v: [f32; 3]) -> f32 {
     dot3(v, v).sqrt()
 }
@@ -2769,187 +3419,115 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
 }
 
 #[cfg(feature = "web_glow_viewport")]
-fn create_gl_program(
-    gl: &glow::Context,
-    vertex_src: &str,
-    fragment_src: &str,
-) -> Result<glow::Program, String> {
-    unsafe {
-        let program = gl
-            .create_program()
-            .map_err(|err| format!("Failed to create GL program: {err}"))?;
-        let shaders = [
-            (glow::VERTEX_SHADER, vertex_src),
-            (glow::FRAGMENT_SHADER, fragment_src),
-        ];
-        let mut compiled = Vec::new();
-
-        for (shader_type, source) in shaders {
-            let shader = gl
-                .create_shader(shader_type)
-                .map_err(|err| format!("Failed to create shader: {err}"))?;
-            gl.shader_source(shader, source);
-            gl.compile_shader(shader);
-            if !gl.get_shader_compile_status(shader) {
-                let log = gl.get_shader_info_log(shader);
-                gl.delete_shader(shader);
-                gl.delete_program(program);
-                return Err(format!("GL shader compilation failed: {log}"));
-            }
-            gl.attach_shader(program, shader);
-            compiled.push(shader);
-        }
-
-        gl.link_program(program);
-        if !gl.get_program_link_status(program) {
-            let log = gl.get_program_info_log(program);
-            for shader in compiled {
-                gl.detach_shader(program, shader);
-                gl.delete_shader(shader);
-            }
-            gl.delete_program(program);
-            return Err(format!("GL program link failed: {log}"));
-        }
-
-        for shader in compiled {
-            gl.detach_shader(program, shader);
-            gl.delete_shader(shader);
-        }
-
-        Ok(program)
-    }
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn setup_vertex_array(
-    gl: &glow::Context,
-    program: glow::Program,
-    vao: glow::VertexArray,
-    vbo: glow::Buffer,
-) -> Result<(), String> {
-    unsafe {
-        gl.bind_vertex_array(Some(vao));
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        let stride = std::mem::size_of::<GlVertex>() as i32;
-
-        let position = gl
-            .get_attrib_location(program, "a_pos")
-            .ok_or_else(|| "Glow shader is missing a_pos attribute".to_string())?;
-        let normal = gl
-            .get_attrib_location(program, "a_normal")
-            .ok_or_else(|| "Glow shader is missing a_normal attribute".to_string())?;
-        let color = gl
-            .get_attrib_location(program, "a_color")
-            .ok_or_else(|| "Glow shader is missing a_color attribute".to_string())?;
-
-        gl.enable_vertex_attrib_array(position);
-        gl.vertex_attrib_pointer_f32(position, 3, glow::FLOAT, false, stride, 0);
-        gl.enable_vertex_attrib_array(normal);
-        gl.vertex_attrib_pointer_f32(normal, 3, glow::FLOAT, false, stride, 12);
-        gl.enable_vertex_attrib_array(color);
-        gl.vertex_attrib_pointer_f32(color, 4, glow::FLOAT, false, stride, 24);
-
-        gl.bind_vertex_array(None);
-        gl.bind_buffer(glow::ARRAY_BUFFER, None);
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn setup_present_quad(
-    gl: &glow::Context,
-    program: glow::Program,
-    vao: glow::VertexArray,
-    vbo: glow::Buffer,
-) -> Result<(), String> {
-    const QUAD: [f32; 16] = [
-        -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-    ];
-
-    unsafe {
-        gl.bind_vertex_array(Some(vao));
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, slice_as_u8(&QUAD), glow::STATIC_DRAW);
-
-        let position = gl
-            .get_attrib_location(program, "a_pos")
-            .ok_or_else(|| "Present shader is missing a_pos attribute".to_string())?;
-        let uv = gl
-            .get_attrib_location(program, "a_uv")
-            .ok_or_else(|| "Present shader is missing a_uv attribute".to_string())?;
-
-        gl.enable_vertex_attrib_array(position);
-        gl.vertex_attrib_pointer_f32(position, 2, glow::FLOAT, false, 16, 0);
-        gl.enable_vertex_attrib_array(uv);
-        gl.vertex_attrib_pointer_f32(uv, 2, glow::FLOAT, false, 16, 8);
-
-        gl.bind_vertex_array(None);
-        gl.bind_buffer(glow::ARRAY_BUFFER, None);
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "web_glow_viewport")]
 fn slice_as_u8<T>(slice: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
 
 #[cfg(feature = "web_glow_viewport")]
-const GLOW_VERTEX_SHADER: &str = r#"#version 300 es
-precision highp float;
-uniform mat4 u_view_proj;
-in vec3 a_pos;
-in vec3 a_normal;
-in vec4 a_color;
-out vec3 v_normal;
-out vec4 v_color;
+const WGPU_SCENE_SHADER: &str = r#"
+struct SceneUniform {
+    view_proj: mat4x4<f32>,
+};
 
-void main() {
-    gl_Position = u_view_proj * vec4(a_pos, 1.0);
-    v_normal = a_normal;
-    v_color = a_color;
+@group(0) @binding(0)
+var<uniform> u_scene: SceneUniform;
+
+struct VertexIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+};
+
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct MeshVertexIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) model_0: vec4<f32>,
+    @location(3) model_1: vec4<f32>,
+    @location(4) model_2: vec4<f32>,
+    @location(5) model_3: vec4<f32>,
+    @location(6) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(input: VertexIn) -> VertexOut {
+    var out: VertexOut;
+    out.position = u_scene.view_proj * vec4<f32>(input.position, 1.0);
+    out.normal = input.normal;
+    out.color = input.color;
+    return out;
+}
+
+@vertex
+fn vs_mesh(input: MeshVertexIn) -> VertexOut {
+    let model = mat4x4<f32>(
+        input.model_0,
+        input.model_1,
+        input.model_2,
+        input.model_3,
+    );
+    let world_pos = model * vec4<f32>(input.position, 1.0);
+    let world_normal = normalize((model * vec4<f32>(input.normal, 0.0)).xyz);
+    var out: VertexOut;
+    out.position = u_scene.view_proj * world_pos;
+    out.normal = world_normal;
+    out.color = input.color;
+    return out;
+}
+
+@fragment
+fn fs_lit(input: VertexOut) -> @location(0) vec4<f32> {
+    let light_dir = normalize(vec3<f32>(0.35, 0.55, 0.75));
+    let normal = normalize(input.normal);
+    let diffuse = max(dot(normal, light_dir), 0.0) * 0.75 + 0.25;
+    return vec4<f32>(input.color.rgb * diffuse, input.color.a);
+}
+
+@fragment
+fn fs_unlit(input: VertexOut) -> @location(0) vec4<f32> {
+    return input.color;
 }
 "#;
 
 #[cfg(feature = "web_glow_viewport")]
-const GLOW_FRAGMENT_SHADER: &str = r#"#version 300 es
-precision highp float;
-in vec3 v_normal;
-in vec4 v_color;
-uniform int u_unlit;
-out vec4 out_color;
+const WGPU_PRESENT_SHADER: &str = r#"
+@group(0) @binding(0)
+var u_tex: texture_2d<f32>;
+@group(0) @binding(1)
+var u_sampler: sampler;
 
-void main() {
-    vec3 n = normalize(v_normal);
-    vec3 light_dir = normalize(vec3(0.35, 0.45, 0.82));
-    float lit = (u_unlit != 0) ? 1.0 : (0.22 + 0.78 * max(dot(n, light_dir), 0.0));
-    out_color = vec4(v_color.rgb * lit, v_color.a);
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+    );
+    var out: VertexOut;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    out.uv = uvs[vertex_index];
+    return out;
 }
-"#;
 
-#[cfg(feature = "web_glow_viewport")]
-const PRESENT_VERTEX_SHADER: &str = r#"#version 300 es
-precision highp float;
-in vec2 a_pos;
-in vec2 a_uv;
-out vec2 v_uv;
-
-void main() {
-    gl_Position = vec4(a_pos, 0.0, 1.0);
-    v_uv = a_uv;
-}
-"#;
-
-#[cfg(feature = "web_glow_viewport")]
-const PRESENT_FRAGMENT_SHADER: &str = r#"#version 300 es
-precision highp float;
-uniform sampler2D u_texture;
-in vec2 v_uv;
-out vec4 out_color;
-
-void main() {
-    out_color = texture(u_texture, v_uv);
+@fragment
+fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+    return textureSample(u_tex, u_sampler, input.uv);
 }
 "#;
