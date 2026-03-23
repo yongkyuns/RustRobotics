@@ -206,15 +206,18 @@ Relevant code:
 
 ### Rendering on Web
 
-The current web renderer is not the old Rust `egui_glow` viewport path.
+The current shipped web build still uses the JS-owned overlay viewport path.
 
-Current design:
+Current shipped design:
 
-- main RustRobotics app runs on the web `wgpu` path
+- main RustRobotics app still runs on the web `wgpu` path
 - MuJoCo viewport is rendered by a separate JS-owned overlay canvas
-- Rust only provides the viewport rectangle and UI state
+- Rust provides the viewport rectangle, UI state, and browser runtime orchestration
 
-This separation is why the browser MuJoCo viewport no longer forces the whole app onto web `glow`.
+Migration path:
+
+- the Rust-owned `web_glow_viewport` path exists behind the default crate feature
+- a shared Rust scene-building layer now feeds both native and web Rust renderers where that path is enabled
 
 ### Threading on Web
 

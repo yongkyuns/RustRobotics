@@ -15,6 +15,14 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use crate::data::{IntoValues, TimeTable};
+#[cfg(feature = "web_glow_viewport")]
+use super::render_scene::{
+    append_grid_lines as append_shared_grid_lines, append_primitive_geom,
+    display_geom_color as shared_display_geom_color,
+    transform_geom_point as shared_transform_geom_point,
+    transform_geom_vector as shared_transform_geom_vector,
+    GlVertex, SharedGeomSnapshot, GEOM_MESH,
+};
 
 const GO2_ASSET_FILES: &[&str] = &[
     "scene.xml",
@@ -467,26 +475,6 @@ struct BrowserGlowSceneFrame {
     triangles: Vec<GlVertex>,
     lines: Vec<GlVertex>,
     view_proj: [f32; 16],
-}
-
-#[cfg(feature = "web_glow_viewport")]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct GlVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    color: [f32; 4],
-}
-
-#[cfg(feature = "web_glow_viewport")]
-impl GlVertex {
-    fn world(position: [f32; 3], normal: [f32; 3], color: [f32; 4]) -> Self {
-        Self {
-            position,
-            normal,
-            color,
-        }
-    }
 }
 
 #[cfg(feature = "web_glow_viewport")]
@@ -1398,23 +1386,30 @@ impl WasmMujocoBackend {
         aspect: f32,
     ) -> BrowserGlowSceneFrame {
         let mut frame = BrowserGlowSceneFrame::default();
-        append_grid_lines(&mut frame.lines);
+        append_shared_grid_lines(&mut frame.lines);
 
         for geom in &report.geoms {
+            let shared_geom = SharedGeomSnapshot {
+                type_id: geom.type_id,
+                data_id: geom.dataid,
+                size: geom.size,
+                rgba: geom.rgba,
+                pos: geom.pos,
+                mat: geom.mat,
+            };
             match geom.type_id {
-                MJ_GEOM_PLANE => {}
-                MJ_GEOM_SPHERE => append_sphere_geom(&mut frame.triangles, geom, 12, 20, false),
-                MJ_GEOM_CAPSULE => append_capsule_geom(&mut frame.triangles, geom, 10, 18, false),
-                MJ_GEOM_CYLINDER => append_cylinder_geom(&mut frame.triangles, geom, 18, false),
-                MJ_GEOM_BOX => append_box_geom(&mut frame.triangles, geom, false),
-                MJ_GEOM_MESH => append_mesh_geom(
+                GEOM_MESH => append_mesh_geom(
                     &mut frame.triangles,
-                    geom,
+                    &shared_geom,
                     mesh_assets,
                     false,
                 ),
-                MJ_GEOM_LINE => append_line_geom(&mut frame.lines, geom, false),
-                _ => {}
+                _ => append_primitive_geom(
+                    &mut frame.triangles,
+                    &mut frame.lines,
+                    &shared_geom,
+                    false,
+                ),
             }
         }
 
@@ -2605,19 +2600,19 @@ fn append_sphere_geom(
 #[cfg(feature = "web_glow_viewport")]
 fn append_mesh_geom(
     triangles: &mut Vec<GlVertex>,
-    geom: &BrowserGeomSnapshot,
+    geom: &SharedGeomSnapshot,
     mesh_assets: &[BrowserMeshAsset],
     diagnostic_colors: bool,
 ) {
-    let mesh_id = geom.dataid.max(0) as usize;
+    let mesh_id = geom.data_id.max(0) as usize;
     let Some(mesh) = mesh_assets.get(mesh_id) else {
         return;
     };
-    let color = display_geom_color(geom, diagnostic_colors);
+    let color = shared_display_geom_color(geom, diagnostic_colors);
     for vertex in &mesh.triangles {
         triangles.push(GlVertex::world(
-            transform_geom_point(geom, vertex.position),
-            transform_geom_vector(geom, vertex.normal),
+            shared_transform_geom_point(geom, vertex.position),
+            shared_transform_geom_vector(geom, vertex.normal),
             color,
         ));
     }

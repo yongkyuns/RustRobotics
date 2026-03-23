@@ -36,6 +36,13 @@ mod sim;
 #[cfg(not(target_arch = "wasm32"))]
 use sim::MujocoSim;
 use crate::data::{IntoValues, TimeTable};
+use super::render_scene::{
+    append_grid_lines as append_shared_grid_lines, append_primitive_geom,
+    append_world_sphere as append_shared_world_sphere,
+    display_geom_color as shared_display_geom_color,
+    geom_model_matrix as shared_geom_model_matrix, SharedGeomSnapshot, GEOM_BOX, GEOM_CAPSULE,
+    GEOM_CYLINDER, GEOM_LINE, GEOM_MESH, GEOM_PLANE, GEOM_SPHERE,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(
@@ -70,8 +77,10 @@ const MJ_GEOM_CYLINDER: i32 = mjtGeom__mjGEOM_CYLINDER as i32;
 #[cfg(not(target_arch = "wasm32"))]
 const MJ_GEOM_BOX: i32 = mjtGeom__mjGEOM_BOX as i32;
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 const MJ_GEOM_PLANE: i32 = mjtGeom__mjGEOM_PLANE as i32;
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 const MJ_GEOM_MESH: i32 = mjtGeom__mjGEOM_MESH as i32;
 #[cfg(not(target_arch = "wasm32"))]
 const MJ_GEOM_LINE: i32 = mjtGeom__mjGEOM_LINE as i32;
@@ -1153,7 +1162,7 @@ impl MujocoRuntime {
         let mut frame = WgpuSceneFrame::default();
         let mut depth_points = Vec::new();
 
-        append_grid_lines(&mut frame.lines);
+        append_shared_grid_lines(&mut frame.lines);
         for line in &frame.lines {
             depth_points.push(line.position);
         }
@@ -1164,30 +1173,30 @@ impl MujocoRuntime {
             let Some(geom) = self.model_geom_instance(geom_id) else {
                 continue;
             };
+            let shared_geom = SharedGeomSnapshot {
+                type_id: geom.type_,
+                data_id: geom.dataid,
+                size: geom.size,
+                rgba: geom.rgba,
+                pos: geom.pos,
+                mat: geom.mat,
+            };
 
             match geom.type_ {
-                MJ_GEOM_PLANE => {}
-                MJ_GEOM_SPHERE => {
+                GEOM_PLANE => {}
+                GEOM_SPHERE | GEOM_CAPSULE | GEOM_CYLINDER | GEOM_BOX | GEOM_LINE => {
                     let start = frame.triangles.len();
-                    append_sphere_geom(&mut frame.triangles, &geom, 12, 20, diagnostic_colors);
+                    let start_lines = frame.lines.len();
+                    append_primitive_geom(
+                        &mut frame.triangles,
+                        &mut frame.lines,
+                        &shared_geom,
+                        diagnostic_colors,
+                    );
                     depth_points.extend(frame.triangles[start..].iter().map(|v| v.position));
+                    depth_points.extend(frame.lines[start_lines..].iter().map(|v| v.position));
                 }
-                MJ_GEOM_CAPSULE => {
-                    let start = frame.triangles.len();
-                    append_capsule_geom(&mut frame.triangles, &geom, 10, 18, diagnostic_colors);
-                    depth_points.extend(frame.triangles[start..].iter().map(|v| v.position));
-                }
-                MJ_GEOM_CYLINDER => {
-                    let start = frame.triangles.len();
-                    append_cylinder_geom(&mut frame.triangles, &geom, 18, diagnostic_colors);
-                    depth_points.extend(frame.triangles[start..].iter().map(|v| v.position));
-                }
-                MJ_GEOM_BOX => {
-                    let start = frame.triangles.len();
-                    append_box_geom(&mut frame.triangles, &geom, diagnostic_colors);
-                    depth_points.extend(frame.triangles[start..].iter().map(|v| v.position));
-                }
-                MJ_GEOM_MESH => {
+                GEOM_MESH => {
                     if let Some(filter) = mesh_filter {
                         if self.resolve_mesh_id(&geom) != Some(filter) {
                             continue;
@@ -1244,8 +1253,7 @@ impl MujocoRuntime {
         let Some(setpoint) = self.command.setpoint_world else {
             return;
         };
-        let marker = world_sphere_geom(setpoint, 0.05, [0.92, 0.24, 0.24, 1.0]);
-        append_sphere_geom(triangles, &marker, 10, 16, false);
+        append_shared_world_sphere(triangles, setpoint, 0.05, [0.92, 0.24, 0.24, 1.0]);
     }
 
     fn model_geom_instance(&self, geom_id: usize) -> Option<mjvGeom> {
@@ -1295,14 +1303,17 @@ impl MujocoRuntime {
 
     fn build_mesh_instance(&self, geom: &mjvGeom, diagnostic_colors: bool) -> Option<MeshInstance> {
         let mesh_id = self.resolve_mesh_id(geom)? as u32;
-        let color = display_geom_color(geom, diagnostic_colors);
+        let shared_geom = SharedGeomSnapshot {
+            type_id: geom.type_,
+            data_id: geom.dataid,
+            size: geom.size,
+            rgba: geom.rgba,
+            pos: geom.pos,
+            mat: geom.mat,
+        };
+        let color = shared_display_geom_color(&shared_geom, diagnostic_colors);
         Some(MeshInstance {
-            model: [
-                [geom.mat[0], geom.mat[3], geom.mat[6], 0.0],
-                [geom.mat[1], geom.mat[4], geom.mat[7], 0.0],
-                [geom.mat[2], geom.mat[5], geom.mat[8], 0.0],
-                [geom.pos[0], geom.pos[1], geom.pos[2], 1.0],
-            ],
+            model: shared_geom_model_matrix(&shared_geom),
             color,
             mesh_id,
             _padding: [0; 3],
@@ -2046,24 +2057,7 @@ impl WgpuSceneRenderer {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct GlVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    color: [f32; 4],
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl GlVertex {
-    fn world(position: [f32; 3], normal: [f32; 3], color: [f32; 4]) -> Self {
-        Self {
-            position,
-            normal,
-            color,
-        }
-    }
-}
+type GlVertex = super::render_scene::GlVertex;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn mesh_instance_ranges(instances: &[MeshInstance]) -> Vec<(usize, std::ops::Range<usize>)> {
@@ -2471,6 +2465,7 @@ fn transform_point_mat4(model: &[[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn append_grid_lines(lines: &mut Vec<GlVertex>) {
     let color = [0.22, 0.28, 0.34, 1.0];
     for i in -16..=16 {
@@ -2498,6 +2493,7 @@ fn append_line_geom(lines: &mut Vec<GlVertex>, geom: &mjvGeom, diagnostic_colors
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn append_box_geom(triangles: &mut Vec<GlVertex>, geom: &mjvGeom, diagnostic_colors: bool) {
     let axes = geom_axes(geom);
     let center = geom.pos;
@@ -2545,6 +2541,7 @@ fn append_box_geom(triangles: &mut Vec<GlVertex>, geom: &mjvGeom, diagnostic_col
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn append_cylinder_geom(
     triangles: &mut Vec<GlVertex>,
     geom: &mjvGeom,
@@ -2595,6 +2592,7 @@ fn append_cylinder_geom(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn append_capsule_geom(
     triangles: &mut Vec<GlVertex>,
     geom: &mjvGeom,
@@ -2663,6 +2661,7 @@ fn append_capsule_geom(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn append_sphere_geom(
     triangles: &mut Vec<GlVertex>,
     geom: &mjvGeom,
@@ -2716,6 +2715,7 @@ fn append_sphere_geom(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn world_sphere_geom(pos: [f32; 3], radius: f32, color: [f32; 4]) -> mjvGeom {
     let mut geom = unsafe { std::mem::zeroed::<mjvGeom>() };
     geom.type_ = MJ_GEOM_SPHERE;
@@ -2735,6 +2735,7 @@ fn world_sphere_geom(pos: [f32; 3], radius: f32, color: [f32; 4]) -> mjvGeom {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn push_triangle(
     triangles: &mut Vec<GlVertex>,
     a: [f32; 3],
@@ -2808,6 +2809,7 @@ fn mesh_vertex(vertices: &[f32], index: usize) -> [f32; 3] {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn transform_geom_point(geom: &mjvGeom, local: [f32; 3]) -> [f32; 3] {
     [
         geom.pos[0] + geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],
@@ -2817,6 +2819,7 @@ fn transform_geom_point(geom: &mjvGeom, local: [f32; 3]) -> [f32; 3] {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn transform_geom_vector(geom: &mjvGeom, local: [f32; 3]) -> [f32; 3] {
     normalize3([
         geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],

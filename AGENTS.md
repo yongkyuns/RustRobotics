@@ -105,7 +105,8 @@ Expected native sanity checks:
 ## Web Runtime Notes
 
 - Web app shell uses `wgpu`.
-- Browser MuJoCo viewport is a separate JS-owned overlay canvas.
+- Browser MuJoCo currently ships through the JS overlay viewport path by default.
+- The Rust-owned `web_glow_viewport` path exists for migration work, but it is not the stable default build yet.
 - Browser MuJoCo and ORT are currently non-threaded / GitHub-Pages-compatible.
 - Web uses a shared FW bridge exported from the wasm bundle:
   - `rust_robotics_fw_create_runtime`

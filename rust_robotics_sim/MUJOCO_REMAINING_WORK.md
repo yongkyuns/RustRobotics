@@ -14,7 +14,7 @@ What is already true:
 - native MuJoCo viewport uses the current `wgpu` renderer path
 - native robot/controller logic is no longer hard-wired into the MuJoCo world runtime
 - shared robot FW lives in `rust_robotics_algo`
-- web MuJoCo uses a JS runtime plus a separate overlay canvas
+- web MuJoCo still uses a JS browser runtime for MuJoCo stepping and currently ships with the JS overlay viewport path
 - web and native now share the Go2 and Duck controller logic through the wasm FW bridge
 - Open Duck Mini and Go2 both run in browser and native
 - stale JS-side Go2/Duck controller-building logic has been removed from
@@ -61,7 +61,22 @@ Primary files:
 
 ## Medium-Priority Work
 
-### 2. Unify native and web MuJoCo panel semantics
+### 2. Stabilize the Rust-owned web viewport path before making it default
+
+The renderer boundary is cleaner now, but the Rust-owned `web_glow_viewport` path is not yet stable enough to ship as the default browser build.
+
+Remaining cleanup:
+
+- fix browser performance regressions relative to the current JS overlay path
+- make the MuJoCo robot scene render correctly through the Rust-owned viewport
+- only then switch the shipped web bundle away from the JS overlay path
+
+Primary files:
+
+- [`src/simulator/mujoco/native.rs`](./src/simulator/mujoco/native.rs)
+- [`src/simulator/mujoco/wasm.rs`](./src/simulator/mujoco/wasm.rs)
+
+### 3. Unify native and web MuJoCo panel semantics
 
 The two paths are closer now, but they are still not fully aligned in UI details and status reporting.
 
@@ -71,12 +86,7 @@ Remaining cleanup:
 - same telemetry surface where practical
 - same robot-selection workflow
 
-Primary files:
-
-- [`src/simulator/mujoco/native.rs`](./src/simulator/mujoco/native.rs)
-- [`src/simulator/mujoco/wasm.rs`](./src/simulator/mujoco/wasm.rs)
-
-### 3. Add targeted golden tests for shared FW behavior
+### 4. Add targeted golden tests for shared FW behavior
 
 The shared controller logic now has initial focused unit coverage, but it still is not at a full
 "golden test" level yet.
@@ -99,7 +109,7 @@ Current location:
 - controller unit tests in `../rust_robotics_algo/src/robot_fw/go2.rs`
 - controller unit tests in `../rust_robotics_algo/src/robot_fw/duck.rs`
 
-### 4. Clean remaining dead code and warnings
+### 5. Clean remaining dead code and warnings
 
 The default wasm-target warning noise is now much lower after the latest cleanup pass.
 
@@ -112,22 +122,33 @@ Primary files:
 
 ## Lower-Priority / Optional Work
 
-### 5. Move the browser step loop fully into JS
+### 6. Move browser MuJoCo runtime ownership further into Rust
 
-The current web flow is still orchestrated from Rust UI cadence. The next performance/architecture step is:
+The renderer-side convergence work started, but the browser runtime lifecycle is still JS-hosted.
 
-- JS owns continuous stepping
-- Rust sends command / viewport state
-- Rust only reads telemetry
+Remaining cleanup:
 
-That would simplify `wasm.rs` further.
+- move more MuJoCo lifecycle ownership from `mujoco_runtime.js` into `wasm.rs`
+- reduce the number of JS-side browser runtime responsibilities to loading/bootstrap only
+- keep converging toward a native/web-shared Rust render/runtime path
+
+### 7. Remove or retire the JS overlay fallback path
+
+Once the Rust-owned web viewport path is stable enough, the older JS overlay rendering path becomes
+cleanup debt.
+
+That work would include:
+
+- removing stale JS overlay canvas code
+- deleting now-redundant viewport configuration bridge calls
+- keeping only the browser MuJoCo step/bootstrap surface that Rust still needs
 
 Primary files:
 
 - [`src/simulator/mujoco/wasm.rs`](./src/simulator/mujoco/wasm.rs)
 - [`web/mujoco_runtime.js`](./web/mujoco_runtime.js)
 
-### 6. Push more config into robot data files
+### 8. Push more config into robot data files
 
 Some behavior still depends on code-side assumptions that could live in policy/config metadata instead.
 
@@ -144,7 +165,7 @@ Primary files:
 - robot asset JSONs under [`assets/mujoco`](./assets/mujoco)
 - web/native config readers
 
-### 7. Revisit deployment docs
+### 9. Revisit deployment docs
 
 Now that the browser path is GitHub-Pages-compatible and uses the current FW-owned ONNX path, deployment docs should reflect:
 
@@ -162,8 +183,8 @@ Good locations:
 
 If only one thing is done next, it should be:
 
-1. remove any unnecessary `qpos` / `qvel` traffic from the web step bridge
-2. extend the new FW tests into more fixture-style golden coverage
-3. align deployment/architecture docs with the working runtime
+1. make the Rust-owned web viewport path match the current shipped browser behavior and performance
+2. move more browser MuJoCo runtime ownership into Rust
+3. remove any unnecessary `qpos` / `qvel` traffic from the web step bridge
 
-That would tighten the FW/runtime boundary further without changing the working runtime model again.
+That keeps the migration pointed in the right direction without regressing the stable web build.
