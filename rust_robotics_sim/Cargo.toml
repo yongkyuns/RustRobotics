@@ -14,8 +14,8 @@ path = "src/main.rs"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["web_glow_viewport"]
-web_glow_viewport = []
+default = ["web_wgpu_viewport"]
+web_wgpu_viewport = []
 
 [dependencies]
 rust_robotics_algo = {version="0.1", path="../rust_robotics_algo"}
@@ -33,7 +33,7 @@ web-time = "1.1"
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tracing-subscriber = "0.3"
-eframe = { version = "0.32.3", features = ["persistence", "glow", "wgpu"] }
+eframe = { version = "0.32.3", features = ["persistence", "wgpu"] }
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]

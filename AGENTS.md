@@ -105,8 +105,8 @@ Expected native sanity checks:
 ## Web Runtime Notes
 
 - Web app shell uses `wgpu`.
-- Browser MuJoCo currently ships through the JS overlay viewport path by default.
-- The Rust-owned `web_glow_viewport` path exists for migration work, but it is not the stable default build yet.
+- Browser MuJoCo now ships through the Rust-owned `wgpu` viewport path by default.
+- The older JS overlay viewport path still exists only behind `--no-default-features` as a legacy fallback.
 - Browser MuJoCo and ORT are currently non-threaded / GitHub-Pages-compatible.
 - Web uses a shared FW bridge exported from the wasm bundle:
   - `rust_robotics_fw_create_runtime`
@@ -119,6 +119,7 @@ Expected native sanity checks:
 
 Expected web sanity checks:
 
+- `cargo check -p rust_robotics_sim --target wasm32-unknown-unknown`
 - `cargo check -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features`
 - `node --check rust_robotics_sim/web/mujoco_runtime.js`
 - `./build_web.sh --fast`

@@ -211,13 +211,14 @@ The current shipped web build still uses the JS-owned overlay viewport path.
 Current shipped design:
 
 - main RustRobotics app still runs on the web `wgpu` path
-- MuJoCo viewport is rendered by a separate JS-owned overlay canvas
-- Rust provides the viewport rectangle, UI state, and browser runtime orchestration
+- MuJoCo viewport is rendered by the Rust-owned web `wgpu` path by default
+- JS still provides browser MuJoCo module loading and runtime bridging
 
 Migration path:
 
-- the Rust-owned `web_glow_viewport` path exists behind the default crate feature
-- a shared Rust scene-building layer now feeds both native and web Rust renderers where that path is enabled
+- the Rust-owned `web_wgpu_viewport` path is the default crate feature
+- the older JS overlay path remains available only as a legacy fallback with `--no-default-features`
+- a shared Rust scene-building layer now feeds both native and web Rust renderers
 
 ### Threading on Web
 
@@ -232,7 +233,7 @@ So:
 
 - Rust UI is async, not worker-isolated
 - JS stepping is async, but still effectively main-thread work
-- overlay rendering is browser-side, but not on a dedicated worker
+- browser runtime bridging is JS-side, but not on a dedicated worker
 
 ## Current Rust/JS Boundary
 

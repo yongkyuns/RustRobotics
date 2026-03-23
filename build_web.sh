@@ -85,9 +85,9 @@ cp "rust_robotics_sim/web/ort_web/_telemetry.js" \
 cp "rust_robotics_sim/web/mujoco_runtime.js" \
   "docs/mujoco_runtime.js"
 
-echo "Building rust…"
+echo "Building web bundle…"
 BUILD=release
-cargo build -p "${CRATE_NAME}" --release --lib --target wasm32-unknown-unknown --no-default-features
+cargo build -p "${CRATE_NAME}" --release --lib --target wasm32-unknown-unknown
 
 # Get the output directory (in the workspace it is in another location)
 TARGET=$(cargo metadata --format-version=1 | jq --raw-output .target_directory)
@@ -103,7 +103,7 @@ if [[ "${FAST}" == false ]]; then
   wasm-opt "docs/${CRATE_NAME}_bg.wasm" -O2 --fast-math -o "docs/${CRATE_NAME}_bg.wasm" # add -g to get debug symbols
 fi
 
-echo "Finished: docs/${CRATE_NAME_SNAKE_CASE}.wasm"
+echo "Finished web bundle: docs/${CRATE_NAME_SNAKE_CASE}.wasm"
 
 if [[ "${OPEN}" == true ]]; then
   if [[ "$OSTYPE" == "linux-gnu"* ]]; then

@@ -1207,7 +1207,7 @@ impl Simulator {
                 }
                 SimMode::Mujoco => {
                     ui.label("• The MuJoCo tab runs the native MuJoCo model and ONNX policy inside Rust.");
-                    ui.label("• If native MuJoCo GL rendering is unavailable, the tab falls back to a custom glow-based 3D renderer.");
+                    ui.label("• The viewport uses the shared Rust-owned 3D renderer path across native and web.");
                 }
                 _ => {}
             }
@@ -1231,7 +1231,7 @@ impl Simulator {
             let scene_response = ui.group(|ui| {
                 ui.label("MuJoCo viewport");
                 ui.label("The MuJoCo tab above owns the live simulator state and viewport.");
-                ui.label("Use drag to orbit, right-drag to pan, and mouse wheel to zoom in glow-fallback mode.");
+                ui.label("Use drag to orbit, right-drag to pan, and mouse wheel to zoom.");
             });
             self.help_scene_rect = Some(scene_response.response.rect);
         } else if self.mode == SimMode::InvertedPendulum {

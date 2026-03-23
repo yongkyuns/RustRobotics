@@ -61,15 +61,15 @@ Primary files:
 
 ## Medium-Priority Work
 
-### 2. Stabilize the Rust-owned web viewport path before making it default
+### 2. Remove the legacy browser viewport fallback
 
-The renderer boundary is cleaner now, but the Rust-owned `web_glow_viewport` path is not yet stable enough to ship as the default browser build.
+The Rust-owned `web_wgpu_viewport` path is now the default shipped browser build. The remaining cleanup is deleting the older JS overlay fallback after enough confidence is built.
 
 Remaining cleanup:
 
-- fix browser performance regressions relative to the current JS overlay path
-- make the MuJoCo robot scene render correctly through the Rust-owned viewport
-- only then switch the shipped web bundle away from the JS overlay path
+- delete `--no-default-features` fallback branches in [`src/simulator/mujoco/wasm.rs`](./src/simulator/mujoco/wasm.rs)
+- remove stale browser viewport config / hide / overlay helper code once the fallback is gone
+- trim warning-only dead code that only exists for the legacy path
 
 Primary files:
 

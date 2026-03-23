@@ -1,8 +1,3 @@
-#![cfg_attr(
-    all(target_arch = "wasm32", not(feature = "web_glow_viewport")),
-    allow(dead_code)
-)]
-
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(super) struct GlVertex {

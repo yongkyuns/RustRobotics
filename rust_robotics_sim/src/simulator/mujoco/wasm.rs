@@ -1,35 +1,34 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 use std::sync::{Arc, Mutex};
 
 use eframe::emath::GuiRounding;
-use egui::{vec2, Align2, Color32, FontId, Rect, RichText, Sense, Ui};
+use egui::{vec2, Align2, Color32, FontId, Rect, Sense, Ui};
 use egui_plot::{Line, PlotUi};
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 use egui_wgpu;
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 use eframe::wgpu;
 use js_sys::{ArrayBuffer, Function, Promise, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 use web_time::Instant;
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 use wgpu::util::DeviceExt as _;
 use crate::data::{IntoValues, TimeTable};
 use super::shared_layout::show_stacked_layout;
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 use super::render_scene::{
     append_grid_lines as append_shared_grid_lines, append_primitive_geom,
     geom_model_matrix as shared_geom_model_matrix,
     display_geom_color as shared_display_geom_color,
     GlVertex, SharedGeomSnapshot, GEOM_MESH,
 };
-#[cfg(feature = "web_glow_viewport")]
 use super::shared_panel::show_shared_panel;
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 use super::viewport_interaction::gather_viewport_interaction;
 
 const GO2_ASSET_FILES: &[&str] = &[
@@ -115,13 +114,6 @@ enum BrowserRobotPreset {
 }
 
 impl BrowserRobotPreset {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Go2 => "Go2",
-            Self::OpenDuckMini => "Open Duck Mini",
-        }
-    }
-
     fn asset_base_path(self) -> &'static str {
         match self {
             Self::Go2 => "assets/mujoco/go2/",
@@ -161,18 +153,18 @@ pub(super) struct WasmMujocoBackend {
     mujoco_step_in_flight: Rc<RefCell<bool>>,
     pending_mujoco_steps: Rc<RefCell<usize>>,
     compiled_mesh_assets: Rc<RefCell<Vec<BrowserMeshAsset>>>,
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     wgpu_renderer: Arc<Mutex<BrowserWgpuRenderer>>,
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     wgpu_scene: Arc<Mutex<BrowserWgpuSceneFrame>>,
     camera: BrowserOrbitCamera,
     camera_initialized: bool,
     plot_history: Rc<RefCell<TimeTable>>,
     overlay_occlusions: Vec<Rect>,
     overlay_interactive: bool,
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     render_display_fps: f32,
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     last_render_frame_at: Option<Instant>,
 }
 
@@ -188,9 +180,9 @@ impl Default for WasmMujocoBackend {
             mujoco_step_in_flight: Rc::new(RefCell::new(false)),
             pending_mujoco_steps: Rc::new(RefCell::new(0)),
             compiled_mesh_assets: Rc::new(RefCell::new(Vec::new())),
-            #[cfg(feature = "web_glow_viewport")]
+            #[cfg(feature = "web_wgpu_viewport")]
             wgpu_renderer: Arc::new(Mutex::new(BrowserWgpuRenderer::default())),
-            #[cfg(feature = "web_glow_viewport")]
+            #[cfg(feature = "web_wgpu_viewport")]
             wgpu_scene: Arc::new(Mutex::new(BrowserWgpuSceneFrame::default())),
             camera: BrowserOrbitCamera::default(),
             camera_initialized: false,
@@ -201,9 +193,9 @@ impl Default for WasmMujocoBackend {
             ]))),
             overlay_occlusions: Vec::new(),
             overlay_interactive: true,
-            #[cfg(feature = "web_glow_viewport")]
+            #[cfg(feature = "web_wgpu_viewport")]
             render_display_fps: 0.0,
-            #[cfg(feature = "web_glow_viewport")]
+            #[cfg(feature = "web_wgpu_viewport")]
             last_render_frame_at: None,
         }
     }
@@ -301,7 +293,6 @@ impl OnnxKey {
 
 #[derive(Debug, Deserialize)]
 struct AssetMeta {
-    body_names_isaac: Vec<String>,
     joint_names_isaac: Vec<String>,
     default_joint_pos: Vec<f32>,
 }
@@ -309,9 +300,6 @@ struct AssetMeta {
 struct BrowserAssetBundle {
     preset: BrowserRobotPreset,
     files: BTreeMap<String, Vec<u8>>,
-    scene_include: String,
-    meshdir: String,
-    mesh_files: Vec<String>,
     policy: PolicyFile,
     asset_meta: AssetMeta,
 }
@@ -342,22 +330,8 @@ enum BrowserOrtState {
     #[default]
     Idle,
     Loading,
-    Ready(BrowserOrtReport),
+    Ready,
     Error(String),
-}
-
-#[derive(Debug, Deserialize)]
-struct BrowserOrtReport {
-    input_names: Vec<String>,
-    output_names: Vec<String>,
-    output_summaries: Vec<BrowserOrtTensorSummary>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BrowserOrtTensorSummary {
-    name: String,
-    dims: Vec<usize>,
-    first: Option<f32>,
 }
 
 #[derive(Default)]
@@ -423,7 +397,7 @@ struct BrowserMujocoReport {
     mesh_assets: Vec<BrowserMeshAssetSnapshot>,
 }
 
-#[cfg_attr(not(feature = "web_glow_viewport"), allow(dead_code))]
+#[cfg_attr(not(feature = "web_wgpu_viewport"), allow(dead_code))]
 #[derive(Debug, Deserialize, Clone)]
 struct BrowserGeomSnapshot {
     type_id: i32,
@@ -449,28 +423,6 @@ struct BrowserMujocoConfig {
     phase_steps: usize,
 }
 
-#[derive(Serialize)]
-struct BrowserViewportConfig {
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
-    pixels_per_point: f32,
-    visible: bool,
-    interactive: bool,
-    diagnostic_colors: bool,
-    occlusion_rects: Vec<BrowserOcclusionRect>,
-}
-
-#[derive(Serialize)]
-struct BrowserOcclusionRect {
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
-}
-
-#[cfg_attr(not(feature = "web_glow_viewport"), allow(dead_code))]
 #[derive(Clone)]
 struct BrowserMeshAsset {
     vertices: Vec<LocalMeshVertex>,
@@ -485,14 +437,14 @@ struct BrowserMeshAssetSnapshot {
     faces: Vec<u32>,
 }
 
-#[cfg_attr(not(feature = "web_glow_viewport"), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Clone, Copy, Default)]
 struct LocalMeshVertex {
     position: [f32; 3],
     normal: [f32; 3],
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 #[derive(Default, Clone)]
 struct BrowserWgpuSceneFrame {
     triangles: Vec<GlVertex>,
@@ -501,7 +453,7 @@ struct BrowserWgpuSceneFrame {
     view_proj: [f32; 16],
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 struct BrowserWgpuCallback {
     rect: Rect,
     renderer: Arc<Mutex<BrowserWgpuRenderer>>,
@@ -509,7 +461,7 @@ struct BrowserWgpuCallback {
     target_format: wgpu::TextureFormat,
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 impl egui_wgpu::CallbackTrait for BrowserWgpuCallback {
     fn prepare(
         &self,
@@ -571,14 +523,14 @@ impl egui_wgpu::CallbackTrait for BrowserWgpuCallback {
     }
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct BrowserWgpuSceneUniform {
     view_proj: [f32; 16],
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 #[derive(Default)]
 struct BrowserWgpuRenderer {
     scene_pipeline: Option<wgpu::RenderPipeline>,
@@ -606,7 +558,7 @@ struct BrowserWgpuRenderer {
     last_render_ms_ms: f32,
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct MeshInstance {
@@ -616,13 +568,12 @@ struct MeshInstance {
     _padding: [u32; 3],
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 struct MeshAssetGpu {
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
 }
 
-#[cfg_attr(not(feature = "web_glow_viewport"), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct BrowserOrbitCamera {
     azimuth_deg: f32,
@@ -756,8 +707,6 @@ impl WasmMujocoBackend {
                 if outcome.reset_view {
                     this.camera = BrowserOrbitCamera::default();
                     this.camera_initialized = false;
-                    #[cfg(not(feature = "web_glow_viewport"))]
-                    this.reset_browser_viewport_camera();
                 }
             },
             |this, ui| this.ui_viewport(ui, frame),
@@ -766,20 +715,6 @@ impl WasmMujocoBackend {
 
     pub fn set_active(&mut self, active: bool) {
         self.active = active;
-        #[cfg(not(feature = "web_glow_viewport"))]
-        if !active {
-            self.configure_browser_viewport(&BrowserViewportConfig {
-                left: 0.0,
-                top: 0.0,
-                width: 0.0,
-                height: 0.0,
-                pixels_per_point: 1.0,
-                visible: false,
-                interactive: false,
-                diagnostic_colors: false,
-                occlusion_rects: Vec::new(),
-            });
-        }
     }
 
     pub fn set_overlay_occlusions(&mut self, rects: &[Rect], interactive: bool) {
@@ -855,8 +790,6 @@ impl WasmMujocoBackend {
         self.reset_loaded_policy_state();
         self.camera = BrowserOrbitCamera::default();
         self.camera_initialized = false;
-        #[cfg(not(feature = "web_glow_viewport"))]
-        self.hide_browser_viewport();
     }
 
     fn browser_panel_status_message(&self) -> Option<BrowserPanelStatus> {
@@ -875,7 +808,7 @@ impl WasmMujocoBackend {
             BrowserOrtState::Error(err) => {
                 return Some(BrowserPanelStatus::Error(err.clone()));
             }
-            BrowserOrtState::Idle | BrowserOrtState::Ready(_) => {}
+            BrowserOrtState::Idle | BrowserOrtState::Ready => {}
         }
 
         match &*self.mujoco_state.borrow() {
@@ -884,108 +817,6 @@ impl WasmMujocoBackend {
             ),
             BrowserMujocoState::Ready(_) => None,
             BrowserMujocoState::Error(err) => Some(BrowserPanelStatus::Error(err.clone())),
-        }
-    }
-
-    fn ui_asset_report(&self, ui: &mut Ui, bundle: &BrowserAssetBundle) {
-        let policy = bundle.policy();
-        ui.label(
-            RichText::new("Browser asset bundle")
-                .strong()
-                .color(Color32::LIGHT_GREEN),
-        );
-        ui.label(format!("Files: {} fetched assets", bundle.files.len()));
-        ui.label(format!("Robot preset: {}", bundle.preset.label()));
-        ui.label(format!("Scene include: {}", bundle.scene_include));
-        ui.label(format!(
-            "Meshes: {} files under {}",
-            bundle.mesh_files.len(),
-            bundle.meshdir
-        ));
-        ui.label(format!(
-            "Policy: {} outputs, {:?} input groups, ONNX {}",
-            policy.onnx.meta.out_keys.len(),
-            policy.onnx.meta.in_shapes,
-            bundle
-                .files
-                .get(normalize_rel_path(&policy.onnx.path).as_str())
-                .map(|bytes| format_bytes(bytes.len()))
-                .unwrap_or_else(|| "missing".to_string())
-        ));
-        let preview_outputs = bundle
-            .policy()
-            .onnx
-            .meta
-            .out_keys
-            .iter()
-            .take(4)
-            .map(OnnxKey::joined)
-            .collect::<Vec<_>>()
-            .join(", ");
-        ui.label(format!("Output preview: {preview_outputs}"));
-        ui.label(format!(
-            "Control: mode={} action_scale {:.2}, kp {:.2}, kd {:.2}",
-            policy.command_mode(),
-            policy.action_scale,
-            policy.stiffness,
-            policy.damping
-        ));
-        ui.label(format!(
-            "Robot metadata: {} bodies, {} joints, {} default joint positions",
-            bundle.asset_meta.body_names_isaac.len(),
-            bundle.asset_meta.joint_names_isaac.len(),
-            bundle.asset_meta.default_joint_pos.len()
-        ));
-
-        egui::CollapsingHeader::new("Mesh assets")
-            .default_open(false)
-            .show(ui, |ui| {
-                for mesh in &bundle.mesh_files {
-                    ui.label(mesh);
-                }
-            });
-    }
-
-    fn ui_ort_report(&self, ui: &mut Ui) {
-        ui.label(
-            RichText::new("Browser ONNX smoke test")
-                .strong()
-                .color(Color32::LIGHT_GREEN),
-        );
-        match &*self.ort_state.borrow() {
-            BrowserOrtState::Idle => {
-                ui.label("Status: idle");
-            }
-            BrowserOrtState::Loading => {
-                ui.label("Status: loading ONNX Runtime Web session...");
-            }
-            BrowserOrtState::Ready(report) => {
-                ui.label("Status: ONNX Runtime Web session created and first inference succeeded");
-                ui.label(format!("Model inputs: {}", report.input_names.join(", ")));
-                ui.label(format!(
-                    "Model outputs: {}",
-                    report
-                        .output_names
-                        .iter()
-                        .take(8)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                egui::CollapsingHeader::new("Output summary")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        for tensor in &report.output_summaries {
-                            ui.label(format!(
-                                "{} dims={:?} first={:?}",
-                                tensor.name, tensor.dims, tensor.first
-                            ));
-                        }
-                    });
-            }
-            BrowserOrtState::Error(err) => {
-                ui.colored_label(Color32::LIGHT_RED, format!("Status: {err}"));
-            }
         }
     }
 
@@ -1037,8 +868,9 @@ impl WasmMujocoBackend {
         spawn_local(async move {
             let result = async {
                 let js_value = ort_smoke_test(&model_bytes, wasm_base_path, &config).await?;
-                serde_wasm_bindgen::from_value::<BrowserOrtReport>(js_value)
-                    .map_err(|err| JsValue::from_str(&err.to_string()))
+                let _: serde_json::Value = serde_wasm_bindgen::from_value(js_value)
+                    .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                Ok(())
             }
             .await;
 
@@ -1046,57 +878,10 @@ impl WasmMujocoBackend {
                 return;
             }
             *state.borrow_mut() = match result {
-                Ok(report) => BrowserOrtState::Ready(report),
+                Ok(()) => BrowserOrtState::Ready,
                 Err(err) => BrowserOrtState::Error(js_error_to_string(err)),
             };
         });
-    }
-
-    fn ui_mujoco_report(&self, ui: &mut Ui) {
-        ui.label(
-            RichText::new("Browser MuJoCo runtime")
-                .strong()
-                .color(Color32::LIGHT_GREEN),
-        );
-        match &*self.mujoco_state.borrow() {
-            BrowserMujocoState::Idle => {
-                ui.label("Status: idle");
-            }
-            BrowserMujocoState::Loading => {
-                ui.label("Status: loading MuJoCo wasm module and scene...");
-            }
-            BrowserMujocoState::Ready(report) => {
-                ui.label("Status: MuJoCo wasm runtime initialized");
-                ui.label(format!(
-                    "Model: nbody={} ngeom={} nv={} nu={} dt={:.4}",
-                    report.nbody, report.ngeom, report.nv, report.nu, report.timestep
-                ));
-                ui.label(format!(
-                    "Robot: {} | Command mode: setpoint ball",
-                    self.selected_robot.label()
-                ));
-                ui.label(format!(
-                    "Policy inputs: {}",
-                    report.policy_inputs.join(", ")
-                ));
-                ui.label(format!(
-                    "Policy outputs: {}",
-                    report
-                        .policy_outputs
-                        .iter()
-                        .take(8)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-                ui.label(format!("Action preview: {:?}", report.last_action_preview));
-                ui.label(format!("qpos preview: {:?}", report.qpos_preview));
-                ui.label(format!("xpos preview: {:?}", report.xpos_preview));
-            }
-            BrowserMujocoState::Error(err) => {
-                ui.colored_label(Color32::LIGHT_RED, format!("Status: {err}"));
-            }
-        }
     }
 
     fn ensure_mujoco_runtime_started(&mut self, bundle: &BrowserAssetBundle) {
@@ -1265,16 +1050,10 @@ impl WasmMujocoBackend {
     fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
         let rect = aligned_viewport_rect(ui);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        #[cfg(not(feature = "web_glow_viewport"))]
-        let _ = response;
-
         let state_binding = self.mujoco_state.borrow();
-        #[cfg(feature = "web_glow_viewport")]
         let mut report = match &*state_binding {
             BrowserMujocoState::Ready(report) => report.clone(),
             BrowserMujocoState::Idle => {
-                #[cfg(not(feature = "web_glow_viewport"))]
-                self.hide_browser_viewport();
                 ui.painter()
                     .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
                 ui.painter().text(
@@ -1287,8 +1066,6 @@ impl WasmMujocoBackend {
                 return;
             }
             BrowserMujocoState::Loading => {
-                #[cfg(not(feature = "web_glow_viewport"))]
-                self.hide_browser_viewport();
                 ui.painter()
                     .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
                 ui.painter().text(
@@ -1301,51 +1078,6 @@ impl WasmMujocoBackend {
                 return;
             }
             BrowserMujocoState::Error(err) => {
-                #[cfg(not(feature = "web_glow_viewport"))]
-                self.hide_browser_viewport();
-                ui.painter()
-                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
-                ui.painter().text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    err,
-                    FontId::proportional(16.0),
-                    Color32::LIGHT_RED,
-                );
-                return;
-            }
-        };
-        #[cfg(not(feature = "web_glow_viewport"))]
-        match &*state_binding {
-            BrowserMujocoState::Ready(_) => {}
-            BrowserMujocoState::Idle => {
-                self.hide_browser_viewport();
-                ui.painter()
-                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
-                ui.painter().text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    "MuJoCo browser runtime idle",
-                    FontId::proportional(18.0),
-                    Color32::from_gray(200),
-                );
-                return;
-            }
-            BrowserMujocoState::Loading => {
-                self.hide_browser_viewport();
-                ui.painter()
-                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
-                ui.painter().text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    "Loading MuJoCo browser runtime...",
-                    FontId::proportional(18.0),
-                    Color32::from_gray(200),
-                );
-                return;
-            }
-            BrowserMujocoState::Error(err) => {
-                self.hide_browser_viewport();
                 ui.painter()
                     .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
                 ui.painter().text(
@@ -1359,145 +1091,113 @@ impl WasmMujocoBackend {
             }
         };
         drop(state_binding);
-
-        #[cfg(not(feature = "web_glow_viewport"))]
-        {
-            let _ = frame;
-            self.configure_browser_viewport(&BrowserViewportConfig {
-                left: rect.min.x,
-                top: rect.min.y,
-                width: rect.width(),
-                height: rect.height(),
-                pixels_per_point: ui.ctx().pixels_per_point(),
-                visible: true,
-                interactive: self.overlay_interactive,
-                diagnostic_colors: false,
-                occlusion_rects: self
-                    .overlay_occlusions
-                    .iter()
-                    .map(|rect| BrowserOcclusionRect {
-                        left: rect.min.x,
-                        top: rect.min.y,
-                        width: rect.width(),
-                        height: rect.height(),
-                    })
-                    .collect(),
-            });
+        self.update_camera(ui, &response, &report);
+        if let BrowserMujocoState::Ready(updated_report) = &*self.mujoco_state.borrow() {
+            report = updated_report.clone();
+        }
+        let mesh_assets_empty = self.compiled_mesh_assets.borrow().is_empty();
+        if mesh_assets_empty {
             ui.painter()
                 .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Waiting for compiled MuJoCo mesh assets...",
+                FontId::proportional(16.0),
+                Color32::from_gray(210),
+            );
             return;
         }
 
-        #[cfg(feature = "web_glow_viewport")]
-        {
-            self.update_camera(ui, &response, &report);
-            if let BrowserMujocoState::Ready(updated_report) = &*self.mujoco_state.borrow() {
-                report = updated_report.clone();
-            }
-            let mesh_assets_empty = self.compiled_mesh_assets.borrow().is_empty();
-            if mesh_assets_empty {
-                ui.painter()
-                    .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
-                ui.painter().text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    "Waiting for compiled MuJoCo mesh assets...",
-                    FontId::proportional(16.0),
-                    Color32::from_gray(210),
-                );
-                return;
-            }
-
-            if !self.camera_initialized {
-                self.fit_camera_to_report(&report);
-                self.camera_initialized = true;
-            }
-            let mesh_assets = self.compiled_mesh_assets.borrow();
-            let scene = self.build_wgpu_scene_frame(
-                &report,
-                mesh_assets.as_slice(),
-                rect.width() / rect.height(),
-            );
-            if let Ok(mut scene_state) = self.wgpu_scene.lock() {
-                *scene_state = scene;
-            }
-
-            let Some(frame) = frame else {
-                self.render_software_2d(ui, rect, &report, mesh_assets.as_slice());
-                return;
-            };
-            let Some(render_state) = frame.wgpu_render_state() else {
-                self.render_software_2d(ui, rect, &report, mesh_assets.as_slice());
-                return;
-            };
-            if let Ok(mut renderer) = self.wgpu_renderer.lock() {
-                let _ = renderer.ensure_mesh_assets(&render_state.device, mesh_assets.as_slice());
-            }
-
-            let callback = BrowserWgpuCallback {
-                rect,
-                renderer: self.wgpu_renderer.clone(),
-                scene: self.wgpu_scene.clone(),
-                target_format: render_state.target_format,
-            };
-            ui.painter()
-                .add(egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
-                    rect, callback,
-                )));
-
-            let now = Instant::now();
-            if let Some(last_frame_at) = self.last_render_frame_at {
-                let dt_ms = (now - last_frame_at).as_secs_f32() * 1000.0;
-                if dt_ms > f32::EPSILON {
-                    let instant_fps = 1000.0 / dt_ms.max(1.0);
-                    self.render_display_fps = if self.render_display_fps > 0.0 {
-                        self.render_display_fps * 0.9 + instant_fps * 0.1
-                    } else {
-                        instant_fps
-                    };
-                }
-            }
-            self.last_render_frame_at = Some(now);
-
-            let overlay = format!(
-                concat!(
-                    "Browser rust wgpu viewport\n",
-                    "Sim t={:.2}s  steps={}  cmd=({:+.2}, {:+.2})\n",
-                    "Setpoint {:?}  policy={}  Viewport FPS {:.1}\n",
-                    "Step {:.2}/{:.2} ms  Policy {:.2}/{:.2} ms  Physics {:.2}/{:.2} ms\n",
-                    "Overlay {:.2}/{:.2} ms  Drag {} d={} m={}\n",
-                    "Drag: orbit | Right-drag: pan | Wheel: zoom | Double-click: reset view"
-                ),
-                report.sim_time,
-                report.step_count,
-                report.command_vel_x,
-                report.command_vel_y,
-                report.setpoint_preview,
-                report.command_mode,
-                self.render_display_fps,
-                report.last_step_wall_ms,
-                report.avg_step_wall_ms,
-                report.last_policy_wall_ms,
-                report.avg_policy_wall_ms,
-                report.last_physics_wall_ms,
-                report.avg_physics_wall_ms,
-                report.last_overlay_wall_ms,
-                report.avg_overlay_wall_ms,
-                report.debug_drag_mode,
-                report.debug_pointer_downs,
-                report.debug_pointer_moves
-            );
-            ui.painter().text(
-                rect.left_top() + vec2(12.0, 12.0),
-                Align2::LEFT_TOP,
-                overlay,
-                FontId::monospace(12.0),
-                Color32::from_gray(210),
-            );
+        if !self.camera_initialized {
+            self.fit_camera_to_report(&report);
+            self.camera_initialized = true;
         }
+        let mesh_assets = self.compiled_mesh_assets.borrow();
+        let scene = self.build_wgpu_scene_frame(
+            &report,
+            mesh_assets.as_slice(),
+            rect.width() / rect.height(),
+        );
+        if let Ok(mut scene_state) = self.wgpu_scene.lock() {
+            *scene_state = scene;
+        }
+
+        let Some(frame) = frame else {
+            self.render_software_2d(ui, rect, &report, mesh_assets.as_slice());
+            return;
+        };
+        let Some(render_state) = frame.wgpu_render_state() else {
+            self.render_software_2d(ui, rect, &report, mesh_assets.as_slice());
+            return;
+        };
+        if let Ok(mut renderer) = self.wgpu_renderer.lock() {
+            let _ = renderer.ensure_mesh_assets(&render_state.device, mesh_assets.as_slice());
+        }
+
+        let callback = BrowserWgpuCallback {
+            rect,
+            renderer: self.wgpu_renderer.clone(),
+            scene: self.wgpu_scene.clone(),
+            target_format: render_state.target_format,
+        };
+        ui.painter()
+            .add(egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
+                rect, callback,
+            )));
+
+        let now = Instant::now();
+        if let Some(last_frame_at) = self.last_render_frame_at {
+            let dt_ms = (now - last_frame_at).as_secs_f32() * 1000.0;
+            if dt_ms > f32::EPSILON {
+                let instant_fps = 1000.0 / dt_ms.max(1.0);
+                self.render_display_fps = if self.render_display_fps > 0.0 {
+                    self.render_display_fps * 0.9 + instant_fps * 0.1
+                } else {
+                    instant_fps
+                };
+            }
+        }
+        self.last_render_frame_at = Some(now);
+
+        let overlay = format!(
+            concat!(
+                "Browser rust wgpu viewport\n",
+                "Sim t={:.2}s  steps={}  cmd=({:+.2}, {:+.2})\n",
+                "Setpoint {:?}  policy={}  Viewport FPS {:.1}\n",
+                "Step {:.2}/{:.2} ms  Policy {:.2}/{:.2} ms  Physics {:.2}/{:.2} ms\n",
+                "Overlay {:.2}/{:.2} ms  Drag {} d={} m={}\n",
+                "Drag: orbit | Right-drag: pan | Wheel: zoom | Double-click: reset view"
+            ),
+            report.sim_time,
+            report.step_count,
+            report.command_vel_x,
+            report.command_vel_y,
+            report.setpoint_preview,
+            report.command_mode,
+            self.render_display_fps,
+            report.last_step_wall_ms,
+            report.avg_step_wall_ms,
+            report.last_policy_wall_ms,
+            report.avg_policy_wall_ms,
+            report.last_physics_wall_ms,
+            report.avg_physics_wall_ms,
+            report.last_overlay_wall_ms,
+            report.avg_overlay_wall_ms,
+            report.debug_drag_mode,
+            report.debug_pointer_downs,
+            report.debug_pointer_moves
+        );
+        ui.painter().text(
+            rect.left_top() + vec2(12.0, 12.0),
+            Align2::LEFT_TOP,
+            overlay,
+            FontId::monospace(12.0),
+            Color32::from_gray(210),
+        );
     }
 
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     fn fit_camera_to_report(&mut self, report: &BrowserMujocoReport) {
         if report.geoms.is_empty() {
             return;
@@ -1522,7 +1222,7 @@ impl WasmMujocoBackend {
         self.camera.distance = (extent * 2.8).max(1.5);
     }
 
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     fn build_wgpu_scene_frame(
         &self,
         report: &BrowserMujocoReport,
@@ -1589,7 +1289,7 @@ impl WasmMujocoBackend {
         frame
     }
 
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     fn append_command_setpoint_scene(
         &self,
         triangles: &mut Vec<GlVertex>,
@@ -1606,7 +1306,7 @@ impl WasmMujocoBackend {
         );
     }
 
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     fn update_camera(&mut self, ui: &Ui, response: &egui::Response, report: &BrowserMujocoReport) {
         let interaction = gather_viewport_interaction(report.use_setpoint_ball, ui, response, |pointer| {
             self.camera.intersect_plane_z(response.rect, pointer, 0.05)
@@ -1636,7 +1336,7 @@ impl WasmMujocoBackend {
         }
     }
 
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     fn set_command_setpoint(&mut self, world: [f32; 3]) {
         if let BrowserMujocoState::Ready(report) = &mut *self.mujoco_state.borrow_mut() {
             report.setpoint_preview = vec![world[0], world[1], world[2]];
@@ -1644,7 +1344,7 @@ impl WasmMujocoBackend {
         self.set_browser_command_setpoint(world);
     }
 
-    #[cfg(feature = "web_glow_viewport")]
+    #[cfg(feature = "web_wgpu_viewport")]
     fn set_browser_command_setpoint(&self, world: [f32; 3]) {
         let Some(window) = web_sys::window() else {
             return;
@@ -1666,7 +1366,6 @@ impl WasmMujocoBackend {
         );
     }
 
-    #[allow(dead_code)]
     fn render_software_2d(
         &self,
         ui: &mut Ui,
@@ -1681,7 +1380,7 @@ impl WasmMujocoBackend {
             Align2::CENTER_CENTER,
             format!(
                 concat!(
-                    "WebGL viewport unavailable\n",
+                    "WGPU viewport unavailable\n",
                     "sim_time={:.2}s step_count={}\n",
                     "cmd=({:+.2}, {:+.2}) setpoint={:?}\n",
                     "step {:.2}/{:.2} ms | policy {:.2}/{:.2} ms"
@@ -1699,100 +1398,6 @@ impl WasmMujocoBackend {
             FontId::proportional(18.0),
             Color32::from_gray(210),
         );
-    }
-
-    #[allow(dead_code)]
-    fn render_wgpu_experiment_placeholder(
-        &self,
-        ui: &mut Ui,
-        rect: Rect,
-        report: &BrowserMujocoReport,
-    ) {
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 6.0, Color32::from_rgb(18, 22, 28));
-        painter.text(
-            rect.center_top() + vec2(0.0, 28.0),
-            Align2::CENTER_TOP,
-            "MuJoCo viewport disabled for web wgpu experiment",
-            FontId::proportional(18.0),
-            Color32::from_gray(220),
-        );
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            format!(
-                concat!(
-                    "sim_time={:.2}s\n",
-                    "step_count={}\n",
-                    "cmd=({:+.2}, {:+.2})\n",
-                    "setpoint={:?}\n",
-                    "step {:.2}/{:.2} ms | policy {:.2}/{:.2} ms"
-                ),
-                report.sim_time,
-                report.step_count,
-                report.command_vel_x,
-                report.command_vel_y,
-                report.setpoint_preview,
-                report.last_step_wall_ms,
-                report.avg_step_wall_ms,
-                report.last_policy_wall_ms,
-                report.avg_policy_wall_ms
-            ),
-            FontId::monospace(15.0),
-            Color32::from_gray(210),
-        );
-    }
-
-    #[cfg(not(feature = "web_glow_viewport"))]
-    fn hide_browser_viewport(&self) {
-        self.configure_browser_viewport(&BrowserViewportConfig {
-            left: 0.0,
-            top: 0.0,
-            width: 0.0,
-            height: 0.0,
-            pixels_per_point: 1.0,
-            visible: false,
-            interactive: false,
-            diagnostic_colors: false,
-            occlusion_rects: Vec::new(),
-        });
-    }
-
-    #[cfg(not(feature = "web_glow_viewport"))]
-    fn configure_browser_viewport(&self, config: &BrowserViewportConfig) {
-        let Ok(config_value) = serde_wasm_bindgen::to_value(config) else {
-            return;
-        };
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let Ok(function) = Reflect::get(
-            window.as_ref(),
-            &JsValue::from_str("rustRoboticsMujocoConfigureViewport"),
-        ) else {
-            return;
-        };
-        let Ok(function) = function.dyn_into::<Function>() else {
-            return;
-        };
-        let _ = function.call1(&JsValue::NULL, &config_value);
-    }
-
-    #[cfg(not(feature = "web_glow_viewport"))]
-    fn reset_browser_viewport_camera(&self) {
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let Ok(function) = Reflect::get(
-            window.as_ref(),
-            &JsValue::from_str("rustRoboticsMujocoResetViewportCamera"),
-        ) else {
-            return;
-        };
-        let Ok(function) = function.dyn_into::<Function>() else {
-            return;
-        };
-        let _ = function.call0(&JsValue::NULL);
     }
 
     fn reset_browser_runtime(&self) {
@@ -1924,9 +1529,6 @@ impl BrowserAssetBundle {
         Ok(Self {
             preset,
             files,
-            scene_include,
-            meshdir,
-            mesh_files,
             policy,
             asset_meta,
         })
@@ -2017,20 +1619,6 @@ fn normalize_path_components(path: &str) -> String {
         }
     }
     parts.join("/")
-}
-
-fn format_bytes(byte_count: usize) -> String {
-    const KIB: f32 = 1024.0;
-    const MIB: f32 = 1024.0 * 1024.0;
-
-    let bytes = byte_count as f32;
-    if bytes >= MIB {
-        format!("{:.2} MiB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes / KIB)
-    } else {
-        format!("{byte_count} B")
-    }
 }
 
 fn js_error_to_string(value: JsValue) -> String {
@@ -2221,7 +1809,7 @@ fn convert_browser_mesh_assets(meshes: &[BrowserMeshAssetSnapshot]) -> Vec<Brows
         .collect()
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn report_setpoint(report: &BrowserMujocoReport) -> Option<[f32; 3]> {
     if report.setpoint_preview.len() >= 3 {
         Some([
@@ -2234,21 +1822,6 @@ fn report_setpoint(report: &BrowserMujocoReport) -> Option<[f32; 3]> {
     }
 }
 
-#[cfg(feature = "web_glow_viewport")]
-const MJ_GEOM_PLANE: i32 = 0;
-#[cfg(feature = "web_glow_viewport")]
-const MJ_GEOM_SPHERE: i32 = 2;
-#[cfg(feature = "web_glow_viewport")]
-const MJ_GEOM_CAPSULE: i32 = 3;
-#[cfg(feature = "web_glow_viewport")]
-const MJ_GEOM_CYLINDER: i32 = 5;
-#[cfg(feature = "web_glow_viewport")]
-const MJ_GEOM_BOX: i32 = 6;
-#[cfg(feature = "web_glow_viewport")]
-const MJ_GEOM_MESH: i32 = 7;
-#[cfg(feature = "web_glow_viewport")]
-const MJ_GEOM_LINE: i32 = 9;
-
 fn aligned_viewport_rect(ui: &Ui) -> Rect {
     let pixels_per_point = ui.ctx().pixels_per_point().max(1.0);
     let pixel = 1.0 / pixels_per_point;
@@ -2260,7 +1833,7 @@ fn aligned_viewport_rect(ui: &Ui) -> Rect {
     rect.round_to_pixels(pixels_per_point)
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 impl BrowserOrbitCamera {
     fn view_projection_matrix(&self, aspect: f32) -> [f32; 16] {
         mul_mat4(self.projection_matrix(aspect), self.view_matrix())
@@ -2388,7 +1961,7 @@ impl BrowserOrbitCamera {
     }
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 impl BrowserWgpuRenderer {
     fn prepare(
         &mut self,
@@ -2955,258 +2528,7 @@ impl BrowserWgpuRenderer {
     }
 }
 
-#[cfg(feature = "web_glow_viewport")]
-fn append_grid_lines(lines: &mut Vec<GlVertex>) {
-    let color = [0.22, 0.28, 0.34, 1.0];
-    for i in -16..=16 {
-        let offset = i as f32 * 0.25;
-        push_line(lines, [-4.0, offset, 0.0], [4.0, offset, 0.0], color);
-        push_line(lines, [offset, -4.0, 0.0], [offset, 4.0, 0.0], color);
-    }
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn append_line_geom(
-    lines: &mut Vec<GlVertex>,
-    geom: &BrowserGeomSnapshot,
-    diagnostic_colors: bool,
-) {
-    let axes = geom_axes(geom);
-    let half = scale3(axes[2], geom.size[1].max(0.02));
-    let a = [
-        geom.pos[0] - half[0],
-        geom.pos[1] - half[1],
-        geom.pos[2] - half[2],
-    ];
-    let b = [
-        geom.pos[0] + half[0],
-        geom.pos[1] + half[1],
-        geom.pos[2] + half[2],
-    ];
-    push_line(lines, a, b, display_geom_color(geom, diagnostic_colors));
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn append_box_geom(
-    triangles: &mut Vec<GlVertex>,
-    geom: &BrowserGeomSnapshot,
-    diagnostic_colors: bool,
-) {
-    let axes = geom_axes(geom);
-    let sx = geom.size[0];
-    let sy = geom.size[1];
-    let sz = geom.size[2];
-    let corners = [
-        transform_geom_point(geom, [sx, sy, sz]),
-        transform_geom_point(geom, [sx, sy, -sz]),
-        transform_geom_point(geom, [sx, -sy, sz]),
-        transform_geom_point(geom, [sx, -sy, -sz]),
-        transform_geom_point(geom, [-sx, sy, sz]),
-        transform_geom_point(geom, [-sx, sy, -sz]),
-        transform_geom_point(geom, [-sx, -sy, sz]),
-        transform_geom_point(geom, [-sx, -sy, -sz]),
-    ];
-    let color = display_geom_color(geom, diagnostic_colors);
-    let faces = [
-        ([0, 2, 3, 1], axes[0]),
-        ([4, 5, 7, 6], scale3(axes[0], -1.0)),
-        ([0, 1, 5, 4], axes[1]),
-        ([2, 6, 7, 3], scale3(axes[1], -1.0)),
-        ([0, 4, 6, 2], axes[2]),
-        ([1, 3, 7, 5], scale3(axes[2], -1.0)),
-    ];
-    for (indices, normal) in faces {
-        push_triangle(
-            triangles,
-            corners[indices[0]],
-            corners[indices[1]],
-            corners[indices[2]],
-            normalize3(normal),
-            color,
-        );
-        push_triangle(
-            triangles,
-            corners[indices[0]],
-            corners[indices[2]],
-            corners[indices[3]],
-            normalize3(normal),
-            color,
-        );
-    }
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn append_cylinder_geom(
-    triangles: &mut Vec<GlVertex>,
-    geom: &BrowserGeomSnapshot,
-    segments: usize,
-    diagnostic_colors: bool,
-) {
-    let color = display_geom_color(geom, diagnostic_colors);
-    let half = geom.size[1].max(0.01);
-    let radius = geom.size[0].max(0.01);
-    for i in 0..segments {
-        let a0 = i as f32 / segments as f32 * std::f32::consts::TAU;
-        let a1 = (i + 1) as f32 / segments as f32 * std::f32::consts::TAU;
-        let p0 = [radius * a0.cos(), radius * a0.sin(), -half];
-        let p1 = [radius * a1.cos(), radius * a1.sin(), -half];
-        let p2 = [radius * a1.cos(), radius * a1.sin(), half];
-        let p3 = [radius * a0.cos(), radius * a0.sin(), half];
-
-        let w0 = transform_geom_point(geom, p0);
-        let w1 = transform_geom_point(geom, p1);
-        let w2 = transform_geom_point(geom, p2);
-        let w3 = transform_geom_point(geom, p3);
-        let n0 = transform_geom_vector(geom, normalize3([a0.cos(), a0.sin(), 0.0]));
-        let n1 = transform_geom_vector(geom, normalize3([a1.cos(), a1.sin(), 0.0]));
-        let n_mid = normalize3(add3(n0, n1));
-
-        push_triangle(triangles, w0, w1, w2, n_mid, color);
-        push_triangle(triangles, w0, w2, w3, n_mid, color);
-
-        let top_center = transform_geom_point(geom, [0.0, 0.0, half]);
-        let bottom_center = transform_geom_point(geom, [0.0, 0.0, -half]);
-        push_triangle(
-            triangles,
-            top_center,
-            w3,
-            w2,
-            transform_geom_vector(geom, [0.0, 0.0, 1.0]),
-            color,
-        );
-        push_triangle(
-            triangles,
-            bottom_center,
-            w1,
-            w0,
-            transform_geom_vector(geom, [0.0, 0.0, -1.0]),
-            color,
-        );
-    }
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn append_capsule_geom(
-    triangles: &mut Vec<GlVertex>,
-    geom: &BrowserGeomSnapshot,
-    hemi_rings: usize,
-    segments: usize,
-    diagnostic_colors: bool,
-) {
-    append_cylinder_geom(triangles, geom, segments, diagnostic_colors);
-    let radius = geom.size[0].max(0.01);
-    let half = geom.size[1].max(0.01);
-    let color = display_geom_color(geom, diagnostic_colors);
-    for hemisphere in [-1.0f32, 1.0] {
-        for ring in 0..hemi_rings {
-            let v0 = ring as f32 / hemi_rings as f32 * std::f32::consts::FRAC_PI_2;
-            let v1 = (ring + 1) as f32 / hemi_rings as f32 * std::f32::consts::FRAC_PI_2;
-            let z0 = hemisphere * (half + radius * v0.sin());
-            let z1 = hemisphere * (half + radius * v1.sin());
-            let r0 = radius * v0.cos();
-            let r1 = radius * v1.cos();
-
-            for seg in 0..segments {
-                let a0 = seg as f32 / segments as f32 * std::f32::consts::TAU;
-                let a1 = (seg + 1) as f32 / segments as f32 * std::f32::consts::TAU;
-
-                let p00 = [r0 * a0.cos(), r0 * a0.sin(), z0];
-                let p01 = [r0 * a1.cos(), r0 * a1.sin(), z0];
-                let p10 = [r1 * a0.cos(), r1 * a0.sin(), z1];
-                let p11 = [r1 * a1.cos(), r1 * a1.sin(), z1];
-
-                let n00 = transform_geom_vector(
-                    geom,
-                    normalize3([p00[0], p00[1], hemisphere * (p00[2] - hemisphere * half)]),
-                );
-                let n01 = transform_geom_vector(
-                    geom,
-                    normalize3([p01[0], p01[1], hemisphere * (p01[2] - hemisphere * half)]),
-                );
-                let n10 = transform_geom_vector(
-                    geom,
-                    normalize3([p10[0], p10[1], hemisphere * (p10[2] - hemisphere * half)]),
-                );
-                let n11 = transform_geom_vector(
-                    geom,
-                    normalize3([p11[0], p11[1], hemisphere * (p11[2] - hemisphere * half)]),
-                );
-
-                push_triangle(
-                    triangles,
-                    transform_geom_point(geom, p00),
-                    transform_geom_point(geom, p01),
-                    transform_geom_point(geom, p11),
-                    normalize3(add3(add3(n00, n01), n11)),
-                    color,
-                );
-                push_triangle(
-                    triangles,
-                    transform_geom_point(geom, p00),
-                    transform_geom_point(geom, p11),
-                    transform_geom_point(geom, p10),
-                    normalize3(add3(add3(n00, n11), n10)),
-                    color,
-                );
-            }
-        }
-    }
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn append_sphere_geom(
-    triangles: &mut Vec<GlVertex>,
-    geom: &BrowserGeomSnapshot,
-    rings: usize,
-    segments: usize,
-    diagnostic_colors: bool,
-) {
-    let radius = geom.size[0].max(0.01);
-    let color = display_geom_color(geom, diagnostic_colors);
-    for ring in 0..rings {
-        let v0 = ring as f32 / rings as f32 * std::f32::consts::PI - std::f32::consts::FRAC_PI_2;
-        let v1 =
-            (ring + 1) as f32 / rings as f32 * std::f32::consts::PI - std::f32::consts::FRAC_PI_2;
-        let z0 = radius * v0.sin();
-        let z1 = radius * v1.sin();
-        let r0 = radius * v0.cos();
-        let r1 = radius * v1.cos();
-
-        for seg in 0..segments {
-            let a0 = seg as f32 / segments as f32 * std::f32::consts::TAU;
-            let a1 = (seg + 1) as f32 / segments as f32 * std::f32::consts::TAU;
-            let p00 = [r0 * a0.cos(), r0 * a0.sin(), z0];
-            let p01 = [r0 * a1.cos(), r0 * a1.sin(), z0];
-            let p10 = [r1 * a0.cos(), r1 * a0.sin(), z1];
-            let p11 = [r1 * a1.cos(), r1 * a1.sin(), z1];
-
-            push_triangle(
-                triangles,
-                transform_geom_point(geom, p00),
-                transform_geom_point(geom, p01),
-                transform_geom_point(geom, p11),
-                normalize3(transform_geom_vector(
-                    geom,
-                    normalize3(add3(add3(p00, p01), p11)),
-                )),
-                color,
-            );
-            push_triangle(
-                triangles,
-                transform_geom_point(geom, p00),
-                transform_geom_point(geom, p11),
-                transform_geom_point(geom, p10),
-                normalize3(transform_geom_vector(
-                    geom,
-                    normalize3(add3(add3(p00, p11), p10)),
-                )),
-                color,
-            );
-        }
-    }
-}
-
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn build_mesh_instance(geom: &SharedGeomSnapshot, diagnostic_colors: bool) -> Option<MeshInstance> {
     let mesh_id = geom.data_id.max(0) as u32;
     Some(MeshInstance {
@@ -3217,7 +2539,7 @@ fn build_mesh_instance(geom: &SharedGeomSnapshot, diagnostic_colors: bool) -> Op
     })
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn mesh_instance_ranges(instances: &[MeshInstance]) -> Vec<(usize, std::ops::Range<usize>)> {
     let mut ranges = Vec::new();
     if instances.is_empty() {
@@ -3237,7 +2559,7 @@ fn mesh_instance_ranges(instances: &[MeshInstance]) -> Vec<(usize, std::ops::Ran
     ranges
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn extend_depth_points_with_mesh_bounds(
     depth_points: &mut Vec<[f32; 3]>,
     asset: &BrowserMeshAsset,
@@ -3252,96 +2574,11 @@ fn extend_depth_points_with_mesh_bounds(
     }
 }
 
-#[cfg(feature = "web_glow_viewport")]
-fn push_triangle(
-    triangles: &mut Vec<GlVertex>,
-    a: [f32; 3],
-    b: [f32; 3],
-    c: [f32; 3],
-    normal: [f32; 3],
-    color: [f32; 4],
-) {
-    triangles.push(GlVertex::world(a, normal, color));
-    triangles.push(GlVertex::world(b, normal, color));
-    triangles.push(GlVertex::world(c, normal, color));
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn push_line(lines: &mut Vec<GlVertex>, a: [f32; 3], b: [f32; 3], color: [f32; 4]) {
-    let normal = [0.0, 0.0, 1.0];
-    lines.push(GlVertex::world(a, normal, color));
-    lines.push(GlVertex::world(b, normal, color));
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn geom_color(geom: &BrowserGeomSnapshot) -> [f32; 4] {
-    [geom.rgba[0], geom.rgba[1], geom.rgba[2], 1.0]
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn display_geom_color(geom: &BrowserGeomSnapshot, diagnostic_colors: bool) -> [f32; 4] {
-    if diagnostic_colors {
-        diagnostic_geom_color(geom)
-    } else {
-        geom_color(geom)
-    }
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn diagnostic_geom_color(geom: &BrowserGeomSnapshot) -> [f32; 4] {
-    let seed = (geom.dataid as u32)
-        .wrapping_mul(0x9E37_79B9)
-        .wrapping_add((geom.type_id as u32).wrapping_mul(0x85EB_CA6B));
-    let hue = (seed % 360) as f32;
-    let sat = 0.72;
-    let val = 0.92;
-    let chroma = val * sat;
-    let h = hue / 60.0;
-    let x = chroma * (1.0 - ((h % 2.0) - 1.0).abs());
-    let (r1, g1, b1) = match h as i32 {
-        0 => (chroma, x, 0.0),
-        1 => (x, chroma, 0.0),
-        2 => (0.0, chroma, x),
-        3 => (0.0, x, chroma),
-        4 => (x, 0.0, chroma),
-        _ => (chroma, 0.0, x),
-    };
-    let m = val - chroma;
-    [r1 + m, g1 + m, b1 + m, 1.0]
-}
-
 fn triangle_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
     normalize3(cross3(sub3(b, a), sub3(c, a)))
 }
 
-#[cfg(feature = "web_glow_viewport")]
-fn transform_geom_point(geom: &BrowserGeomSnapshot, local: [f32; 3]) -> [f32; 3] {
-    [
-        geom.pos[0] + geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],
-        geom.pos[1] + geom.mat[3] * local[0] + geom.mat[4] * local[1] + geom.mat[5] * local[2],
-        geom.pos[2] + geom.mat[6] * local[0] + geom.mat[7] * local[1] + geom.mat[8] * local[2],
-    ]
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn transform_geom_vector(geom: &BrowserGeomSnapshot, local: [f32; 3]) -> [f32; 3] {
-    normalize3([
-        geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],
-        geom.mat[3] * local[0] + geom.mat[4] * local[1] + geom.mat[5] * local[2],
-        geom.mat[6] * local[0] + geom.mat[7] * local[1] + geom.mat[8] * local[2],
-    ])
-}
-
-#[cfg(feature = "web_glow_viewport")]
-fn geom_axes(geom: &BrowserGeomSnapshot) -> [[f32; 3]; 3] {
-    [
-        [geom.mat[0], geom.mat[3], geom.mat[6]],
-        [geom.mat[1], geom.mat[4], geom.mat[7]],
-        [geom.mat[2], geom.mat[5], geom.mat[8]],
-    ]
-}
-
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn orbit_forward(azimuth_deg: f32, elevation_deg: f32) -> [f32; 3] {
     let azimuth = azimuth_deg.to_radians();
     let elevation = elevation_deg.to_radians();
@@ -3352,7 +2589,7 @@ fn orbit_forward(azimuth_deg: f32, elevation_deg: f32) -> [f32; 3] {
     ]
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn mul_mat4(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
     let mut out = [0.0; 16];
     for col in 0..4 {
@@ -3363,7 +2600,7 @@ fn mul_mat4(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
     out
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn transform_point_mat4(model: &[[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
     [
         model[0][0] * point[0] + model[1][0] * point[1] + model[2][0] * point[2] + model[3][0],
@@ -3388,12 +2625,12 @@ fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn scale3(v: [f32; 3], scalar: f32) -> [f32; 3] {
     [v[0] * scalar, v[1] * scalar, v[2] * scalar]
 }
@@ -3418,12 +2655,12 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
     }
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 fn slice_as_u8<T>(slice: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 const WGPU_SCENE_SHADER: &str = r#"
 struct SceneUniform {
     view_proj: mat4x4<f32>,
@@ -3494,7 +2731,7 @@ fn fs_unlit(input: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-#[cfg(feature = "web_glow_viewport")]
+#[cfg(feature = "web_wgpu_viewport")]
 const WGPU_PRESENT_SHADER: &str = r#"
 @group(0) @binding(0)
 var u_tex: texture_2d<f32>;
