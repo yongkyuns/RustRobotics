@@ -8,7 +8,7 @@ pub mod slam;
 use localization::ParticleFilter;
 use mujoco::MujocoPanel;
 use path_planning::{EnvironmentMode, PathPlanning};
-use pendulum::InvertedPendulum;
+use pendulum::{InvertedPendulum, NoiseConfig as PendulumNoiseConfig};
 use slam::SlamDemo;
 
 use egui::{epaint::Hsva, *};
@@ -105,6 +105,45 @@ impl SimMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendulumPlotTab {
+    LateralPosition,
+    LateralVelocity,
+    RodAngle,
+    RodAngularVelocity,
+    ControlInput,
+}
+
+impl PendulumPlotTab {
+    const ALL: [Self; 5] = [
+        Self::LateralPosition,
+        Self::LateralVelocity,
+        Self::RodAngle,
+        Self::RodAngularVelocity,
+        Self::ControlInput,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LateralPosition => "Lateral Position",
+            Self::LateralVelocity => "Lateral Velocity",
+            Self::RodAngle => "Rod Angle",
+            Self::RodAngularVelocity => "Rod Angular Velocity",
+            Self::ControlInput => "Control Input",
+        }
+    }
+
+    fn signal_index(self) -> usize {
+        match self {
+            Self::LateralPosition => 0,
+            Self::LateralVelocity => 1,
+            Self::RodAngle => 2,
+            Self::RodAngularVelocity => 3,
+            Self::ControlInput => 4,
+        }
+    }
+}
+
 /// A concrete type for containing simulations and executing them
 pub struct Simulator {
     /// Current simulation mode
@@ -127,6 +166,8 @@ pub struct Simulator {
     sim_speed: usize,
     /// Settings to indicate whether to show the graph of simulation signals
     show_graph: bool,
+    /// Active tab for inverted pendulum signal plots.
+    pendulum_plot_tab: PendulumPlotTab,
     /// Show egui inspection UI (memory, textures, etc.)
     show_inspection: bool,
     /// Show egui memory panel
@@ -142,6 +183,10 @@ pub struct Simulator {
     env_mode: EnvironmentMode,
     /// Shared obstacle radius for continuous path planning
     continuous_obstacle_radius: f32,
+    /// Whether measurement/action noise is enabled for inverted pendulum mode.
+    pendulum_noise_enabled: bool,
+    /// Dimensionless scale factor applied to the inverted pendulum noise profile.
+    pendulum_noise_scale: f32,
     /// Modes visited to track help popup
     visited_modes: HashSet<SimMode>,
     /// Whether to show the help popup
@@ -164,6 +209,7 @@ impl Default for Simulator {
             time: 0.0,
             sim_speed: 2,
             show_graph: false,
+            pendulum_plot_tab: PendulumPlotTab::LateralPosition,
             show_inspection: false,
             show_memory: false,
             paused: false,
@@ -172,6 +218,8 @@ impl Default for Simulator {
             grid_resolution: 1.0,
             env_mode: EnvironmentMode::Grid,
             continuous_obstacle_radius: 1.0,
+            pendulum_noise_enabled: false,
+            pendulum_noise_scale: 0.0,
             visited_modes: HashSet::new(),
             show_help_popup: false,
             last_tick: None,
@@ -181,6 +229,29 @@ impl Default for Simulator {
 }
 
 impl Simulator {
+    fn pendulum_noise_config(&self) -> PendulumNoiseConfig {
+        PendulumNoiseConfig {
+            enabled: self.pendulum_noise_enabled,
+            scale: self.pendulum_noise_scale,
+        }
+    }
+
+    fn pendulum_plot_ui(&mut self, ui: &mut Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for tab in PendulumPlotTab::ALL {
+                ui.selectable_value(&mut self.pendulum_plot_tab, tab, tab.label());
+            }
+        });
+        ui.separator();
+        Plot::new("PendulumPlot")
+            .legend(Legend::default().position(Corner::RightTop))
+            .show(ui, |plot_ui| {
+                self.pendulums.iter().for_each(|sim| {
+                    sim.plot_signal(plot_ui, self.pendulum_plot_tab.signal_index());
+                });
+            });
+    }
+
     fn pendulum_color(index: usize) -> Color32 {
         let golden_ratio = (5.0_f32.sqrt() - 1.0) / 2.0;
         Hsva::new(index as f32 * golden_ratio, 0.85, 0.5, 1.0).into()
@@ -498,10 +569,11 @@ impl Simulator {
             let dt = 0.01;
             match self.mode {
                 SimMode::InvertedPendulum => {
+                    let noise = self.pendulum_noise_config();
                     self.step_fixed_dt(elapsed, dt, |sim, dt| {
                         sim.pendulums
                             .iter_mut()
-                            .for_each(|pendulum| pendulum.step(dt));
+                            .for_each(|pendulum| pendulum.step_with_noise(dt, noise));
                     });
                 }
                 SimMode::Localization => {
@@ -718,6 +790,17 @@ impl Simulator {
             ui.separator();
             ui.label("Speed:");
             ui.add(Slider::new(&mut self.sim_speed, 1..=20).show_value(true));
+
+            if self.mode == SimMode::InvertedPendulum {
+                ui.separator();
+                ui.checkbox(&mut self.pendulum_noise_enabled, "Noise");
+                ui.add_enabled(
+                    self.pendulum_noise_enabled,
+                    Slider::new(&mut self.pendulum_noise_scale, 0.0..=3.0)
+                        .text("Magnitude")
+                        .show_value(true),
+                );
+            }
 
             // Landmark count slider for SLAM mode
             if self.mode == SimMode::Slam {
@@ -1031,23 +1114,31 @@ impl Simulator {
             egui::Window::new("Signal Plot")
                 .default_size(vec2(400.0, 300.0))
                 .show(ui.ctx(), |ui| {
-                    Plot::new("Plot")
-                        .legend(Legend::default().position(Corner::RightTop))
-                        .show(ui, |plot_ui| match self.mode {
-                            SimMode::InvertedPendulum => {
-                                self.pendulums.iter().for_each(|sim| sim.plot(plot_ui));
-                            }
-                            SimMode::Localization => {
-                                self.vehicles.iter().for_each(|sim| sim.plot(plot_ui));
-                            }
-                            SimMode::PathPlanning => {
-                                self.planners.iter().for_each(|sim| sim.plot(plot_ui));
-                            }
-                            SimMode::Slam => {
-                                self.slam_demos.iter().for_each(|sim| sim.plot(plot_ui));
-                            }
-                            SimMode::Mujoco => {}
-                        });
+                    match self.mode {
+                        SimMode::InvertedPendulum => self.pendulum_plot_ui(ui),
+                        SimMode::Localization => {
+                            Plot::new("Plot")
+                                .legend(Legend::default().position(Corner::RightTop))
+                                .show(ui, |plot_ui| {
+                                    self.vehicles.iter().for_each(|sim| sim.plot(plot_ui));
+                                });
+                        }
+                        SimMode::PathPlanning => {
+                            Plot::new("Plot")
+                                .legend(Legend::default().position(Corner::RightTop))
+                                .show(ui, |plot_ui| {
+                                    self.planners.iter().for_each(|sim| sim.plot(plot_ui));
+                                });
+                        }
+                        SimMode::Slam => {
+                            Plot::new("Plot")
+                                .legend(Legend::default().position(Corner::RightTop))
+                                .show(ui, |plot_ui| {
+                                    self.slam_demos.iter().for_each(|sim| sim.plot(plot_ui));
+                                });
+                        }
+                        SimMode::Mujoco => {}
+                    };
                 });
         }
 
