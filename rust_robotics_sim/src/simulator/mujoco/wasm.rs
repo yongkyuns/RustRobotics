@@ -848,7 +848,7 @@ impl WasmMujocoBackend {
                 BrowserOrtState::Error(format!("Browser asset bundle missing {onnx_path}"));
             return;
         };
-        let wasm_base_path = "./vendor/onnxruntime-web/dist/";
+        let wasm_base_path = "./ort/";
         let config = BrowserMujocoConfig {
             controller_kind: policy.controller_kind().to_string(),
             joint_names: bundle.asset_meta.joint_names_isaac.clone(),
@@ -930,7 +930,7 @@ impl WasmMujocoBackend {
             return;
         };
         let mujoco_wasm_base_path = "./vendor/mujoco/";
-        let ort_wasm_base_path = "./vendor/onnxruntime-web/dist/";
+        let ort_wasm_base_path = "./ort/";
         let config = BrowserMujocoConfig {
             controller_kind: policy.controller_kind().to_string(),
             joint_names: bundle.asset_meta.joint_names_isaac.clone(),

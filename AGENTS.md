@@ -162,6 +162,8 @@ Important caveat:
 
 - the public/static hosting path currently relies on the non-threaded browser MuJoCo setup
 - if browser MuJoCo starts hanging on the hosted copy, check whether the deployed bundle is stale before changing runtime code
+- ONNX Runtime Web assets are intentionally published to `docs/ort/` instead of `docs/vendor/...` so Jekyll/GitHub Pages-style hosts do not silently drop them
+- wasm-bindgen snippet files that would normally be emitted as underscore-prefixed names are rewritten by `build_web.sh` to publish-safe names because Jekyll-style hosts can skip underscore-prefixed static assets
 
 ## What To Avoid
 

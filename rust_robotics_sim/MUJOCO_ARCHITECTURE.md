@@ -162,6 +162,13 @@ Relevant code:
 - asset presets and file lists: [`wasm.rs`](./src/simulator/mujoco/wasm.rs)
 - browser runtime init bridge: [`wasm.rs`](./src/simulator/mujoco/wasm.rs)
 
+Hosted-path note:
+
+- ONNX Runtime Web assets are published under `docs/ort/`, not `docs/vendor/...`
+- this avoids common static-site exclusions around `vendor/` paths and dotfile-like runtime assets
+- wasm-bindgen-generated snippet helpers are renamed to non-underscore filenames during `build_web.sh` so Jekyll-style hosts do not skip them
+- browser MuJoCo assets still ship under `docs/vendor/mujoco/`
+
 ### Browser Runtime Init
 
 JS runtime creation currently does:
