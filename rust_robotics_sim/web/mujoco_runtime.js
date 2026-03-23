@@ -232,75 +232,70 @@ function readSensorVec(runtime, adr, dim) {
   return out;
 }
 
-function buildFrameworkRawState(runtime) {
+function buildFrameworkRawStatePayload(runtime) {
   const state = liveState(runtime);
-  const qpos = Array.from(state.qpos ?? []);
-  const qvel = Array.from(state.qvel ?? []);
-  const jointPosDyn = runtime.jointQposAdr.map((adr) => Number(qpos[adr] ?? 0.0));
-  const jointVelDyn = runtime.jointQvelAdr.map((adr) => Number(qvel[adr] ?? 0.0));
-  const sensorValues = {};
-  if (runtime.controllerKind === "open_duck_mini_walk") {
-    sensorValues.imu_gyro = Array.from(readSensorVec(runtime, runtime.duckGyroAdr, 3));
-    sensorValues.imu_accel = Array.from(readSensorVec(runtime, runtime.duckAccelAdr, 3));
-    sensorValues.left_foot_pos = Array.from(readSensorVec(runtime, runtime.leftFootPosAdr, 3));
-    sensorValues.right_foot_pos = Array.from(readSensorVec(runtime, runtime.rightFootPosAdr, 3));
+  const qposSource = state.qpos ?? [];
+  const qvelSource = state.qvel ?? [];
+  const qpos = Float32Array.from(qposSource, Number);
+  const qvel = Float32Array.from(qvelSource, Number);
+  const jointPosDyn = Float32Array.from(runtime.jointQposAdr, (adr) => Number(qpos[adr] ?? 0.0));
+  const jointVelDyn = Float32Array.from(runtime.jointQvelAdr, (adr) => Number(qvel[adr] ?? 0.0));
+  const core = new Float32Array(38);
+  core[0] = Number(state.time ?? runtime.mujocoTimeMs / 1000.0);
+  core[1] = Number(qpos[0] ?? 0.0);
+  core[2] = Number(qpos[1] ?? 0.0);
+  core[3] = Number(qpos[2] ?? 0.0);
+  core[4] = Number(qpos[3] ?? 1.0);
+  core[5] = Number(qpos[4] ?? 0.0);
+  core[6] = Number(qpos[5] ?? 0.0);
+  core[7] = Number(qpos[6] ?? 0.0);
+  core[8] = Number(qvel[0] ?? 0.0);
+  core[9] = Number(qvel[1] ?? 0.0);
+  core[10] = Number(qvel[2] ?? 0.0);
+  core[11] = Number(qvel[3] ?? 0.0);
+  core[12] = Number(qvel[4] ?? 0.0);
+  core[13] = Number(qvel[5] ?? 0.0);
+  for (let i = 0; i < 12; ++i) {
+    core[14 + i] = Number(jointPosDyn[i] ?? 0.0);
+    core[26 + i] = Number(jointVelDyn[i] ?? 0.0);
   }
-  return {
-    sim_time_s: Number(state.time ?? runtime.mujocoTimeMs / 1000.0),
-    base_pos: [
-      Number(qpos[0] ?? 0.0),
-      Number(qpos[1] ?? 0.0),
-      Number(qpos[2] ?? 0.0),
-    ],
-    base_quat: [
-      Number(qpos[3] ?? 1.0),
-      Number(qpos[4] ?? 0.0),
-      Number(qpos[5] ?? 0.0),
-      Number(qpos[6] ?? 0.0),
-    ],
-    base_lin_vel: [
-      Number(qvel[0] ?? 0.0),
-      Number(qvel[1] ?? 0.0),
-      Number(qvel[2] ?? 0.0),
-    ],
-    base_ang_vel: [
-      Number(qvel[3] ?? 0.0),
-      Number(qvel[4] ?? 0.0),
-      Number(qvel[5] ?? 0.0),
-    ],
-    joint_pos: jointPosDyn.slice(0, 12),
-    joint_vel: jointVelDyn.slice(0, 12),
-    joint_pos_dyn: jointPosDyn,
-    joint_vel_dyn: jointVelDyn,
-    sensor_values: sensorValues,
-    qpos,
-    qvel,
-  };
+  let sensorValues = new Float32Array(0);
+  if (runtime.controllerKind === "open_duck_mini_walk") {
+    sensorValues = new Float32Array(12);
+    sensorValues.set(readSensorVec(runtime, runtime.duckGyroAdr, 3), 0);
+    sensorValues.set(readSensorVec(runtime, runtime.duckAccelAdr, 3), 3);
+    sensorValues.set(readSensorVec(runtime, runtime.leftFootPosAdr, 3), 6);
+    sensorValues.set(readSensorVec(runtime, runtime.rightFootPosAdr, 3), 9);
+  }
+  return { core, jointPosDyn, jointVelDyn, qpos, qvel, sensorValues };
 }
 
-function buildFrameworkCommand(runtime, commandVelX, commandVelY) {
-  return {
-    vel_x: Number(commandVelX) || 0.0,
-    vel_y: Number(commandVelY) || 0.0,
-    yaw_rate: 0.0,
-    setpoint_world:
-      runtime.useSetpointBall && runtime.commandSetpoint
-        ? [
-            Number(runtime.commandSetpoint.x),
-            Number(runtime.commandSetpoint.y),
-            Number(runtime.commandSetpoint.z ?? 0.0),
-          ]
-        : null,
-  };
+function buildFrameworkCommandPayload(runtime, commandVelX, commandVelY) {
+  const out = new Float32Array(7);
+  out[0] = Number(commandVelX) || 0.0;
+  out[1] = Number(commandVelY) || 0.0;
+  out[2] = 0.0;
+  if (runtime.useSetpointBall && runtime.commandSetpoint) {
+    out[3] = 1.0;
+    out[4] = Number(runtime.commandSetpoint.x);
+    out[5] = Number(runtime.commandSetpoint.y);
+    out[6] = Number(runtime.commandSetpoint.z ?? 0.0);
+  }
+  return out;
 }
 
 async function runPolicy(runtime, commandVelX, commandVelY) {
   const bindings = getRustRobotFrameworkBindings();
-  const rawState = buildFrameworkRawState(runtime);
-  const command = buildFrameworkCommand(runtime, commandVelX, commandVelY);
+  const rawState = buildFrameworkRawStatePayload(runtime);
+  const command = buildFrameworkCommandPayload(runtime, commandVelX, commandVelY);
   const finished = await bindings.rust_robotics_fw_step_runtime(
     runtime.frameworkHandle,
-    rawState,
+    rawState.core,
+    rawState.jointPosDyn,
+    rawState.jointVelDyn,
+    rawState.qpos,
+    rawState.qvel,
+    rawState.sensorValues,
     command,
   );
   runtime.pendingActuation = finished;
@@ -492,7 +487,7 @@ function buildMujocoReport(runtime, includeMeshAssets = false) {
     nv: Number(model.nv ?? 0),
     nu: Number(model.nu ?? 0),
     timestep: Number(options?.timestep ?? 0.0),
-    sim_time: Number(state?.time ?? 0.0),
+    sim_time: Number(state?.time ?? runtime.mujocoTimeMs / 1000.0 ?? 0.0),
     step_count: stepCount,
     qpos_preview: Array.from(qpos.slice(0, Math.min(8, qpos.length)), Number),
     xpos_preview: Array.from(xpos.slice(0, Math.min(9, xpos.length)), Number),
@@ -742,7 +737,9 @@ export async function rustRoboticsMujocoStep(stepCount, commandVelX, commandVelY
 export function rustRoboticsMujocoConfigureViewport(config) {
   const overlay = ensureMujocoOverlay();
   const visible = Boolean(config?.visible);
+  const interactive = config?.interactive !== false;
   const diagnosticColors = Boolean(config?.diagnostic_colors);
+  const occlusionRects = Array.isArray(config?.occlusion_rects) ? config.occlusion_rects : [];
   const left = Math.max(0, Number(config?.left) || 0);
   const top = Math.max(0, Number(config?.top) || 0);
   const width = Math.max(2, Number(config?.width) || 2);
@@ -752,16 +749,20 @@ export function rustRoboticsMujocoConfigureViewport(config) {
   const heightPx = Math.max(2, Math.round(height * pixelsPerPoint));
   const changed =
     overlay.visible !== visible ||
+    overlay.interactive !== interactive ||
     overlay.diagnosticColors !== diagnosticColors ||
     overlay.left !== left ||
     overlay.top !== top ||
     overlay.width !== width ||
     overlay.height !== height ||
     overlay.widthPx !== widthPx ||
-    overlay.heightPx !== heightPx;
+    overlay.heightPx !== heightPx ||
+    JSON.stringify(overlay.occlusionRects) !== JSON.stringify(occlusionRects);
 
   overlay.visible = visible;
+  overlay.interactive = interactive;
   overlay.diagnosticColors = diagnosticColors;
+  overlay.occlusionRects = occlusionRects;
 
   if (!overlay.visible) {
     overlay.canvas.style.display = "none";
@@ -775,6 +776,7 @@ export function rustRoboticsMujocoConfigureViewport(config) {
   overlay.heightPx = heightPx;
 
   overlay.canvas.style.display = "block";
+  overlay.canvas.style.pointerEvents = overlay.interactive ? "auto" : "none";
   overlay.canvas.style.left = `${left}px`;
   overlay.canvas.style.top = `${top}px`;
   overlay.canvas.style.width = `${width}px`;
@@ -838,14 +840,14 @@ function ensureMujocoOverlay() {
     display: "none",
     pointerEvents: "auto",
     zIndex: "20",
-    background: "#12161c",
+    background: "transparent",
     borderRadius: "6px",
     touchAction: "none",
   });
   document.body.appendChild(canvas);
 
   const gl = canvas.getContext("webgl2", {
-    alpha: false,
+    alpha: true,
     antialias: true,
     depth: true,
     stencil: false,
@@ -861,7 +863,9 @@ function ensureMujocoOverlay() {
     gl,
     renderer,
     visible: false,
+    interactive: true,
     diagnosticColors: false,
+    occlusionRects: [],
     camera: defaultOverlayCamera(),
     cameraInitialized: false,
     rafHandle: 0,
@@ -915,6 +919,7 @@ function ensureMujocoOverlay() {
       const runtime = rustRoboticsMujocoRuntime;
       runtime.debugPointerDowns = (runtime.debugPointerDowns ?? 0) + 1;
       if (runtime.useSetpointBall) {
+        updateCommandSetpointFromPointer(overlay, event, runtime);
         const setpoint = [
           runtime.commandSetpoint.x,
           runtime.commandSetpoint.y,
@@ -1074,6 +1079,7 @@ function renderMujocoOverlay(now) {
     runtime,
   );
   paintOverlayScene(overlay.renderer, gl, scene);
+  applyOverlayOcclusions(overlay, gl);
   overlay.needsRender = false;
   overlay.lastRenderMs = now ?? performance.now();
   const overlayWallMs = performance.now() - renderStart;
@@ -1086,6 +1092,27 @@ function renderMujocoOverlay(now) {
     runtime.displayFps = runtime.displayFps > 0.0 ? runtime.displayFps * 0.9 + instantFps * 0.1 : instantFps;
   }
   runtime.lastFrameTimeMs = frameNow;
+}
+
+function applyOverlayOcclusions(overlay, gl) {
+  if (!overlay.occlusionRects?.length) {
+    return;
+  }
+  gl.enable(gl.SCISSOR_TEST);
+  for (const rect of overlay.occlusionRects) {
+    const left = Math.max(0, Math.round((Number(rect?.left) - overlay.left) * overlay.widthPx / Math.max(1, overlay.width)));
+    const top = Math.max(0, Math.round((Number(rect?.top) - overlay.top) * overlay.heightPx / Math.max(1, overlay.height)));
+    const width = Math.max(0, Math.round(Number(rect?.width) * overlay.widthPx / Math.max(1, overlay.width)));
+    const height = Math.max(0, Math.round(Number(rect?.height) * overlay.heightPx / Math.max(1, overlay.height)));
+    if (width <= 0 || height <= 0) {
+      continue;
+    }
+    const bottom = overlay.canvas.height - top - height;
+    gl.scissor(left, Math.max(0, bottom), width, height);
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  }
+  gl.disable(gl.SCISSOR_TEST);
 }
 
 function createOverlayRenderer(gl) {
@@ -1230,7 +1257,6 @@ function buildOverlaySceneFrame(geoms, meshAssets, aspect, camera, diagnosticCol
 }
 
 function appendCommandSetpointMarker(triangles, lines, runtime) {
-  const basePos = basePosition(runtime);
   const ballGeom = {
     type_id: 2,
     dataid: -1,
@@ -1240,12 +1266,6 @@ function appendCommandSetpointMarker(triangles, lines, runtime) {
     mat: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
   };
   appendSphereGeom(triangles, ballGeom, 10, 16, false);
-  pushLine(
-    lines,
-    [basePos[0], basePos[1], COMMAND_BALL_HEIGHT],
-    [runtime.commandSetpoint.x, runtime.commandSetpoint.y, runtime.commandSetpoint.z],
-    runtime.useSetpointBall ? [0.95, 0.55, 0.55, 1.0] : [0.95, 0.72, 0.55, 1.0],
-  );
 }
 
 function appendGridLines(lines) {
@@ -1662,8 +1682,12 @@ function updateCommandSetpointFromScreenDelta(overlay, event, runtime) {
 }
 
 function updateCommandSetpointFromDragRay(overlay, event, runtime) {
-  const distance = Math.max(0.1, overlay.setpointGrabDistance || 0.0);
-  const point = pointOnPointerRayAtDistance(overlay, event.clientX, event.clientY, distance);
+  const point = intersectPointerWithGround(
+    overlay,
+    event.clientX,
+    event.clientY,
+    COMMAND_BALL_HEIGHT,
+  );
   if (!point) {
     return;
   }

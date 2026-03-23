@@ -100,15 +100,35 @@ Main Rust backend:
 JavaScript owns:
 
 - MuJoCo wasm runtime
-- ONNX Runtime Web session
-- controller implementation
 - live MuJoCo stepping
 - browser-side render state
 - separate browser MuJoCo overlay canvas and camera interaction
+- raw-state extraction from MuJoCo
+- compact per-step payload assembly for the FW bridge
 
 Main JS runtime:
 
 - [`web/mujoco_runtime.js`](./web/mujoco_runtime.js)
+
+### Shared FW Responsibilities on Web
+
+The web path now shares the same FW ownership boundary as native:
+
+- controller state and semantics
+- observation building
+- recurrent/action integration
+- actuation decode
+- ONNX ownership
+
+Current web ONNX implementation detail:
+
+- the browser FW path initializes `ort-web` for runtime loading
+- per-session creation and inference currently call `onnxruntime-web` directly through Rust-side JS interop
+- this avoids a broken `ort-web` session metadata wrapper path while keeping ownership in FW
+
+Main FW implementation:
+
+- [`../rust_robotics_algo/src/robot_fw/onnx.rs`](../rust_robotics_algo/src/robot_fw/onnx.rs)
 
 ### Browser Bridge
 
@@ -135,7 +155,7 @@ Web assets are fetched by Rust from static files. Rust prepares:
 - ONNX model bytes
 - mesh assets
 
-Those bytes are then passed into JS during `rustRoboticsMujocoInit(...)`.
+Those bytes are then passed into JS during `rustRoboticsMujocoInit(...)`, and the policy bytes are forwarded into the FW runtime creation step.
 
 Relevant code:
 
@@ -147,13 +167,12 @@ Relevant code:
 JS runtime creation currently does:
 
 1. load MuJoCo wasm module
-2. configure ONNX Runtime Web
-3. create ONNX session
+2. configure browser ORT runtime assets
 4. write fetched files into MuJoCo's virtual filesystem
 5. load model from `/working/scene.xml`
 6. create `State` and `Simulation`
 7. resolve joint, actuator, and sensor ids
-8. initialize controller state
+8. create the shared FW runtime and ONNX session
 9. build initial render data and report
 
 Relevant code:
@@ -171,13 +190,14 @@ Rust side:
 JS side:
 
 1. update setpoint-driven command
-2. build ONNX input
-3. run ONNX Runtime Web inference
-4. apply control
-5. step MuJoCo for `decimation` substeps
-6. update timing counters
-7. request overlay render
-8. return telemetry report to Rust
+2. extract MuJoCo state into compact typed-array payloads
+3. call the FW step runtime
+4. FW builds observations, runs ONNX, integrates outputs, and returns decoded actuation
+5. JS applies control
+6. step MuJoCo for `decimation` substeps
+7. update timing counters
+8. request overlay render
+9. return telemetry report to Rust
 
 Relevant code:
 
@@ -220,7 +240,7 @@ Rust sends:
 - fetched file entries
 - ONNX bytes
 - controller config
-- per-step command parameters
+- per-step state and command payloads
 - viewport layout config
 
 ### JS to Rust
@@ -231,6 +251,15 @@ JS returns:
 - initial mesh asset snapshot used by Rust-side bookkeeping
 
 The current fast path avoids shipping full geom snapshots through Rust on every step.
+
+Per-step FW bridge shape on web is now flatter than before:
+
+- fixed core state packet
+- dynamic joint vectors
+- compact sensor packet for Duck
+- compact command packet
+
+The remaining hot-path inefficiency is that full `qpos` / `qvel` are still shipped through the bridge.
 
 ## Robot Presets
 
@@ -249,11 +278,12 @@ Controller behavior selection in JS is driven by `controller_kind` and ONNX meta
 
 ## Known Architectural Weak Point
 
-The main remaining web limitation is scheduling, not raw render cost:
+The main remaining web limitation is scheduling, with a smaller remaining payload-shape concern:
 
 - Rust still initiates MuJoCo step batches from the app update loop
 - JS runs each step batch and returns a report
 - the next batch only starts after Rust re-enters that path
+- the web bridge is flatter now, but still sends more state than the FW strictly needs in some cases
 
 So the browser path is fast enough now, but it is still not a fully JS-owned simulation loop.
 
@@ -261,4 +291,3 @@ The next major architecture improvement would be:
 
 - move the live MuJoCo stepping loop fully into JS
 - let Rust consume telemetry and control state instead of initiating each batch
-

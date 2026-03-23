@@ -254,3 +254,124 @@ impl Go2Controller {
         self.command_mode
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn raw_state() -> RawState {
+        RawState {
+            sim_time_s: 0.25,
+            base_pos: [1.0, -2.0, 0.3],
+            base_quat: [1.0, 0.0, 0.0, 0.0],
+            base_lin_vel: [0.0; 3],
+            base_ang_vel: [0.0; 3],
+            joint_pos: [0.1; 12],
+            joint_vel: [0.2; 12],
+            joint_pos_dyn: vec![0.1; 12],
+            joint_vel_dyn: vec![0.2; 12],
+            sensor_values: BTreeMap::new(),
+            qpos: vec![],
+            qvel: vec![],
+        }
+    }
+
+    #[test]
+    fn go2_observation_has_expected_shape_and_front_loaded_history() {
+        let mut controller = Go2Controller::new(
+            Go2CommandMode::Velocity,
+            [0.0; 12],
+            [1.0; 12],
+            [20.0; 12],
+            [0.5; 12],
+        );
+
+        controller.update_from_raw_state(&raw_state());
+        let obs = controller.build_observation();
+
+        assert_eq!(obs.values.len(), 117);
+        assert_eq!(&obs.values[0..3], &[0.0, 0.0, -1.0]);
+        assert!(obs.values[9..21].iter().all(|v| (*v - 0.1).abs() < 1e-6));
+        assert!(obs.values[21..45].iter().all(|v| v.abs() < 1e-6));
+        assert!(obs.values[45..57].iter().all(|v| (*v - 0.2).abs() < 1e-6));
+        assert!(obs.values[57..81].iter().all(|v| v.abs() < 1e-6));
+        assert!(obs.values[81..117].iter().all(|v| v.abs() < 1e-6));
+    }
+
+    #[test]
+    fn velocity_command_keeps_body_frame_velocity_and_yaw_rate() {
+        let controller = Go2Controller::new(
+            Go2CommandMode::Velocity,
+            [0.0; 12],
+            [1.0; 12],
+            [20.0; 12],
+            [0.5; 12],
+        );
+        let raw = raw_state();
+        let command = Command {
+            vel_x: 0.4,
+            vel_y: -0.2,
+            yaw_rate: 0.7,
+            setpoint_world: None,
+        };
+
+        let obs = controller.build_command_input(&raw, &command);
+
+        assert_eq!(obs.values.len(), 16);
+        assert!((obs.values[0] - 0.4).abs() < 1e-6);
+        assert!((obs.values[1] + 0.2).abs() < 1e-6);
+        assert!(obs.values[2].abs() < 1e-6);
+        assert!((obs.values[3] - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn impedance_command_clamps_setpoint_radius_in_body_frame() {
+        let controller = Go2Controller::new(
+            Go2CommandMode::Impedance,
+            [0.0; 12],
+            [1.0; 12],
+            [20.0; 12],
+            [0.5; 12],
+        );
+        let raw = raw_state();
+        let command = Command {
+            vel_x: 0.0,
+            vel_y: 0.0,
+            yaw_rate: 0.0,
+            setpoint_world: Some([10.0, -10.0, 0.3]),
+        };
+
+        let obs = controller.build_command_input(&raw, &command);
+        let norm = (obs.values[0] * obs.values[0] + obs.values[1] * obs.values[1]).sqrt();
+
+        assert_eq!(obs.values.len(), 27);
+        assert!((norm - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn integrate_and_decode_produce_smoothed_joint_torques() {
+        let mut controller = Go2Controller::new(
+            Go2CommandMode::Velocity,
+            [0.1; 12],
+            [0.5; 12],
+            [10.0; 12],
+            [1.0; 12],
+        );
+        let raw = raw_state();
+        let output = PolicyOutput {
+            actions: vec![1.0; 12],
+            recurrent: vec![0.25; 128],
+        };
+
+        controller.integrate_policy_output(&output).unwrap();
+        let Actuation::JointTorques(torques) = controller.decode_actuation(&raw) else {
+            panic!("expected joint torques");
+        };
+
+        assert!(!controller.is_init());
+        assert!((controller.last_actions()[0] - 0.8).abs() < 1e-6);
+        assert!((controller.adapt_hx()[0] - 0.25).abs() < 1e-6);
+        assert!((torques[0] - 3.8).abs() < 1e-6);
+    }
+}

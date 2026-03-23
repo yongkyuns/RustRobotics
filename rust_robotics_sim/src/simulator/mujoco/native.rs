@@ -1,8 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use egui::emath::GuiRounding;
+use egui_plot::{Line, PlotUi};
 use egui::{
     pos2, vec2, Align2, Color32, FontId, Painter, PointerButton, Pos2, Rect, Sense, Shape,
-    Slider, Stroke, TextEdit, Ui,
+    Stroke, Ui,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::cmp::Ordering;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use rust_robotics_algo::robot_fw::duck::DuckController;
 use rust_robotics_algo::robot_fw::go2::{Go2CommandMode, Go2Controller};
 use rust_robotics_algo::robot_fw::onnx::{NativeOrtBackend, OrtModelMetadata};
-use rust_robotics_algo::robot_fw::Command;
+use rust_robotics_algo::robot_fw::{Actuation, Command};
 
 #[cfg(not(target_arch = "wasm32"))]
 use serde::Deserialize;
@@ -25,7 +26,7 @@ use wgpu::util::DeviceExt as _;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
-    ffi::{CStr, CString},
+    ffi::CString,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -34,6 +35,7 @@ use std::{
 mod sim;
 #[cfg(not(target_arch = "wasm32"))]
 use sim::MujocoSim;
+use crate::data::{IntoValues, TimeTable};
 
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(
@@ -56,8 +58,6 @@ const MJ_OBJ_JOINT: i32 = mjtObj__mjOBJ_JOINT as i32;
 const MJ_OBJ_ACTUATOR: i32 = mjtObj__mjOBJ_ACTUATOR as i32;
 #[cfg(not(target_arch = "wasm32"))]
 const MJ_OBJ_GEOM: i32 = mjtObj__mjOBJ_GEOM as i32;
-#[cfg(not(target_arch = "wasm32"))]
-const MJ_OBJ_MESH: i32 = mjtObj__mjOBJ_MESH as i32;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(not(target_arch = "wasm32"))]
 const MJ_CAT_ALL: i32 = mjtCatBit__mjCAT_ALL as i32;
@@ -110,13 +110,12 @@ pub(super) struct NativeMujocoBackend {
     scene_path: String,
     policy_path: String,
     command_vel_x: f32,
-    diagnostic_colors: bool,
-    mesh_filter: i32,
     active: bool,
     status: String,
     init_error: Option<String>,
     render_error: Option<String>,
     runtime: Option<MujocoRuntime>,
+    plot_history: TimeTable,
 }
 
 impl Default for NativeMujocoBackend {
@@ -133,13 +132,16 @@ impl Default for NativeMujocoBackend {
                 .to_string_lossy()
                 .into_owned(),
             command_vel_x: 0.0,
-            diagnostic_colors: true,
-            mesh_filter: -1,
             active: false,
             status: "MuJoCo runtime idle".to_string(),
             init_error: None,
             render_error: None,
             runtime: None,
+            plot_history: TimeTable::init_with_names(vec![
+                "Base Height",
+                "Command Input X",
+                "Action[0]",
+            ]),
         }
     }
 }
@@ -168,6 +170,25 @@ impl NativeMujocoBackend {
             debug_log(&format!("panel.update: step error: {err}"));
             self.status = err;
         } else {
+            let plot_sample = {
+                let raw = runtime.sim.read_raw_state();
+                let command_input_x = runtime
+                    .command
+                    .setpoint_world
+                    .map(|setpoint| setpoint[0])
+                    .unwrap_or(runtime.command.vel_x);
+                (
+                    runtime.mujoco_time_ms / 1000.0,
+                    raw.base_pos[2],
+                    command_input_x,
+                    runtime.last_action_preview.first().copied().unwrap_or(0.0),
+                )
+            };
+            let (time_s, base_height, command_x, action_0) = plot_sample;
+            self.plot_history.add(
+                time_s,
+                vec![base_height, command_x, action_0],
+            );
             self.status = format!(
                 "MuJoCo running from {}",
                 Path::new(&self.scene_path)
@@ -202,6 +223,30 @@ impl NativeMujocoBackend {
 
     pub fn set_active(&mut self, active: bool) {
         self.active = active;
+    }
+
+    pub fn set_overlay_occlusions(&mut self, _rects: &[Rect], _interactive: bool) {}
+
+    pub fn reset_state(&mut self) {
+        self.plot_history.clear();
+        self.runtime = None;
+        self.init_error = None;
+        self.render_error = None;
+        self.status = "MuJoCo reset".to_string();
+    }
+
+    pub fn reset_all(&mut self) {
+        let active = self.active;
+        *self = Self::default();
+        self.active = active;
+    }
+
+    pub fn plot(&self, plot_ui: &mut PlotUi<'_>) {
+        for (index, name) in self.plot_history.names().iter().enumerate() {
+            if let Some(values) = self.plot_history.values(index) {
+                plot_ui.line(Line::new(name.clone(), values));
+            }
+        }
     }
 
     fn ui_native(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
@@ -247,87 +292,11 @@ impl NativeMujocoBackend {
             NativeRobotPreset::OpenDuckMini => "Policy: BEST_WALK_ONNX",
         });
         ui.label("Control: drag the red setpoint ball in the viewport.");
-        ui.checkbox(&mut self.diagnostic_colors, "Diagnostic colors");
 
-        ui.horizontal(|ui| {
-            if ui.button("Reset sim").clicked() {
-                if let Some(runtime) = self.runtime.as_mut() {
-                    if let Err(err) = runtime.reset() {
-                        self.status = err;
-                    } else {
-                        self.init_error = None;
-                        self.render_error = None;
-                        self.status = "MuJoCo reset".to_string();
-                    }
-                } else {
-                    self.status = "MuJoCo runtime not loaded yet".to_string();
-                }
+        if ui.button("Reset view").clicked() {
+            if let Some(runtime) = self.runtime.as_mut() {
+                runtime.reset_camera();
             }
-
-            if ui.button("Reset view").clicked() {
-                if let Some(runtime) = self.runtime.as_mut() {
-                    runtime.reset_camera();
-                }
-            }
-        });
-
-        egui::CollapsingHeader::new("Advanced")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Scene:");
-                    let changed = ui
-                        .add(TextEdit::singleline(&mut self.scene_path).desired_width(320.0))
-                        .changed();
-                    if ui.button("Reload").clicked() || changed {
-                        self.runtime = None;
-                        self.init_error = None;
-                        self.render_error = None;
-                        self.status = "Reloading MuJoCo scene...".to_string();
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Policy:");
-                    let changed = ui
-                        .add(TextEdit::singleline(&mut self.policy_path).desired_width(320.0))
-                        .changed();
-                    if ui.button("Reload policy").clicked() || changed {
-                        self.runtime = None;
-                        self.init_error = None;
-                        self.render_error = None;
-                        self.status = "Reloading MuJoCo policy...".to_string();
-                    }
-                });
-            });
-
-        ui.horizontal(|ui| {
-            ui.label("Mesh filter:");
-            ui.add(Slider::new(&mut self.mesh_filter, -1..=15).show_value(true));
-            if self.mesh_filter < 0 {
-                ui.label("all mesh assets");
-            } else if let Some(runtime) = self.runtime.as_ref() {
-                ui.label(runtime.mesh_filter_label(self.mesh_filter));
-            }
-        });
-
-        ui.label(format!("Status: {}", self.status));
-
-        if let Some(runtime) = self.runtime.as_ref() {
-            ui.label(format!(
-                "Command mode: {}",
-                runtime.robot.command_mode_label()
-            ));
-            ui.label(format!("Setpoint: {:?}", runtime.command.setpoint_world));
-            ui.label(format!("Load: {}", runtime.diagnostics.load_summary));
-            ui.label(format!(
-                "Perf: step {:.2} ms | policy {:.2} ms | render {:.2} ms | gl-init {:.2} ms | frames {}",
-                runtime.diagnostics.last_step_ms,
-                runtime.diagnostics.last_policy_ms,
-                runtime.diagnostics.last_render_ms,
-                runtime.diagnostics.last_gl_init_ms,
-                runtime.diagnostics.frame_count
-            ));
         }
     }
 
@@ -336,10 +305,8 @@ impl NativeMujocoBackend {
         desired.x = desired.x.max(320.0);
         desired.y = desired.y.max(240.0);
         if let Some(render_state) = frame.and_then(|frame| frame.wgpu_render_state()) {
-            let diagnostic_colors = self.diagnostic_colors;
-            let mesh_filter = normalize_mesh_filter(self.mesh_filter);
             match self.ensure_runtime().and_then(|runtime| {
-                runtime.render_wgpu(ui, render_state, desired, diagnostic_colors, mesh_filter)
+                runtime.render_wgpu(ui, render_state, desired, false, None)
             }) {
                 Ok(()) => {
                     self.render_error = None;
@@ -529,6 +496,7 @@ struct MujocoRuntime {
     command: Command,
     mujoco_time_ms: f32,
     diagnostics: MujocoDiagnostics,
+    last_action_preview: Vec<f32>,
     wgpu_scene: Arc<Mutex<WgpuSceneFrame>>,
     mesh_assets: BTreeMap<usize, MeshAssetCpu>,
     wgpu_renderer: Arc<Mutex<WgpuSceneRenderer>>,
@@ -542,23 +510,6 @@ enum NativeRobotController {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeRobotController {
-    fn reset(&mut self) {
-        match self {
-            Self::Go2(robot) => robot.reset(),
-            Self::Duck(robot) => robot.reset(),
-        }
-    }
-
-    fn command_mode_label(&self) -> &'static str {
-        match self {
-            Self::Go2(robot) => match robot.command_mode() {
-                Go2CommandMode::Velocity => "velocity",
-                Go2CommandMode::Impedance => "setpoint ball",
-            },
-            Self::Duck(_) => "setpoint ball",
-        }
-    }
-
     fn uses_setpoint_ball(&self) -> bool {
         matches!(self, Self::Duck(_))
             || matches!(
@@ -572,11 +523,9 @@ impl NativeRobotController {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 struct MujocoDiagnostics {
-    load_summary: String,
     last_step_ms: f32,
     last_policy_ms: f32,
     last_render_ms: f32,
-    last_gl_init_ms: f32,
     frame_count: u64,
 }
 
@@ -592,7 +541,6 @@ impl Drop for MujocoRuntime {
 #[cfg(not(target_arch = "wasm32"))]
 impl MujocoRuntime {
     fn load(scene_path: &Path, policy_path: &Path) -> Result<Self, String> {
-        let load_started = Instant::now();
         debug_log(&format!(
             "runtime.load: begin scene={} policy={}",
             scene_path.display(),
@@ -657,10 +605,8 @@ impl MujocoRuntime {
             &[]
         };
 
-        let sim_started = Instant::now();
         let sim = MujocoSim::load(&scene_path, &asset_meta.joint_names_isaac, sensor_names)?;
         let mesh_assets = collect_mesh_assets(sim.model_ptr());
-        let sim_elapsed = sim_started.elapsed();
         let mut scene = unsafe { std::mem::zeroed::<mjvScene>() };
         let mut cam = unsafe { std::mem::zeroed::<mjvCamera>() };
         let mut opt = unsafe { std::mem::zeroed::<mjvOption>() };
@@ -740,28 +686,12 @@ impl MujocoRuntime {
                 ..Command::default()
             },
             mujoco_time_ms: 0.0,
-            diagnostics: MujocoDiagnostics {
-                load_summary: format!(
-                    "total {} | sim {} | policy {}",
-                    fmt_duration(load_started.elapsed()),
-                    fmt_duration(sim_elapsed),
-                    fmt_duration(policy_elapsed)
-                ),
-                ..Default::default()
-            },
+            diagnostics: MujocoDiagnostics::default(),
+            last_action_preview: Vec::new(),
             wgpu_scene: Arc::new(Mutex::new(WgpuSceneFrame::default())),
             mesh_assets,
             wgpu_renderer: Arc::new(Mutex::new(WgpuSceneRenderer::default())),
         })
-    }
-
-    fn reset(&mut self) -> Result<(), String> {
-        self.sim.reset()?;
-        self.robot.reset();
-        self.mujoco_time_ms = 0.0;
-        let raw = self.sim.read_raw_state();
-        self.command.setpoint_world = Some([raw.base_pos[0], raw.base_pos[1], 0.05]);
-        Ok(())
     }
 
     fn reset_camera(&mut self) {
@@ -784,6 +714,12 @@ impl MujocoRuntime {
                     robot.step(&raw, &self.command, &mut self.policy)?
                 }
             };
+            self.last_action_preview = match &actuation {
+                Actuation::JointTorques(values) => values.iter().take(8).copied().collect(),
+                Actuation::JointPositionTargets(values) => {
+                    values.iter().take(8).copied().collect()
+                }
+            };
             self.diagnostics.last_policy_ms = policy_started.elapsed().as_secs_f32() * 1000.0;
 
             for _ in 0..self.sim.decimation() {
@@ -795,6 +731,7 @@ impl MujocoRuntime {
         self.diagnostics.last_step_ms = started.elapsed().as_secs_f32() * 1000.0;
         Ok(())
     }
+
 
     fn render_software(&mut self, ui: &mut Ui, desired_size: egui::Vec2) {
         self.render_software_2d(ui, desired_size);
@@ -911,16 +848,9 @@ impl MujocoRuntime {
         let Some(setpoint) = self.command.setpoint_world else {
             return;
         };
-        let raw = self.sim.read_raw_state();
-        let start = [raw.base_pos[0], raw.base_pos[1], setpoint[2]];
         if let Some(camera) = camera {
-            if let (Some((start_pos, _)), Some((setpoint_pos, _))) =
-                (camera.project(rect, start), camera.project(rect, setpoint))
+            if let Some((setpoint_pos, _)) = camera.project(rect, setpoint)
             {
-                painter.line_segment(
-                    [start_pos, setpoint_pos],
-                    Stroke::new(2.0, Color32::from_rgb(220, 90, 90)),
-                );
                 let radius = camera.project_radius(rect, setpoint, 0.05).clamp(6.0, 18.0);
                 painter.circle_filled(setpoint_pos, radius, Color32::from_rgb(220, 70, 70));
                 painter.circle_stroke(
@@ -953,6 +883,17 @@ impl MujocoRuntime {
 
         let software_camera = SoftwareCamera::from_gl(&self.scene.camera[0], response.rect.aspect_ratio());
         if self.robot.uses_setpoint_ball() {
+            if response.clicked_by(PointerButton::Primary) {
+                if let (Some(pointer), Some(camera)) =
+                    (response.interact_pointer_pos(), software_camera.as_ref())
+                {
+                    if let Some(world) = camera.intersect_plane_z(response.rect, pointer, 0.05) {
+                        self.command.setpoint_world = Some(world);
+                        self.command.vel_x = world[0] - self.sim.read_raw_state().base_pos[0];
+                        self.command.vel_y = world[1] - self.sim.read_raw_state().base_pos[1];
+                    }
+                }
+            }
             if response.dragged_by(PointerButton::Primary) {
                 if let (Some(pointer), Some(camera)) = (response.interact_pointer_pos(), software_camera.as_ref()) {
                     if let Some(world) = camera.intersect_plane_z(response.rect, pointer, 0.05) {
@@ -1298,19 +1239,11 @@ impl MujocoRuntime {
     fn append_command_setpoint_scene(
         &self,
         triangles: &mut Vec<GlVertex>,
-        lines: &mut Vec<GlVertex>,
+        _lines: &mut Vec<GlVertex>,
     ) {
         let Some(setpoint) = self.command.setpoint_world else {
             return;
         };
-        let raw = self.sim.read_raw_state();
-        let start = [raw.base_pos[0], raw.base_pos[1], setpoint[2]];
-        push_line(
-            lines,
-            start,
-            setpoint,
-            [0.92, 0.24, 0.24, 1.0],
-        );
         let marker = world_sphere_geom(setpoint, 0.05, [0.92, 0.24, 0.24, 1.0]);
         append_sphere_geom(triangles, &marker, 10, 16, false);
     }
@@ -1393,12 +1326,6 @@ impl MujocoRuntime {
         }
 
         None
-    }
-
-    fn mesh_filter_label(&self, mesh_filter: i32) -> String {
-        normalize_mesh_filter(mesh_filter)
-            .and_then(|mesh_id| object_name(self.sim.model_ptr(), MJ_OBJ_MESH, mesh_id as i32))
-            .unwrap_or_else(|| "unknown".to_string())
     }
 }
 
@@ -2248,28 +2175,6 @@ fn debug_log(message: &str) {
     eprintln!("[mujoco-tab] {message}");
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn object_name(model: *const mjModel, objtype: i32, objid: i32) -> Option<String> {
-    if model.is_null() || objid < 0 {
-        return None;
-    }
-
-    unsafe {
-        let ptr = mj_id2name(model, objtype, objid);
-        if ptr.is_null() {
-            None
-        } else {
-            Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn normalize_mesh_filter(mesh_filter: i32) -> Option<usize> {
-    (mesh_filter >= 0).then_some(mesh_filter as usize)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn fit_camera_to_model_stat(model: *const mjModel, cam: &mut mjvCamera) {
     if model.is_null() {
         return;

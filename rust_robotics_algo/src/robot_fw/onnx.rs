@@ -415,30 +415,6 @@ mod web {
         output_names: Vec<String>,
     }
 
-    #[derive(Deserialize, Default)]
-    struct WebCommandPayload {
-        vel_x: f32,
-        vel_y: f32,
-        yaw_rate: f32,
-        setpoint_world: Option<[f32; 3]>,
-    }
-
-    #[derive(Deserialize)]
-    struct WebRawStatePayload {
-        sim_time_s: f32,
-        base_pos: [f32; 3],
-        base_quat: [f32; 4],
-        base_lin_vel: [f32; 3],
-        base_ang_vel: [f32; 3],
-        joint_pos: Vec<f32>,
-        joint_vel: Vec<f32>,
-        joint_pos_dyn: Vec<f32>,
-        joint_vel_dyn: Vec<f32>,
-        sensor_values: BTreeMap<String, Vec<f32>>,
-        qpos: Vec<f32>,
-        qvel: Vec<f32>,
-    }
-
     enum PreparedInput {
         Go2 {
             policy: Vec<f32>,
@@ -474,32 +450,75 @@ mod web {
         out
     }
 
-    fn into_raw_state(payload: WebRawStatePayload) -> RawState {
-        let joint_pos = normalize_fixed_12(&payload.joint_pos, &payload.joint_pos_dyn);
-        let joint_vel = normalize_fixed_12(&payload.joint_vel, &payload.joint_vel_dyn);
-        RawState {
-            sim_time_s: payload.sim_time_s,
-            base_pos: payload.base_pos,
-            base_quat: payload.base_quat,
-            base_lin_vel: payload.base_lin_vel,
-            base_ang_vel: payload.base_ang_vel,
+    const WEB_RAW_STATE_CORE_LEN: usize = 38;
+    const WEB_COMMAND_LEN: usize = 7;
+    const WEB_DUCK_SENSOR_LEN: usize = 12;
+
+    fn into_raw_state(
+        core: Vec<f32>,
+        joint_pos_dyn: Vec<f32>,
+        joint_vel_dyn: Vec<f32>,
+        qpos: Vec<f32>,
+        qvel: Vec<f32>,
+        sensor_values_flat: Vec<f32>,
+    ) -> Result<RawState, JsValue> {
+        if core.len() != WEB_RAW_STATE_CORE_LEN {
+            return Err(js_error(format!(
+                "invalid raw state core length {}, expected {}",
+                core.len(),
+                WEB_RAW_STATE_CORE_LEN
+            )));
+        }
+        let joint_pos = normalize_fixed_12(&core[14..26], &joint_pos_dyn);
+        let joint_vel = normalize_fixed_12(&core[26..38], &joint_vel_dyn);
+        let mut sensor_values = BTreeMap::new();
+        if !sensor_values_flat.is_empty() {
+            if sensor_values_flat.len() != WEB_DUCK_SENSOR_LEN {
+                return Err(js_error(format!(
+                    "invalid duck sensor payload length {}, expected {}",
+                    sensor_values_flat.len(),
+                    WEB_DUCK_SENSOR_LEN
+                )));
+            }
+            sensor_values.insert("imu_gyro".to_string(), sensor_values_flat[0..3].to_vec());
+            sensor_values.insert("imu_accel".to_string(), sensor_values_flat[3..6].to_vec());
+            sensor_values.insert("left_foot_pos".to_string(), sensor_values_flat[6..9].to_vec());
+            sensor_values.insert("right_foot_pos".to_string(), sensor_values_flat[9..12].to_vec());
+        }
+        Ok(RawState {
+            sim_time_s: core[0],
+            base_pos: [core[1], core[2], core[3]],
+            base_quat: [core[4], core[5], core[6], core[7]],
+            base_lin_vel: [core[8], core[9], core[10]],
+            base_ang_vel: [core[11], core[12], core[13]],
             joint_pos,
             joint_vel,
-            joint_pos_dyn: payload.joint_pos_dyn,
-            joint_vel_dyn: payload.joint_vel_dyn,
-            sensor_values: payload.sensor_values,
-            qpos: payload.qpos,
-            qvel: payload.qvel,
-        }
+            joint_pos_dyn,
+            joint_vel_dyn,
+            sensor_values,
+            qpos,
+            qvel,
+        })
     }
 
-    fn into_command(payload: WebCommandPayload) -> Command {
-        Command {
-            vel_x: payload.vel_x,
-            vel_y: payload.vel_y,
-            yaw_rate: payload.yaw_rate,
-            setpoint_world: payload.setpoint_world,
+    fn into_command(values: Vec<f32>) -> Result<Command, JsValue> {
+        if values.len() != WEB_COMMAND_LEN {
+            return Err(js_error(format!(
+                "invalid command payload length {}, expected {}",
+                values.len(),
+                WEB_COMMAND_LEN
+            )));
         }
+        Ok(Command {
+            vel_x: values[0],
+            vel_y: values[1],
+            yaw_rate: values[2],
+            setpoint_world: if values[3] > 0.5 {
+                Some([values[4], values[5], values[6]])
+            } else {
+                None
+            },
+        })
     }
 
     fn command_mode_from_config(config: &WebControllerConfig) -> Go2CommandMode {
@@ -934,11 +953,23 @@ mod web {
     #[wasm_bindgen]
     pub async fn rust_robotics_fw_step_runtime(
         handle: u32,
-        raw_state: JsValue,
-        command: JsValue,
+        raw_state_core: Vec<f32>,
+        joint_pos_dyn: Vec<f32>,
+        joint_vel_dyn: Vec<f32>,
+        qpos: Vec<f32>,
+        qvel: Vec<f32>,
+        sensor_values_flat: Vec<f32>,
+        command_values: Vec<f32>,
     ) -> Result<JsValue, JsValue> {
-        let raw_state = into_raw_state(from_value(raw_state)?);
-        let command = into_command(from_value(command)?);
+        let raw_state = into_raw_state(
+            raw_state_core,
+            joint_pos_dyn,
+            joint_vel_dyn,
+            qpos,
+            qvel,
+            sensor_values_flat,
+        )?;
+        let command = into_command(command_values)?;
 
         let mut runtime = take_runtime(handle)?;
         let result = async {

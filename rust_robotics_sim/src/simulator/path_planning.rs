@@ -35,12 +35,6 @@ impl Algorithm {
         }
     }
 
-    fn is_grid(&self) -> bool {
-        match self {
-            Algorithm::AStar | Algorithm::Dijkstra => true,
-            Algorithm::ThetaStar | Algorithm::Rrt => false,
-        }
-    }
 }
 
 /// State of the path planning process
@@ -197,12 +191,6 @@ impl PathPlanning {
         if self.start.is_some() && self.goal.is_some() {
             let last_idx = self.planners.len() - 1;
             self.run_single_planner(last_idx);
-        }
-    }
-
-    fn remove_planner(&mut self, planner_id: usize) {
-        if let Some(pos) = self.planners.iter().position(|p| p.id == planner_id) {
-            self.planners.remove(pos);
         }
     }
 
@@ -477,7 +465,6 @@ impl PathPlanning {
         // Clear all obstacles first
         self.grid.clear_all_obstacles();
 
-        let radius_sq = self.continuous_obstacle_radius * self.continuous_obstacle_radius;
         // Padding to ensure we cover all cells that might overlap
         let check_radius_cells =
             (self.continuous_obstacle_radius / self.grid.resolution).ceil() as usize;

@@ -98,11 +98,26 @@ impl SimMode {
         match self {
             SimMode::InvertedPendulum => "Inverted Pendulum",
             SimMode::Localization => "Localization",
-            SimMode::Mujoco => "mujoco",
+            SimMode::Mujoco => "Robot",
             SimMode::PathPlanning => "Path Planning",
             SimMode::Slam => "SLAM",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum HelpTarget {
+    ModeSelector,
+    Controls,
+    Options,
+    Scene,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HelpStep {
+    title: &'static str,
+    body: &'static str,
+    target: Option<HelpTarget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,18 +175,14 @@ pub struct Simulator {
     mujoco_panel: MujocoPanel,
     /// Current simulation time in seconds.
     time: f32,
-    /// The speed with which to execute the simulation. This is actually a
-    /// multiplier to indicate how many times to call [`step`](Simulate::step) when
-    /// [`update`](Self::update) is called.
+    /// Fixed-step simulation speed multiplier relative to wall-clock time.
+    /// A value of 1 advances one simulation step of `dt` for each `dt` of
+    /// accumulated wall-clock time on average.
     sim_speed: usize,
     /// Settings to indicate whether to show the graph of simulation signals
     show_graph: bool,
     /// Active tab for inverted pendulum signal plots.
     pendulum_plot_tab: PendulumPlotTab,
-    /// Show egui inspection UI (memory, textures, etc.)
-    show_inspection: bool,
-    /// Show egui memory panel
-    show_memory: bool,
     paused: bool,
     /// Shared grid width for path planning (in cells)
     grid_width: usize,
@@ -191,6 +202,18 @@ pub struct Simulator {
     visited_modes: HashSet<SimMode>,
     /// Whether to show the help popup
     show_help_popup: bool,
+    /// Whether the shared simulator chrome has already been explained in the guided tour.
+    shared_help_intro_completed: bool,
+    /// Current walkthrough step index for the help popup.
+    help_step_index: usize,
+    /// Rect for the mode selector row, used by the guided help highlight.
+    help_mode_selector_rect: Option<Rect>,
+    /// Rect for the global controls row, used by the guided help highlight.
+    help_controls_rect: Option<Rect>,
+    /// Rect for the current mode's options panel, used by the guided help highlight.
+    help_options_rect: Option<Rect>,
+    /// Rect for the main scene/viewport area, used by the guided help highlight.
+    help_scene_rect: Option<Rect>,
     /// Last wall-clock tick used for fixed-step simulation pacing.
     last_tick: Option<Instant>,
     /// Accumulator for non-MuJoCo fixed-step simulation.
@@ -207,11 +230,9 @@ impl Default for Simulator {
             slam_demos: vec![SlamDemo::new(1, 0.0)],
             mujoco_panel: MujocoPanel::default(),
             time: 0.0,
-            sim_speed: 2,
+            sim_speed: 1,
             show_graph: false,
             pendulum_plot_tab: PendulumPlotTab::LateralPosition,
-            show_inspection: false,
-            show_memory: false,
             paused: false,
             grid_width: 40,
             grid_height: 40,
@@ -222,6 +243,12 @@ impl Default for Simulator {
             pendulum_noise_scale: 0.0,
             visited_modes: HashSet::new(),
             show_help_popup: false,
+            shared_help_intro_completed: false,
+            help_step_index: 0,
+            help_mode_selector_rect: None,
+            help_controls_rect: None,
+            help_options_rect: None,
+            help_scene_rect: None,
             last_tick: None,
             sim_accumulator: 0.0,
         }
@@ -229,6 +256,197 @@ impl Default for Simulator {
 }
 
 impl Simulator {
+    fn sync_mujoco_overlay_active(&mut self) {
+        let active = self.mode == SimMode::Mujoco;
+        self.mujoco_panel.set_active(active);
+    }
+
+    fn sync_mujoco_overlay_occlusions(&mut self, rects: &[Rect]) {
+        let interactive = self.mode == SimMode::Mujoco && rects.is_empty();
+        self.mujoco_panel.set_overlay_occlusions(rects, interactive);
+    }
+
+    fn help_steps(&self) -> &'static [HelpStep] {
+        const INVERTED_PENDULUM_STEPS: [HelpStep; 4] = [
+            HelpStep {
+                title: "Mode Selector",
+                body: "Choose which simulator is active here. Switching modes resets the local timebase and opens the relevant controls.",
+                target: Some(HelpTarget::ModeSelector),
+            },
+            HelpStep {
+                title: "Global Controls",
+                body: "Play, restart, add pendulums, show graphs, change sim speed, and enable measurement/action noise from this row.",
+                target: Some(HelpTarget::Controls),
+            },
+            HelpStep {
+                title: "Pendulum Setup",
+                body: "Each pendulum has its own physical parameters and controller selection here, so you can compare LQR, PID, or MPC side by side.",
+                target: Some(HelpTarget::Options),
+            },
+            HelpStep {
+                title: "Scene Overview",
+                body: "This is the live pendulum scene. Use the Signal Plot window to compare one state channel across multiple pendulums.",
+                target: Some(HelpTarget::Scene),
+            },
+        ];
+        const LOCALIZATION_STEPS: [HelpStep; 4] = [
+            HelpStep {
+                title: "Mode Selector",
+                body: "Use this row to switch between localization, SLAM, pendulum, MuJoCo, and planning demos.",
+                target: Some(HelpTarget::ModeSelector),
+            },
+            HelpStep {
+                title: "Global Controls",
+                body: "Play, restart, add vehicles, toggle graphing, and change simulation speed here.",
+                target: Some(HelpTarget::Controls),
+            },
+            HelpStep {
+                title: "Vehicle Options",
+                body: "Each vehicle panel exposes the algorithm configuration and vehicle-specific settings.",
+                target: Some(HelpTarget::Options),
+            },
+            HelpStep {
+                title: "Localization Scene",
+                body: "Drive and inspect the localization behavior in this scene. Arrow keys control dynamic vehicle modes.",
+                target: Some(HelpTarget::Scene),
+            },
+        ];
+        const MUJOCO_STEPS: [HelpStep; 4] = [
+            HelpStep {
+                title: "Mode Selector",
+                body: "Use this selector to enter the Robot mode or return to the other simulators. Each mode focuses on a different robotics demo.",
+                target: Some(HelpTarget::ModeSelector),
+            },
+            HelpStep {
+                title: "Global Controls",
+                body: "These are the shared simulator controls. Use them to play or pause, restart the current mode, reset everything in the current mode, open any available graph window, and change simulation speed.",
+                target: Some(HelpTarget::Controls),
+            },
+            HelpStep {
+                title: "Robot Panel",
+                body: "This panel contains the MuJoCo-specific controls. Choose the robot you want to run, see a short description of its control behavior, read the interaction hint for the red setpoint ball, and reset the camera view without restarting the simulation.",
+                target: Some(HelpTarget::Options),
+            },
+            HelpStep {
+                title: "Viewport Note",
+                body: "The MuJoCo viewport is where you watch the robot move and interact with the scene. Use the red setpoint ball to guide supported robots, and look in the viewport for live movement and status feedback while the simulation is running.",
+                target: None,
+            },
+        ];
+        const PATH_PLANNING_STEPS: [HelpStep; 4] = [
+            HelpStep {
+                title: "Mode Selector",
+                body: "Switch between planners and the other demos from this selector.",
+                target: Some(HelpTarget::ModeSelector),
+            },
+            HelpStep {
+                title: "Global Controls",
+                body: "Use this row to play, restart, add planners, toggle graphing, and change simulation speed.",
+                target: Some(HelpTarget::Controls),
+            },
+            HelpStep {
+                title: "Planning Options",
+                body: "The options panel contains environment mode, grid size, obstacle radius, and per-planner algorithm choices.",
+                target: Some(HelpTarget::Options),
+            },
+            HelpStep {
+                title: "Planning Scene",
+                body: "Set start and goal in the scene, then compare the active planners in the same environment.",
+                target: Some(HelpTarget::Scene),
+            },
+        ];
+        const SLAM_STEPS: [HelpStep; 4] = [
+            HelpStep {
+                title: "Mode Selector",
+                body: "Use the selector to move between SLAM and the other simulations.",
+                target: Some(HelpTarget::ModeSelector),
+            },
+            HelpStep {
+                title: "Global Controls",
+                body: "Play, restart, graph visibility, sim speed, and landmark count all live in this top control area.",
+                target: Some(HelpTarget::Controls),
+            },
+            HelpStep {
+                title: "SLAM Options",
+                body: "This panel contains the active SLAM algorithm settings and the demo-specific controls.",
+                target: Some(HelpTarget::Options),
+            },
+            HelpStep {
+                title: "SLAM Scene",
+                body: "Drive the robot in the scene and compare how the map and pose estimate evolve over time.",
+                target: Some(HelpTarget::Scene),
+            },
+        ];
+
+        match self.mode {
+            SimMode::InvertedPendulum => &INVERTED_PENDULUM_STEPS,
+            SimMode::Localization => &LOCALIZATION_STEPS,
+            SimMode::Mujoco => &MUJOCO_STEPS,
+            SimMode::PathPlanning => &PATH_PLANNING_STEPS,
+            SimMode::Slam => &SLAM_STEPS,
+        }
+    }
+
+    fn active_help_steps(&self) -> Vec<HelpStep> {
+        self.help_steps()
+            .iter()
+            .copied()
+            .filter(|step| {
+                !self.shared_help_intro_completed
+                    || !matches!(
+                        step.target,
+                        Some(HelpTarget::ModeSelector | HelpTarget::Controls)
+                    )
+            })
+            .collect()
+    }
+
+    fn reset_help_tour(&mut self) {
+        self.help_step_index = 0;
+    }
+
+    fn help_target_rect(&self, target: HelpTarget) -> Option<Rect> {
+        match target {
+            HelpTarget::ModeSelector => self.help_mode_selector_rect,
+            HelpTarget::Controls => self.help_controls_rect,
+            HelpTarget::Options => self.help_options_rect,
+            HelpTarget::Scene => self.help_scene_rect,
+        }
+    }
+
+    fn paint_help_highlight(&self, ui: &Ui) {
+        if !self.show_help_popup {
+            return;
+        }
+
+        let steps = self.active_help_steps();
+        let Some(step) = steps.get(self.help_step_index) else {
+            return;
+        };
+        let Some(target) = step.target else {
+            return;
+        };
+        let Some(rect) = self.help_target_rect(target) else {
+            return;
+        };
+
+        let pulse = (ui.ctx().input(|i| i.time) as f32 * 2.5).sin().abs();
+        let highlight_rect = rect.expand(4.0);
+        let stroke_color = Color32::from_rgb(255, 210, 64);
+        let fill_color = stroke_color.linear_multiply(0.08 + pulse * 0.05);
+        let painter = ui.ctx().layer_painter(LayerId::new(
+            Order::Background,
+            Id::new("simulation_help_highlight"),
+        ));
+        painter.rect_filled(highlight_rect, 8.0, fill_color);
+        painter.rect_stroke(
+            highlight_rect,
+            8.0,
+            Stroke::new(1.5 + pulse * 0.5, stroke_color),
+            StrokeKind::Outside,
+        );
+    }
+
     fn pendulum_noise_config(&self) -> PendulumNoiseConfig {
         PendulumNoiseConfig {
             enabled: self.pendulum_noise_enabled,
@@ -273,7 +491,7 @@ impl Simulator {
         nice * magnitude
     }
 
-    fn render_pendulum_scene(&self, ui: &mut Ui) {
+    fn render_pendulum_scene(&self, ui: &mut Ui) -> Rect {
         let desired_size = vec2(
             ui.available_width().max(240.0),
             ui.available_height().max(240.0),
@@ -302,7 +520,7 @@ impl Simulator {
                 FontId::proportional(16.0),
                 visuals.weak_text_color(),
             );
-            return;
+            return plot_rect;
         }
 
         let mut min_x = f32::INFINITY;
@@ -552,11 +770,13 @@ impl Simulator {
                 visuals.text_color(),
             );
         }
+
+        plot_rect
     }
 
     /// Update the simulation for a single time step
     pub fn update(&mut self) {
-        self.mujoco_panel.set_active(self.mode == SimMode::Mujoco);
+        self.sync_mujoco_overlay_active();
         let now = Instant::now();
         let elapsed = self
             .last_tick
@@ -582,8 +802,10 @@ impl Simulator {
                     });
                 }
                 SimMode::Mujoco => {
-                    self.time += dt * self.sim_speed as f32;
-                    self.mujoco_panel.update(self.sim_speed, self.paused);
+                    let mujoco_dt = self.mujoco_panel.fixed_dt();
+                    self.step_fixed_dt(elapsed, mujoco_dt, |sim, _dt| {
+                        sim.mujoco_panel.update(1, false);
+                    });
                 }
                 SimMode::PathPlanning => {
                     self.step_fixed_dt(elapsed, dt, |sim, dt| {
@@ -625,7 +847,9 @@ impl Simulator {
             SimMode::Localization => {
                 self.vehicles.iter_mut().for_each(|sim| sim.reset_state());
             }
-            SimMode::Mujoco => {}
+            SimMode::Mujoco => {
+                self.mujoco_panel.reset_state();
+            }
             SimMode::PathPlanning => {
                 self.planners.iter_mut().for_each(|sim| sim.reset_state());
             }
@@ -644,7 +868,9 @@ impl Simulator {
             SimMode::Localization => {
                 self.vehicles.iter_mut().for_each(|sim| sim.reset_all());
             }
-            SimMode::Mujoco => {}
+            SimMode::Mujoco => {
+                self.mujoco_panel.reset_all();
+            }
             SimMode::PathPlanning => {
                 self.planners.iter_mut().for_each(|sim| sim.reset_all());
             }
@@ -693,7 +919,11 @@ impl Simulator {
 
     /// Draw the UI directly into a Ui (for embedding in CentralPanel)
     pub fn ui(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
-        self.mujoco_panel.set_active(self.mode == SimMode::Mujoco);
+        self.sync_mujoco_overlay_active();
+        self.help_mode_selector_rect = None;
+        self.help_controls_rect = None;
+        self.help_options_rect = None;
+        self.help_scene_rect = None;
 
         // Handle space key to pause/resume simulation
         if ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) {
@@ -723,7 +953,7 @@ impl Simulator {
         }
 
         // Mode selector at the top
-        ui.horizontal(|ui| {
+        let mode_selector_response = ui.horizontal(|ui| {
             ui.label("Simulation:");
             for mode in [
                 SimMode::InvertedPendulum,
@@ -740,22 +970,25 @@ impl Simulator {
                     self.time = 0.0;
                     self.sim_accumulator = 0.0;
                     self.last_tick = None;
+                    self.reset_help_tour();
                 }
             }
         });
+        self.help_mode_selector_rect = Some(mode_selector_response.response.rect);
 
         // Check if we need to show help for current mode
         if !self.visited_modes.contains(&self.mode) {
             self.visited_modes.insert(self.mode);
             self.show_help_popup = true;
+            self.reset_help_tour();
         }
 
-        self.mujoco_panel.set_active(self.mode == SimMode::Mujoco);
+        self.sync_mujoco_overlay_active();
 
         ui.separator();
 
         // Control buttons
-        ui.horizontal(|ui| {
+        let controls_response = ui.horizontal(|ui| {
             let btn_text = if self.paused { "Play" } else { "Pause" };
             if ui.button(btn_text).clicked() {
                 self.paused = !self.paused;
@@ -784,8 +1017,6 @@ impl Simulator {
             }
 
             ui.checkbox(&mut self.show_graph, "Show Graph");
-            ui.checkbox(&mut self.show_inspection, "Inspect");
-            ui.checkbox(&mut self.show_memory, "Memory");
 
             ui.separator();
             ui.label("Speed:");
@@ -816,11 +1047,12 @@ impl Simulator {
                 }
             }
         });
+        self.help_controls_rect = Some(controls_response.response.rect);
 
         ui.separator();
 
         // Options panel for current simulations
-        match self.mode {
+        let options_response = ui.scope(|ui| match self.mode {
             SimMode::InvertedPendulum => {
                 ui.horizontal(|ui| {
                     self.pendulums.retain_mut(|sim| sim.options(ui));
@@ -915,7 +1147,8 @@ impl Simulator {
                     self.slam_demos.retain_mut(|sim| sim.options(ui));
                 });
             }
-        }
+        });
+        self.help_options_rect = Some(options_response.response.rect);
 
         // Show keyboard controls hint if any vehicle is in dynamic mode
         if self.mode == SimMode::Localization && self.vehicles.iter().any(|v| v.is_dynamic_mode()) {
@@ -995,13 +1228,14 @@ impl Simulator {
 
         if self.mode == SimMode::Mujoco {
             ui.separator();
-            ui.group(|ui| {
+            let scene_response = ui.group(|ui| {
                 ui.label("MuJoCo viewport");
                 ui.label("The MuJoCo tab above owns the live simulator state and viewport.");
                 ui.label("Use drag to orbit, right-drag to pan, and mouse wheel to zoom in glow-fallback mode.");
             });
+            self.help_scene_rect = Some(scene_response.response.rect);
         } else if self.mode == SimMode::InvertedPendulum {
-            self.render_pendulum_scene(ui);
+            self.help_scene_rect = Some(self.render_pendulum_scene(ui));
         } else {
             // Main scene plot
             let mut plot = Plot::new("Scene")
@@ -1042,76 +1276,88 @@ impl Simulator {
                     planner.handle_mouse(&plot_response);
                 }
             }
+            self.help_scene_rect = Some(plot_response.response.rect);
         }
+
+        self.paint_help_highlight(ui);
+        self.sync_mujoco_overlay_active();
+
+        let mut overlay_occlusions = Vec::new();
 
         // Help Popup
         let mut close_popup = false;
         if self.show_help_popup {
-            egui::Window::new("Simulation Help")
+            let steps = self.active_help_steps();
+            let step_index = self.help_step_index.min(steps.len().saturating_sub(1));
+            let step = steps[step_index];
+            let mode = self.mode;
+            let mut next_help_step = step_index;
+            let mut show_help_popup = self.show_help_popup;
+            if let Some(window) = egui::Window::new("Simulation Help")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
-                .open(&mut self.show_help_popup)
+                .open(&mut show_help_popup)
                 .show(ui.ctx(), |ui| {
-                    ui.heading(format!("{} Instructions", self.mode.label()));
+                    ui.heading(format!("{} Instructions", mode.label()));
                     ui.separator();
+                    ui.label(
+                        RichText::new(format!("Step {} of {}", step_index + 1, steps.len()))
+                            .small()
+                            .weak(),
+                    );
+                    ui.heading(step.title);
+                    ui.label(step.body);
 
-                    match self.mode {
-                        SimMode::PathPlanning => {
-                            ui.label(RichText::new("How to Run").strong());
-                            ui.label("1. Left-click to set Start (Green).");
-                            ui.label("2. Left-click to set Goal (Red).");
-                            ui.label("3. Simulation runs automatically.");
-
-                            ui.add_space(5.0);
-                            ui.label(RichText::new("Environment").strong());
-                            ui.label("• Env: Switch between Grid (discrete) and Continuous (free space).");
-                            if self.env_mode == EnvironmentMode::Grid {
-                                ui.label("• Right-click Drag: Paint obstacles.");
-                                ui.label("• Settings: Adjust Grid Size and Resolution.");
-                            } else {
-                                ui.label("• Right-click: Place circular obstacles.");
-                                ui.label("• Obs Radius: Adjust size of new obstacles.");
-                            }
-
-                            ui.add_space(5.0);
-                            ui.label(RichText::new("Multi-Planner Comparison").strong());
-                            ui.label("• Click 'Add Planner' to run multiple algorithms side-by-side.");
-                            ui.label("• Each planner has its own Algorithm selection and Settings.");
-                            ui.label("• Results (Time, Length) are shown in each planner's panel.");
-                        }
-                        SimMode::Localization => {
-                            ui.label("• Arrow Keys: Drive the vehicle");
-                            ui.label("• Space: Pause/Resume");
-                            ui.label("• Enter: Restart");
-                        }
-                        SimMode::Slam => {
-                            ui.label("• Arrow Keys: Drive the vehicle");
-                            ui.label("• Space: Pause/Resume");
-                        }
-                        SimMode::InvertedPendulum => {
-                            ui.label("• Watch the controller balance the pendulum.");
-                            ui.label("• Use sliders to adjust parameters.");
-                        }
-                        SimMode::Mujoco => {
-                            ui.label("• Use the MuJoCo tab controls to attach a demo URL.");
-                            ui.label("• The current implementation hosts the MuJoCo page in a browser overlay.");
-                        }
+                    if mode == SimMode::Localization || mode == SimMode::Slam {
+                        ui.add_space(6.0);
+                        ui.label("Keyboard: arrows drive, `Space` pauses, `Enter` restarts.");
+                    }
+                    if mode == SimMode::PathPlanning && step_index == steps.len() - 1 {
+                        ui.add_space(6.0);
+                        ui.label("Left-click sets start/goal. Right-click paints or places obstacles depending on environment mode.");
+                    }
+                    if mode == SimMode::Mujoco && step_index == steps.len() - 1 {
+                        ui.add_space(6.0);
+                        ui.label("The MuJoCo viewport is hosted by the dedicated overlay tab, so this tour only highlights the local control surface.");
                     }
 
                     ui.separator();
-                    if ui.button("Got it!").clicked() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(step_index > 0, Button::new("Back"))
+                            .clicked()
+                        {
+                            next_help_step = step_index.saturating_sub(1);
+                        }
+                        if step_index + 1 < steps.len() {
+                            if ui.button("Next").clicked() {
+                                next_help_step = step_index + 1;
+                            }
+                        } else if ui.button("Done").clicked() {
+                            close_popup = true;
+                        }
+                    });
+                    if ui.button("Close Tour").clicked() {
                         close_popup = true;
                     }
-                });
+                })
+            {
+                overlay_occlusions.push(window.response.rect);
+            }
+            self.show_help_popup = show_help_popup;
+            self.help_step_index = next_help_step;
         }
         if close_popup {
             self.show_help_popup = false;
+            self.shared_help_intro_completed = true;
         }
+        self.sync_mujoco_overlay_active();
+
 
         // Optional graph window
         if self.show_graph {
-            egui::Window::new("Signal Plot")
+            if let Some(window) = egui::Window::new("Signal Plot")
                 .default_size(vec2(400.0, 300.0))
                 .show(ui.ctx(), |ui| {
                     match self.mode {
@@ -1137,29 +1383,20 @@ impl Simulator {
                                     self.slam_demos.iter().for_each(|sim| sim.plot(plot_ui));
                                 });
                         }
-                        SimMode::Mujoco => {}
+                        SimMode::Mujoco => {
+                            Plot::new("Plot")
+                                .legend(Legend::default().position(Corner::RightTop))
+                                .show(ui, |plot_ui| {
+                                    self.mujoco_panel.plot(plot_ui);
+                                });
+                        }
                     };
-                });
+                })
+            {
+                overlay_occlusions.push(window.response.rect);
+            }
         }
-
-        // Optional inspection window (egui internals)
-        if self.show_inspection {
-            let ctx = ui.ctx().clone();
-            egui::Window::new("Inspection")
-                .default_size(vec2(300.0, 400.0))
-                .show(&ctx, |ui| {
-                    ctx.inspection_ui(ui);
-                });
-        }
-
-        // Optional memory window
-        if self.show_memory {
-            let ctx = ui.ctx().clone();
-            egui::Window::new("Memory")
-                .default_size(vec2(300.0, 400.0))
-                .show(&ctx, |ui| {
-                    ctx.memory_ui(ui);
-                });
-        }
+        self.sync_mujoco_overlay_occlusions(&overlay_occlusions);
+        self.sync_mujoco_overlay_active();
     }
 }

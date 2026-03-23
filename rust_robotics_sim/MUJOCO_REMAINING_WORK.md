@@ -41,14 +41,18 @@ Key files:
 
 ### 1. Reduce web Rust/JS per-step shape further
 
-The web path no longer uses the old prepare/finish bridge, but it still marshals large generic JS objects across the boundary on every controller step.
+The web path now uses flatter typed-array payloads instead of the old generic JS objects, so the
+worst of the per-step marshaling overhead is already gone.
 
-This is acceptable for now, but the next architectural improvement is to make the data packets smaller and more explicit.
+What still remains:
+
+- remove full `qpos` / `qvel` from the hot path where possible
+- keep narrowing the bridge to only the data the FW really consumes
 
 Good direction:
 
-- fixed typed-array payloads instead of large generic JS objects
-- fewer allocations during per-step state marshaling
+- smaller typed-array payloads
+- fewer copies/allocation points during per-step state marshaling
 
 Primary files:
 
@@ -74,9 +78,10 @@ Primary files:
 
 ### 3. Add targeted golden tests for shared FW behavior
 
-The shared controller logic is now important enough that it should be protected from native/web drift.
+The shared controller logic now has initial focused unit coverage, but it still is not at a full
+"golden test" level yet.
 
-Recommended tests:
+Covered now:
 
 - Go2 observation shape and ordering
 - Go2 command-mode semantics
@@ -84,15 +89,21 @@ Recommended tests:
 - Duck observation shape
 - Duck output integration and position-target decode
 
-Best location:
+Still useful:
 
-- `../rust_robotics_algo/tests/`
+- end-to-end fixture-style golden tests for fixed policy/controller snapshots
+- more edge cases around malformed sensor payloads and partial DOF vectors
+
+Current location:
+
+- controller unit tests in `../rust_robotics_algo/src/robot_fw/go2.rs`
+- controller unit tests in `../rust_robotics_algo/src/robot_fw/duck.rs`
 
 ### 4. Clean remaining dead code and warnings
 
-There is still non-MuJoCo warning/dead-code noise, especially in the web MuJoCo backend and path-planning module.
+The default wasm-target warning noise is now much lower after the latest cleanup pass.
 
-This is not functionally urgent, but it is worth cleaning once the runtime shape stabilizes.
+What remains here is opportunistic cleanup, not a pressing architecture issue.
 
 Primary files:
 
@@ -135,10 +146,10 @@ Primary files:
 
 ### 7. Revisit deployment docs
 
-Now that the browser path is GitHub-Pages-compatible and uses the shared FW bridge, deployment docs should reflect:
+Now that the browser path is GitHub-Pages-compatible and uses the current FW-owned ONNX path, deployment docs should reflect:
 
 - non-threaded browser MuJoCo assumption
-- current ORT setup
+- current ORT setup and the direct browser-session interop detail
 - local server expectations
 - blog-site sync flow
 
@@ -151,8 +162,8 @@ Good locations:
 
 If only one thing is done next, it should be:
 
-1. add focused tests in `rust_robotics_algo` for the shared Go2 and Duck FW behavior
-2. reduce the web step payloads to fixed typed arrays
-3. clean the remaining web-backend warning noise once the interface settles
+1. remove any unnecessary `qpos` / `qvel` traffic from the web step bridge
+2. extend the new FW tests into more fixture-style golden coverage
+3. align deployment/architecture docs with the working runtime
 
 That would tighten the FW/runtime boundary further without changing the working runtime model again.

@@ -175,3 +175,87 @@ impl DuckController {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn raw_state() -> RawState {
+        let mut sensor_values = BTreeMap::new();
+        sensor_values.insert("imu_gyro".to_string(), vec![0.1, 0.2, 0.3]);
+        sensor_values.insert("imu_accel".to_string(), vec![0.4, 0.5, 0.6]);
+        sensor_values.insert("left_foot_pos".to_string(), vec![0.0, 0.0, 0.02]);
+        sensor_values.insert("right_foot_pos".to_string(), vec![0.0, 0.0, 0.05]);
+
+        RawState {
+            sim_time_s: 0.0,
+            base_pos: [1.0, 2.0, 0.4],
+            base_quat: [1.0, 0.0, 0.0, 0.0],
+            base_lin_vel: [0.0; 3],
+            base_ang_vel: [0.0; 3],
+            joint_pos: [0.0; 12],
+            joint_vel: [0.0; 12],
+            joint_pos_dyn: vec![0.2, -0.1, 0.05, -0.2],
+            joint_vel_dyn: vec![1.0, -1.0, 0.5, -0.5],
+            sensor_values,
+            qpos: vec![],
+            qvel: vec![],
+        }
+    }
+
+    #[test]
+    fn duck_observation_has_expected_shape_and_contacts() {
+        let controller = DuckController::new(vec![0.1, -0.2, 0.0, 0.3], 0.4, 8, 0.01, 2);
+        let command = Command {
+            vel_x: 0.5,
+            vel_y: -0.5,
+            yaw_rate: 0.0,
+            setpoint_world: None,
+        };
+
+        let obs = controller.build_observation(&raw_state(), &command);
+
+        assert_eq!(obs.values.len(), 41);
+        assert_eq!(&obs.values[0..3], &[0.1, 0.2, 0.3]);
+        assert!((obs.values[3] - 1.7).abs() < 1e-6);
+        assert_eq!(&obs.values[37..39], &[1.0, 0.0]);
+        assert_eq!(&obs.values[39..41], &[1.0, 0.0]);
+    }
+
+    #[test]
+    fn duck_integrate_and_decode_limit_target_velocity() {
+        let mut controller = DuckController::new(vec![0.0, 0.0, 0.0, 0.0], 0.4, 4, 0.01, 2);
+        let output = PolicyOutput {
+            actions: vec![1.0, -1.0, 0.5, -0.5],
+            recurrent: Vec::new(),
+        };
+
+        controller.integrate_policy_output(&output).unwrap();
+        let Actuation::JointPositionTargets(targets) = controller.decode_actuation() else {
+            panic!("expected joint position targets");
+        };
+
+        let delta = 5.24 * 0.01 * 2.0;
+        assert_eq!(controller.last_actions(), &[1.0, -1.0, 0.5, -0.5]);
+        assert!((targets[0] - delta).abs() < 1e-6);
+        assert!((targets[1] + delta).abs() < 1e-6);
+        assert!((targets[2] - delta).abs() < 1e-6);
+        assert!((targets[3] + delta).abs() < 1e-6);
+    }
+
+    #[test]
+    fn duck_phase_advances_after_policy_integration() {
+        let mut controller = DuckController::new(vec![0.0, 0.0], 0.4, 4, 0.01, 1);
+        let output = PolicyOutput {
+            actions: vec![0.2, -0.2],
+            recurrent: Vec::new(),
+        };
+
+        controller.integrate_policy_output(&output).unwrap();
+        let obs = controller.build_observation(&raw_state(), &Command::default());
+
+        assert!(obs.values[27].abs() < 1e-6);
+        assert!((obs.values[28] - 1.0).abs() < 1e-6);
+    }
+}

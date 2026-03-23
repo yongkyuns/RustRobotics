@@ -108,11 +108,13 @@ Expected native sanity checks:
 - Browser MuJoCo viewport is a separate JS-owned overlay canvas.
 - Browser MuJoCo and ORT are currently non-threaded / GitHub-Pages-compatible.
 - Web uses a shared FW bridge exported from the wasm bundle:
-  - `rust_robotics_fw_create_controller`
-  - `rust_robotics_fw_prepare_step`
-  - `rust_robotics_fw_finish_step`
-  - `rust_robotics_fw_destroy_controller`
+  - `rust_robotics_fw_create_runtime`
+  - `rust_robotics_fw_step_runtime`
+  - `rust_robotics_fw_reset_runtime`
+  - `rust_robotics_fw_destroy_runtime`
 - `docs/index.html` explicitly sets `globalThis.wasm_bindgen = wasm_bindgen` so `mujoco_runtime.js` can use the exported FW bridge.
+- Web FW stepping now uses flatter typed-array payloads for per-step state/command packets instead of large generic JS objects.
+- Browser ONNX ownership is in `rust_robotics_algo::robot_fw::onnx`, but the web implementation currently reaches `onnxruntime-web` through Rust-side JS interop rather than the higher-level `ort-web` session wrapper.
 
 Expected web sanity checks:
 
@@ -170,10 +172,6 @@ Important caveat:
 
 If continuing the MuJoCo architecture cleanup, the next highest-value task is:
 
-1. remove stale JS-side controller logic from [`rust_robotics_sim/web/mujoco_runtime.js`](./rust_robotics_sim/web/mujoco_runtime.js)
-2. leave JS responsible only for:
-   - MuJoCo state extraction
-   - ORT invocation
-   - overlay rendering and pointer handling
-   - shared FW bridge calls
-3. add focused tests in `rust_robotics_algo` for Go2 and Duck observation/actuation semantics
+1. keep shrinking the web per-step payload shape where possible, especially if full `qpos` / `qvel` can be avoided
+2. align native/web MuJoCo panel semantics and telemetry surface further
+3. extend the shared FW tests from focused unit coverage to more fixture-style golden coverage
