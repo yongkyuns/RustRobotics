@@ -1,14 +1,9 @@
 [package]
 name = "rust_robotics_sim"
-default-run = "rust_robotics_sim_bin"
 authors = ["Yongkyun Shin<yongkyuns@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
-
-[[bin]]
-name = "rust_robotics_sim_bin"
-path = "src/main.rs"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

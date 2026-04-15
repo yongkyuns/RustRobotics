@@ -100,7 +100,7 @@ Expected native sanity checks:
 
 - `cargo check -p rust_robotics_algo`
 - `cargo check -p rust_robotics_sim`
-- `cargo run -p rust_robotics_sim --bin rust_robotics_sim_bin --release`
+- `cargo run -p rust_robotics_sim --release`
 
 ## Web Runtime Notes
 

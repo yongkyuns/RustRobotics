@@ -168,7 +168,7 @@ Typical local checks:
 ```bash
 cargo check -p rust_robotics_algo
 MUJOCO_HOME=/path/to/mujoco cargo check -p rust_robotics_sim
-MUJOCO_HOME=/path/to/mujoco cargo run -p rust_robotics_sim --bin rust_robotics_sim_bin --release
+MUJOCO_HOME=/path/to/mujoco cargo run -p rust_robotics_sim --release
 ```
 
 ### Web
