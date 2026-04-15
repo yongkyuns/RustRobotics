@@ -67,8 +67,11 @@ jobs:
         cp -R \
           "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework/Headers/." \
           "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/include/mujoco/"
-        cp \
-          "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework/Versions/Current/libmujoco.${MUJOCO_VERSION}.dylib" \
+        cp -R \
+          "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework" \
+          "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/"
+        ln -sf \
+          "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/mujoco.framework/Versions/Current/libmujoco.${MUJOCO_VERSION}.dylib" \
           "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/libmujoco.dylib"
         hdiutil detach "$RUNNER_TEMP/mujoco-mount"
         echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
@@ -109,7 +112,7 @@ jobs:
         targets: wasm32-unknown-unknown
 
     - name: Install wasm-bindgen-cli
-      run: cargo install wasm-bindgen-cli --version 0.2.108 --locked
+      run: cargo install wasm-bindgen-cli --version 0.2.118 --locked
 
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
