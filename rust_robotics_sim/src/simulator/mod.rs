@@ -3,12 +3,13 @@ pub mod localization;
 pub mod mujoco;
 pub mod path_planning;
 pub mod pendulum;
+mod ppo_trainer;
 pub mod slam;
 
 use localization::ParticleFilter;
 use mujoco::MujocoPanel;
 use path_planning::{EnvironmentMode, PathPlanning};
-use pendulum::{InvertedPendulum, NoiseConfig as PendulumNoiseConfig};
+use pendulum::{InvertedPendulum, NoiseConfig as PendulumNoiseConfig, PENDULUM_FIXED_DT};
 use slam::SlamDemo;
 
 use egui::{epaint::Hsva, *};
@@ -865,7 +866,7 @@ impl Simulator {
             SimMode::InvertedPendulum => {
                 if cards_vertical {
                     ui.vertical(|ui| {
-                        self.pendulums.retain_mut(|sim| sim.options(ui));
+                        self.pendulums.retain_mut(|sim| sim.options_with_policy(ui));
                     });
                 } else {
                     egui::ScrollArea::horizontal()
@@ -874,7 +875,7 @@ impl Simulator {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                self.pendulums.retain_mut(|sim| sim.options(ui));
+                                self.pendulums.retain_mut(|sim| sim.options_with_policy(ui));
                             });
                         });
                 }
@@ -1144,10 +1145,13 @@ impl Simulator {
             .min(0.1);
 
         if !self.paused {
-            let dt = 0.01;
+            let dt = PENDULUM_FIXED_DT;
             match self.mode {
                 SimMode::InvertedPendulum => {
                     let noise = self.pendulum_noise_config();
+                    self.pendulums
+                        .iter_mut()
+                        .for_each(InvertedPendulum::tick_training);
                     self.step_fixed_dt(elapsed, dt, |sim, dt| {
                         sim.pendulums
                             .iter_mut()
@@ -1176,6 +1180,11 @@ impl Simulator {
                     });
                 }
             }
+        }
+        if self.mode == SimMode::InvertedPendulum && self.paused {
+            self.pendulums
+                .iter_mut()
+                .for_each(InvertedPendulum::tick_training);
         }
     }
 
@@ -1618,7 +1627,6 @@ impl Simulator {
             self.shared_help_intro_completed = true;
         }
         self.sync_mujoco_overlay_active();
-
 
         // Optional graph window
         if self.show_graph {

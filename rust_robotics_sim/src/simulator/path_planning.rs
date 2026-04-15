@@ -35,7 +35,6 @@ impl Algorithm {
             Algorithm::Rrt => "RRT",
         }
     }
-
 }
 
 /// State of the path planning process
@@ -377,13 +376,13 @@ impl PathPlanning {
 
     /// Copy state from another planner (Used for persistent state across hot reloads or resets)
     pub fn copy_state_from(&mut self, other: &PathPlanning) {
-        let continuous_obstacles_changed =
-            self.continuous_obstacles.len() != other.continuous_obstacles.len()
-                || self
-                    .continuous_obstacles
-                    .iter()
-                    .zip(other.continuous_obstacles.iter())
-                    .any(|(a, b)| a.x != b.x || a.y != b.y || a.radius != b.radius);
+        let continuous_obstacles_changed = self.continuous_obstacles.len()
+            != other.continuous_obstacles.len()
+            || self
+                .continuous_obstacles
+                .iter()
+                .zip(other.continuous_obstacles.iter())
+                .any(|(a, b)| a.x != b.x || a.y != b.y || a.radius != b.radius);
         let shared_scene_changed = self.mode != other.mode
             || self.grid_width != other.grid_width
             || self.grid_height != other.grid_height

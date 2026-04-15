@@ -1,0 +1,12 @@
+Thu Mar 19 15:39:36 2026
+ERROR: OpenGL ARB_framebuffer_object required
+
+Thu Mar 19 15:49:48 2026
+ERROR: OpenGL ARB_framebuffer_object required
+
+Thu Mar 19 15:53:44 2026
+ERROR: OpenGL ARB_framebuffer_object required
+
+Thu Mar 19 15:54:21 2026
+ERROR: OpenGL ARB_framebuffer_object required
+

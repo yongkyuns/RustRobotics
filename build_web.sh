@@ -85,6 +85,10 @@ cp "rust_robotics_sim/web/ort_web/_telemetry.js" \
   "docs/_telemetry.js"
 cp "rust_robotics_sim/web/mujoco_runtime.js" \
   "docs/mujoco_runtime.js"
+cp "rust_robotics_sim/web/ppo_trainer_bridge.js" \
+  "docs/ppo_trainer_bridge.js"
+cp "rust_robotics_sim/web/ppo_trainer_worker.js" \
+  "docs/ppo_trainer_worker.js"
 
 echo "Building web bundle…"
 BUILD=release

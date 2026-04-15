@@ -3,13 +3,24 @@ use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 #[cfg(feature = "web_wgpu_viewport")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "web_wgpu_viewport")]
+use super::render_scene::{
+    append_grid_lines as append_shared_grid_lines, append_primitive_geom,
+    display_geom_color as shared_display_geom_color, geom_model_matrix as shared_geom_model_matrix,
+    GlVertex, SharedGeomSnapshot, GEOM_MESH,
+};
+use super::shared_layout::show_stacked_layout;
+use super::shared_panel::show_shared_panel;
+#[cfg(feature = "web_wgpu_viewport")]
+use super::viewport_interaction::gather_viewport_interaction;
+use crate::data::{IntoValues, TimeTable};
 use eframe::emath::GuiRounding;
+#[cfg(feature = "web_wgpu_viewport")]
+use eframe::wgpu;
 use egui::{vec2, Align2, Color32, FontId, Rect, Sense, Ui};
 use egui_plot::{Line, PlotUi};
 #[cfg(feature = "web_wgpu_viewport")]
 use egui_wgpu;
-#[cfg(feature = "web_wgpu_viewport")]
-use eframe::wgpu;
 use js_sys::{ArrayBuffer, Function, Promise, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::{prelude::*, JsCast};
@@ -18,18 +29,6 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_time::Instant;
 #[cfg(feature = "web_wgpu_viewport")]
 use wgpu::util::DeviceExt as _;
-use crate::data::{IntoValues, TimeTable};
-use super::shared_layout::show_stacked_layout;
-#[cfg(feature = "web_wgpu_viewport")]
-use super::render_scene::{
-    append_grid_lines as append_shared_grid_lines, append_primitive_geom,
-    geom_model_matrix as shared_geom_model_matrix,
-    display_geom_color as shared_display_geom_color,
-    GlVertex, SharedGeomSnapshot, GEOM_MESH,
-};
-use super::shared_panel::show_shared_panel;
-#[cfg(feature = "web_wgpu_viewport")]
-use super::viewport_interaction::gather_viewport_interaction;
 
 const GO2_ASSET_FILES: &[&str] = &[
     "scene.xml",
@@ -611,7 +610,10 @@ impl WasmMujocoBackend {
             return;
         }
 
-        let queued = self.pending_mujoco_steps.borrow().saturating_add(sim_speed.max(1));
+        let queued = self
+            .pending_mujoco_steps
+            .borrow()
+            .saturating_add(sim_speed.max(1));
         *self.pending_mujoco_steps.borrow_mut() = queued.min(256);
         self.ensure_mujoco_step_started();
     }
@@ -672,9 +674,7 @@ impl WasmMujocoBackend {
                         BrowserAssetState::Ready(bundle) => {
                             BrowserAssetUiState::Ready(Rc::clone(bundle))
                         }
-                        BrowserAssetState::Error(err) => {
-                            BrowserAssetUiState::Error(err.clone())
-                        }
+                        BrowserAssetState::Error(err) => BrowserAssetUiState::Error(err.clone()),
                     }
                 };
 
@@ -1153,10 +1153,9 @@ impl WasmMujocoBackend {
             scene: self.wgpu_scene.clone(),
             target_format: render_state.target_format,
         };
-        ui.painter()
-            .add(egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
-                rect, callback,
-            )));
+        ui.painter().add(egui::Shape::Callback(
+            egui_wgpu::Callback::new_paint_callback(rect, callback),
+        ));
 
         let now = Instant::now();
         if let Some(last_frame_at) = self.last_render_frame_at {
@@ -1320,9 +1319,10 @@ impl WasmMujocoBackend {
 
     #[cfg(feature = "web_wgpu_viewport")]
     fn update_camera(&mut self, ui: &Ui, response: &egui::Response, report: &BrowserMujocoReport) {
-        let interaction = gather_viewport_interaction(report.use_setpoint_ball, ui, response, |pointer| {
-            self.camera.intersect_plane_z(response.rect, pointer, 0.05)
-        });
+        let interaction =
+            gather_viewport_interaction(report.use_setpoint_ball, ui, response, |pointer| {
+                self.camera.intersect_plane_z(response.rect, pointer, 0.05)
+            });
 
         if interaction.reset_view {
             self.camera = BrowserOrbitCamera::default();
@@ -1855,7 +1855,10 @@ impl BrowserOrbitCamera {
         let Some((near, far)) = self.fitted_depth_range_points(points) else {
             return self.view_projection_matrix(aspect);
         };
-        mul_mat4(self.projection_matrix_with_depth_range(aspect, near, far), self.view_matrix())
+        mul_mat4(
+            self.projection_matrix_with_depth_range(aspect, near, far),
+            self.view_matrix(),
+        )
     }
 
     fn eye(&self) -> [f32; 3] {
@@ -2116,7 +2119,10 @@ impl BrowserWgpuRenderer {
                     let end = range.end * std::mem::size_of::<MeshInstance>();
                     pass.set_vertex_buffer(0, mesh_asset.vertex_buffer.slice(..));
                     pass.set_vertex_buffer(1, mesh_instance_buffer.slice(start as u64..end as u64));
-                    pass.draw(0..mesh_asset.vertex_count, 0..(range.end - range.start) as u32);
+                    pass.draw(
+                        0..mesh_asset.vertex_count,
+                        0..(range.end - range.start) as u32,
+                    );
                 }
             }
         }
@@ -2499,7 +2505,8 @@ impl BrowserWgpuRenderer {
                 mapped_at_creation: false,
             }));
         }
-        if self.mesh_instance_buffer.is_none() || mesh_instance_bytes > self.mesh_instance_capacity {
+        if self.mesh_instance_buffer.is_none() || mesh_instance_bytes > self.mesh_instance_capacity
+        {
             self.mesh_instance_capacity = mesh_instance_bytes.max(1024).next_power_of_two();
             self.mesh_instance_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("browser_mujoco_wgpu_mesh_instance_buffer"),
@@ -2526,11 +2533,13 @@ impl BrowserWgpuRenderer {
                 self.mesh_assets.insert(
                     mesh_id,
                     MeshAssetGpu {
-                        vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("browser_mujoco_wgpu_mesh_asset_buffer"),
-                            contents: slice_as_u8(&asset.vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        }),
+                        vertex_buffer: device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("browser_mujoco_wgpu_mesh_asset_buffer"),
+                                contents: slice_as_u8(&asset.vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            },
+                        ),
                         vertex_count: asset.vertices.len() as u32,
                     },
                 );

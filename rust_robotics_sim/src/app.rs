@@ -45,8 +45,8 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ctx, |ui| {
-            self.sim.ui(ui, Some(frame));
-        });
+                self.sim.ui(ui, Some(frame));
+            });
 
         egui::Area::new("perf_overlay".into())
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
@@ -54,10 +54,7 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgba_unmultiplied(21, 27, 36, 224))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        egui::Color32::from_rgb(66, 80, 96),
-                    ))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(66, 80, 96)))
                     .corner_radius(10.0)
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {

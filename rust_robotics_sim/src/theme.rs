@@ -14,7 +14,7 @@ fn build_style() -> Style {
     style.text_styles = [
         (
             TextStyle::Heading,
-            FontId::new(26.0, FontFamily::Proportional),
+            FontId::new(22.0, FontFamily::Proportional),
         ),
         (
             TextStyle::Name("Heading2".into()),
@@ -29,14 +29,17 @@ fn build_style() -> Style {
             TextStyle::Button,
             FontId::new(15.0, FontFamily::Proportional),
         ),
-        (TextStyle::Small, FontId::new(13.0, FontFamily::Proportional)),
+        (
+            TextStyle::Small,
+            FontId::new(13.0, FontFamily::Proportional),
+        ),
     ]
     .into();
 
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(12.0, 8.0);
     style.spacing.menu_margin = egui::Margin::same(10);
-    style.spacing.window_margin = egui::Margin::same(14);
+    style.spacing.window_margin = egui::Margin::same(8);
     style.spacing.indent = 18.0;
     style.spacing.combo_width = 148.0;
     style.spacing.slider_width = 180.0;

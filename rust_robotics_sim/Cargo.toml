@@ -19,6 +19,7 @@ web_wgpu_viewport = []
 
 [dependencies]
 rust_robotics_algo = {version="0.1", path="../rust_robotics_algo"}
+rust_robotics_train = {version="0.1", path="../rust_robotics_train"}
 rand = "0.8"
 chrono = { version = "0.4", features = ["js-sys", "wasmbind"] }
 egui = "0.32.3"

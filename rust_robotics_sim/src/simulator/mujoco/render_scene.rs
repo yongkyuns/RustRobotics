@@ -77,10 +77,7 @@ pub(super) fn append_world_sphere(
     append_sphere_geom(triangles, &geom, 10, 16, false);
 }
 
-pub(super) fn display_geom_color(
-    geom: &SharedGeomSnapshot,
-    diagnostic_colors: bool,
-) -> [f32; 4] {
+pub(super) fn display_geom_color(geom: &SharedGeomSnapshot, diagnostic_colors: bool) -> [f32; 4] {
     if diagnostic_colors {
         diagnostic_geom_color(geom)
     } else {
@@ -93,10 +90,7 @@ pub(super) fn display_geom_color(
     }
 }
 
-pub(super) fn transform_geom_point(
-    geom: &SharedGeomSnapshot,
-    local: [f32; 3],
-) -> [f32; 3] {
+pub(super) fn transform_geom_point(geom: &SharedGeomSnapshot, local: [f32; 3]) -> [f32; 3] {
     [
         geom.pos[0] + geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],
         geom.pos[1] + geom.mat[3] * local[0] + geom.mat[4] * local[1] + geom.mat[5] * local[2],
@@ -104,10 +98,7 @@ pub(super) fn transform_geom_point(
     ]
 }
 
-pub(super) fn transform_geom_vector(
-    geom: &SharedGeomSnapshot,
-    local: [f32; 3],
-) -> [f32; 3] {
+pub(super) fn transform_geom_vector(geom: &SharedGeomSnapshot, local: [f32; 3]) -> [f32; 3] {
     normalize3([
         geom.mat[0] * local[0] + geom.mat[1] * local[1] + geom.mat[2] * local[2],
         geom.mat[3] * local[0] + geom.mat[4] * local[1] + geom.mat[5] * local[2],
@@ -148,7 +139,11 @@ fn append_line_geom(lines: &mut Vec<GlVertex>, geom: &SharedGeomSnapshot, diagno
     push_line(lines, a, b, display_geom_color(geom, diagnostic_colors));
 }
 
-fn append_box_geom(triangles: &mut Vec<GlVertex>, geom: &SharedGeomSnapshot, diagnostic_colors: bool) {
+fn append_box_geom(
+    triangles: &mut Vec<GlVertex>,
+    geom: &SharedGeomSnapshot,
+    diagnostic_colors: bool,
+) {
     let axes = geom_axes(geom);
     let sx = geom.size[0];
     let sy = geom.size[1];
@@ -339,7 +334,10 @@ fn append_sphere_geom(
                 transform_geom_point(geom, p00),
                 transform_geom_point(geom, p01),
                 transform_geom_point(geom, p11),
-                normalize3(transform_geom_vector(geom, normalize3(add3(add3(p00, p01), p11)))),
+                normalize3(transform_geom_vector(
+                    geom,
+                    normalize3(add3(add3(p00, p01), p11)),
+                )),
                 color,
             );
             push_triangle(
@@ -347,7 +345,10 @@ fn append_sphere_geom(
                 transform_geom_point(geom, p00),
                 transform_geom_point(geom, p11),
                 transform_geom_point(geom, p10),
-                normalize3(transform_geom_vector(geom, normalize3(add3(add3(p00, p11), p10)))),
+                normalize3(transform_geom_vector(
+                    geom,
+                    normalize3(add3(add3(p00, p11), p10)),
+                )),
                 color,
             );
         }

@@ -95,9 +95,11 @@ impl DuckController {
             ));
         }
 
-        self.last_last_last_actions.clone_from(&self.last_last_actions);
+        self.last_last_last_actions
+            .clone_from(&self.last_last_actions);
         self.last_last_actions.clone_from(&self.last_actions);
-        self.last_actions.copy_from_slice(&output.actions[..self.default_joint_pos.len()]);
+        self.last_actions
+            .copy_from_slice(&output.actions[..self.default_joint_pos.len()]);
         self.update_phase();
         Ok(())
     }

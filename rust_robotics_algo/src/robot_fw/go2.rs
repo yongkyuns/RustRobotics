@@ -132,11 +132,14 @@ impl Go2Controller {
             base_pos[1] + command.vel_y * (kd / kp),
             0.0,
         ]);
-        let mut setpoint_body = rotate_vector_by_inverse_quaternion(raw.base_quat, [
-            setpoint_world[0] - base_pos[0],
-            setpoint_world[1] - base_pos[1],
-            setpoint_world[2] - base_pos[2],
-        ]);
+        let mut setpoint_body = rotate_vector_by_inverse_quaternion(
+            raw.base_quat,
+            [
+                setpoint_world[0] - base_pos[0],
+                setpoint_world[1] - base_pos[1],
+                setpoint_world[2] - base_pos[2],
+            ],
+        );
         let norm = (setpoint_body[0] * setpoint_body[0]
             + setpoint_body[1] * setpoint_body[1]
             + setpoint_body[2] * setpoint_body[2])

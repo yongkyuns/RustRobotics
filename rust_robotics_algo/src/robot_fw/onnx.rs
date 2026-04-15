@@ -3,11 +3,11 @@ use super::duck::DuckController;
 #[cfg(target_arch = "wasm32")]
 use super::go2::{Go2CommandMode, Go2Controller};
 #[cfg(target_arch = "wasm32")]
+use super::PolicyOutput;
+#[cfg(target_arch = "wasm32")]
 use super::{Actuation, Command, RawState};
 #[cfg(not(target_arch = "wasm32"))]
 use super::{InferenceBackend, InferenceInput, PolicyOutput};
-#[cfg(target_arch = "wasm32")]
-use super::PolicyOutput;
 
 #[derive(Clone, Debug)]
 pub struct OrtModelMetadata {
@@ -92,12 +92,22 @@ mod native {
                 let obs_input_name = input_name_map
                     .get("obs")
                     .cloned()
-                    .or_else(|| session.inputs().first().map(|input| input.name().to_string()))
+                    .or_else(|| {
+                        session
+                            .inputs()
+                            .first()
+                            .map(|input| input.name().to_string())
+                    })
                     .ok_or_else(|| "ONNX metadata missing input mapping for obs".to_string())?;
                 let action_output_name = output_name_map
                     .get("continuous_actions")
                     .cloned()
-                    .or_else(|| session.outputs().first().map(|output| output.name().to_string()))
+                    .or_else(|| {
+                        session
+                            .outputs()
+                            .first()
+                            .map(|output| output.name().to_string())
+                    })
                     .ok_or_else(|| {
                         "ONNX metadata missing output mapping for continuous_actions".to_string()
                     })?;
@@ -117,7 +127,9 @@ mod native {
                 let adapt_hx_input_name = input_name_map
                     .iter()
                     .find_map(|(semantic_key, input_name)| {
-                        semantic_key.contains("adapt_hx").then(|| input_name.clone())
+                        semantic_key
+                            .contains("adapt_hx")
+                            .then(|| input_name.clone())
                     })
                     .ok_or_else(|| {
                         "ONNX metadata missing input mapping for adapt_hx".to_string()
@@ -220,7 +232,9 @@ mod native {
                 action_output_name,
             } = &self.kind
             else {
-                return Err("attempted to run Duck policy through non-Duck ONNX session".to_string());
+                return Err(
+                    "attempted to run Duck policy through non-Duck ONNX session".to_string()
+                );
             };
 
             let observation = Tensor::from_array((
@@ -290,13 +304,16 @@ mod native {
 
                 let api_base = unsafe { get_api_base() };
                 if api_base.is_null() {
-                    return Err(format!("OrtGetApiBase returned null for {}", ort_lib.display()));
+                    return Err(format!(
+                        "OrtGetApiBase returned null for {}",
+                        ort_lib.display()
+                    ));
                 }
 
                 let api_ptr = unsafe { ((*api_base).GetApi)(ort::sys::ORT_API_VERSION) };
                 if api_ptr.is_null() {
-                    let version =
-                        unsafe { CStr::from_ptr(((*api_base).GetVersionString)()) }.to_string_lossy();
+                    let version = unsafe { CStr::from_ptr(((*api_base).GetVersionString)()) }
+                        .to_string_lossy();
                     return Err(format!(
                         "OrtGetApi({}) returned null for {} (runtime version {})",
                         ort::sys::ORT_API_VERSION,
@@ -482,8 +499,14 @@ mod web {
             }
             sensor_values.insert("imu_gyro".to_string(), sensor_values_flat[0..3].to_vec());
             sensor_values.insert("imu_accel".to_string(), sensor_values_flat[3..6].to_vec());
-            sensor_values.insert("left_foot_pos".to_string(), sensor_values_flat[6..9].to_vec());
-            sensor_values.insert("right_foot_pos".to_string(), sensor_values_flat[9..12].to_vec());
+            sensor_values.insert(
+                "left_foot_pos".to_string(),
+                sensor_values_flat[6..9].to_vec(),
+            );
+            sensor_values.insert(
+                "right_foot_pos".to_string(),
+                sensor_values_flat[9..12].to_vec(),
+            );
         }
         Ok(RawState {
             sim_time_s: core[0],
@@ -560,13 +583,13 @@ mod web {
         let raw = Reflect::get(value, &JsValue::from_str(field_name))
             .map_err(|err| js_error(format!("failed to access {field_name}: {err:?}")))?;
         let array = Array::from(&raw);
-        Ok(array
-            .iter()
-            .filter_map(|value| value.as_string())
-            .collect())
+        Ok(array.iter().filter_map(|value| value.as_string()).collect())
     }
 
-    fn build_name_map(semantic_keys: &[String], actual_names: &[String]) -> BTreeMap<String, String> {
+    fn build_name_map(
+        semantic_keys: &[String],
+        actual_names: &[String],
+    ) -> BTreeMap<String, String> {
         semantic_keys
             .iter()
             .zip(actual_names.iter())
@@ -612,7 +635,9 @@ mod web {
             let adapt_hx_input_name = input_name_map
                 .iter()
                 .find_map(|(semantic_key, actual_name)| {
-                    semantic_key.contains("adapt_hx").then(|| actual_name.clone())
+                    semantic_key
+                        .contains("adapt_hx")
+                        .then(|| actual_name.clone())
                 })
                 .ok_or_else(|| js_error("ONNX input mapping is missing adapt_hx"))?;
             let command_input_name = input_name_map
@@ -666,10 +691,18 @@ mod web {
             .map_err(|err| js_error(format!("failed to access ort.env: {err:?}")))?;
         let wasm = Reflect::get(&env, &JsValue::from_str("wasm"))
             .map_err(|err| js_error(format!("failed to access ort.env.wasm: {err:?}")))?;
-        Reflect::set(&wasm, &JsValue::from_str("wasmPaths"), &JsValue::from_str(base_path))
-            .map_err(|err| js_error(format!("failed to set ort.env.wasm.wasmPaths: {err:?}")))?;
-        Reflect::set(&wasm, &JsValue::from_str("numThreads"), &JsValue::from_f64(1.0))
-            .map_err(|err| js_error(format!("failed to set ort.env.wasm.numThreads: {err:?}")))?;
+        Reflect::set(
+            &wasm,
+            &JsValue::from_str("wasmPaths"),
+            &JsValue::from_str(base_path),
+        )
+        .map_err(|err| js_error(format!("failed to set ort.env.wasm.wasmPaths: {err:?}")))?;
+        Reflect::set(
+            &wasm,
+            &JsValue::from_str("numThreads"),
+            &JsValue::from_f64(1.0),
+        )
+        .map_err(|err| js_error(format!("failed to set ort.env.wasm.numThreads: {err:?}")))?;
         Reflect::set(&wasm, &JsValue::from_str("proxy"), &JsValue::FALSE)
             .map_err(|err| js_error(format!("failed to set ort.env.wasm.proxy: {err:?}")))?;
         Reflect::set(&wasm, &JsValue::from_str("simd"), &JsValue::TRUE)
@@ -680,8 +713,9 @@ mod web {
     fn extract_output_f32(outputs: &JsValue, name: &str) -> Result<Vec<f32>, JsValue> {
         let output = Reflect::get(outputs, &JsValue::from_str(name))
             .map_err(|err| js_error(format!("missing ONNX output tensor {name}: {err:?}")))?;
-        let data = Reflect::get(&output, &JsValue::from_str("data"))
-            .map_err(|err| js_error(format!("failed to access ONNX output data {name}: {err:?}")))?;
+        let data = Reflect::get(&output, &JsValue::from_str("data")).map_err(|err| {
+            js_error(format!("failed to access ONNX output data {name}: {err:?}"))
+        })?;
         Ok(Float32Array::new(&data).to_vec())
     }
 
@@ -845,8 +879,10 @@ mod web {
         let ort = ort_namespace()?;
         let inference_session = Reflect::get(&ort, &JsValue::from_str("InferenceSession"))
             .map_err(|err| js_error(format!("failed to access ort.InferenceSession: {err:?}")))?;
-        let create = Reflect::get(&inference_session, &JsValue::from_str("create"))
-            .map_err(|err| js_error(format!("failed to access InferenceSession.create: {err:?}")))?;
+        let create =
+            Reflect::get(&inference_session, &JsValue::from_str("create")).map_err(|err| {
+                js_error(format!("failed to access InferenceSession.create: {err:?}"))
+            })?;
         let create = create
             .dyn_into::<Function>()
             .map_err(|_| js_error("InferenceSession.create is not callable"))?;
@@ -987,7 +1023,8 @@ mod web {
                     observation: controller.build_observation(&raw_state, &command).values,
                 },
             };
-            let policy_output = run_session(&mut runtime.session, &runtime.kind, prepared_input).await?;
+            let policy_output =
+                run_session(&mut runtime.session, &runtime.kind, prepared_input).await?;
             let output = match &mut runtime.controller {
                 WebRobotController::Go2(controller) => {
                     controller

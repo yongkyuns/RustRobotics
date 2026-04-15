@@ -1,10 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use egui::emath::GuiRounding;
+use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, Ui};
 use egui_plot::{Line, PlotUi};
-use egui::{
-    pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Shape,
-    Stroke, Ui,
-};
 #[cfg(not(target_arch = "wasm32"))]
 use std::cmp::Ordering;
 #[cfg(not(target_arch = "wasm32"))]
@@ -33,19 +30,19 @@ use std::{
 
 #[cfg(not(target_arch = "wasm32"))]
 mod sim;
-#[cfg(not(target_arch = "wasm32"))]
-use sim::MujocoSim;
-use crate::data::{IntoValues, TimeTable};
 use super::render_scene::{
     append_grid_lines as append_shared_grid_lines, append_primitive_geom,
     append_world_sphere as append_shared_world_sphere,
-    display_geom_color as shared_display_geom_color,
-    geom_model_matrix as shared_geom_model_matrix, SharedGeomSnapshot, GEOM_BOX, GEOM_CAPSULE,
-    GEOM_CYLINDER, GEOM_LINE, GEOM_MESH, GEOM_PLANE, GEOM_SPHERE,
+    display_geom_color as shared_display_geom_color, geom_model_matrix as shared_geom_model_matrix,
+    SharedGeomSnapshot, GEOM_BOX, GEOM_CAPSULE, GEOM_CYLINDER, GEOM_LINE, GEOM_MESH, GEOM_PLANE,
+    GEOM_SPHERE,
 };
 use super::shared_layout::show_stacked_layout;
 use super::shared_panel::show_shared_panel;
 use super::viewport_interaction::gather_viewport_interaction;
+use crate::data::{IntoValues, TimeTable};
+#[cfg(not(target_arch = "wasm32"))]
+use sim::MujocoSim;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(
@@ -197,10 +194,8 @@ impl NativeMujocoBackend {
                 )
             };
             let (time_s, base_height, command_x, action_0) = plot_sample;
-            self.plot_history.add(
-                time_s,
-                vec![base_height, command_x, action_0],
-            );
+            self.plot_history
+                .add(time_s, vec![base_height, command_x, action_0]);
             self.status = format!(
                 "MuJoCo running from {}",
                 Path::new(&self.scene_path)
@@ -324,9 +319,10 @@ impl NativeMujocoBackend {
         desired.x = desired.x.max(320.0);
         desired.y = desired.y.max(240.0);
         if let Some(render_state) = frame.and_then(|frame| frame.wgpu_render_state()) {
-            match self.ensure_runtime().and_then(|runtime| {
-                runtime.render_wgpu(ui, render_state, desired, false, None)
-            }) {
+            match self
+                .ensure_runtime()
+                .and_then(|runtime| runtime.render_wgpu(ui, render_state, desired, false, None))
+            {
                 Ok(()) => {
                     self.render_error = None;
                     return;
@@ -334,7 +330,8 @@ impl NativeMujocoBackend {
                 Err(err) => {
                     debug_log(&format!("ui_native: wgpu render error: {err}"));
                     self.render_error = Some(err.clone());
-                    self.status = "MuJoCo running with native software fallback renderer".to_string();
+                    self.status =
+                        "MuJoCo running with native software fallback renderer".to_string();
                     if let Ok(runtime) = self.ensure_runtime() {
                         runtime.render_software(ui, desired);
                     }
@@ -536,7 +533,6 @@ impl NativeRobotController {
                 Self::Go2(robot) if robot.command_mode() == Go2CommandMode::Impedance
             )
     }
-
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -728,16 +724,16 @@ impl MujocoRuntime {
             let policy_started = Instant::now();
             let raw = self.sim.read_raw_state();
             let actuation = match &mut self.robot {
-                NativeRobotController::Go2(robot) => robot.step(&raw, &self.command, &mut self.policy)?,
+                NativeRobotController::Go2(robot) => {
+                    robot.step(&raw, &self.command, &mut self.policy)?
+                }
                 NativeRobotController::Duck(robot) => {
                     robot.step(&raw, &self.command, &mut self.policy)?
                 }
             };
             self.last_action_preview = match &actuation {
                 Actuation::JointTorques(values) => values.iter().take(8).copied().collect(),
-                Actuation::JointPositionTargets(values) => {
-                    values.iter().take(8).copied().collect()
-                }
+                Actuation::JointPositionTargets(values) => values.iter().take(8).copied().collect(),
             };
             self.diagnostics.last_policy_ms = policy_started.elapsed().as_secs_f32() * 1000.0;
 
@@ -750,7 +746,6 @@ impl MujocoRuntime {
         self.diagnostics.last_step_ms = started.elapsed().as_secs_f32() * 1000.0;
         Ok(())
     }
-
 
     fn render_software(&mut self, ui: &mut Ui, desired_size: egui::Vec2) {
         self.render_software_2d(ui, desired_size);
@@ -796,10 +791,9 @@ impl MujocoRuntime {
             scene: self.wgpu_scene.clone(),
             target_format: render_state.target_format,
         };
-        ui.painter()
-            .add(egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(
-                rect, callback,
-            )));
+        ui.painter().add(egui::Shape::Callback(
+            egui_wgpu::Callback::new_paint_callback(rect, callback),
+        ));
 
         let overlay = self.software_overlay_text();
         ui.painter().text(
@@ -863,13 +857,17 @@ impl MujocoRuntime {
         self.diagnostics.frame_count += 1;
     }
 
-    fn draw_command_setpoint(&self, painter: &Painter, rect: Rect, camera: Option<&SoftwareCamera>) {
+    fn draw_command_setpoint(
+        &self,
+        painter: &Painter,
+        rect: Rect,
+        camera: Option<&SoftwareCamera>,
+    ) {
         let Some(setpoint) = self.command.setpoint_world else {
             return;
         };
         if let Some(camera) = camera {
-            if let Some((setpoint_pos, _)) = camera.project(rect, setpoint)
-            {
+            if let Some((setpoint_pos, _)) = camera.project(rect, setpoint) {
                 let radius = camera.project_radius(rect, setpoint, 0.05).clamp(6.0, 18.0);
                 painter.circle_filled(setpoint_pos, radius, Color32::from_rgb(220, 70, 70));
                 painter.circle_stroke(
@@ -896,17 +894,14 @@ impl MujocoRuntime {
     }
 
     fn update_software_camera(&mut self, ui: &Ui, response: &egui::Response) {
-        let software_camera = SoftwareCamera::from_gl(&self.scene.camera[0], response.rect.aspect_ratio());
-        let interaction = gather_viewport_interaction(
-            self.robot.uses_setpoint_ball(),
-            ui,
-            response,
-            |pointer| {
+        let software_camera =
+            SoftwareCamera::from_gl(&self.scene.camera[0], response.rect.aspect_ratio());
+        let interaction =
+            gather_viewport_interaction(self.robot.uses_setpoint_ball(), ui, response, |pointer| {
                 software_camera
                     .as_ref()
                     .and_then(|camera| camera.intersect_plane_z(response.rect, pointer, 0.05))
-            },
-        );
+            });
 
         if interaction.reset_view {
             self.reset_camera();
@@ -947,7 +942,10 @@ impl MujocoRuntime {
                             .unwrap_or(0)
                     })
                     .sum::<usize>();
-                ((scene.triangles.len() / 3) + mesh_tris, scene.lines.len() / 2)
+                (
+                    (scene.triangles.len() / 3) + mesh_tris,
+                    scene.lines.len() / 2,
+                )
             })
             .unwrap_or((0, 0));
 
@@ -1605,7 +1603,8 @@ impl WgpuSceneRenderer {
                 pass.set_pipeline(scene_pipeline);
                 pass.set_vertex_buffer(
                     0,
-                    triangle_buffer.slice(..(std::mem::size_of_val(scene.triangles.as_slice()) as u64)),
+                    triangle_buffer
+                        .slice(..(std::mem::size_of_val(scene.triangles.as_slice()) as u64)),
                 );
                 pass.draw(0..scene.triangles.len() as u32, 0..1);
             }
@@ -1629,7 +1628,10 @@ impl WgpuSceneRenderer {
                     let end = range.end * std::mem::size_of::<MeshInstance>();
                     pass.set_vertex_buffer(0, mesh_asset.vertex_buffer.slice(..));
                     pass.set_vertex_buffer(1, mesh_instance_buffer.slice(start as u64..end as u64));
-                    pass.draw(0..mesh_asset.vertex_count, 0..(range.end - range.start) as u32);
+                    pass.draw(
+                        0..mesh_asset.vertex_count,
+                        0..(range.end - range.start) as u32,
+                    );
                 }
             }
         }
@@ -2012,7 +2014,8 @@ impl WgpuSceneRenderer {
                 mapped_at_creation: false,
             }));
         }
-        if self.mesh_instance_buffer.is_none() || mesh_instance_bytes > self.mesh_instance_capacity {
+        if self.mesh_instance_buffer.is_none() || mesh_instance_bytes > self.mesh_instance_capacity
+        {
             self.mesh_instance_capacity = mesh_instance_bytes.max(1024).next_power_of_two();
             self.mesh_instance_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mujoco_wgpu_mesh_instance_buffer"),
@@ -2039,11 +2042,13 @@ impl WgpuSceneRenderer {
                 self.mesh_assets.insert(
                     mesh_id,
                     MeshAssetGpu {
-                        vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("mujoco_wgpu_mesh_asset_buffer"),
-                            contents: slice_as_u8(&asset.vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        }),
+                        vertex_buffer: device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("mujoco_wgpu_mesh_asset_buffer"),
+                                contents: slice_as_u8(&asset.vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            },
+                        ),
                         vertex_count: asset.vertices.len() as u32,
                     },
                 );
@@ -2313,7 +2318,10 @@ impl SoftwareCamera {
             Some((origin, self.forward))
         } else {
             let dir = normalize3(add3(
-                add3(scale3(self.forward, self.frustum_near), scale3(self.right, near_x)),
+                add3(
+                    scale3(self.forward, self.frustum_near),
+                    scale3(self.right, near_x),
+                ),
                 scale3(self.up, near_y),
             ));
             Some((self.eye, dir))
@@ -2721,11 +2729,7 @@ fn world_sphere_geom(pos: [f32; 3], radius: f32, color: [f32; 4]) -> mjvGeom {
     geom.size[0] = radius;
     geom.size[1] = radius;
     geom.size[2] = radius;
-    geom.mat = [
-        1.0, 0.0, 0.0,
-        0.0, 1.0, 0.0,
-        0.0, 0.0, 1.0,
-    ];
+    geom.mat = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     geom.rgba = color;
     geom
 }

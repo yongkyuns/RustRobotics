@@ -1,6 +1,6 @@
 // Shared robot-framework/controller contracts used by native, web, and hardware-facing adapters.
-pub mod go2;
 pub mod duck;
+pub mod go2;
 pub mod onnx;
 
 use std::collections::BTreeMap;

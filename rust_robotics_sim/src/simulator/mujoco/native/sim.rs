@@ -107,7 +107,8 @@ impl MujocoSim {
         }
 
         for sensor_name in sensor_names {
-            let sensor_id = unsafe { name2id(sim.model, mjtObj__mjOBJ_SENSOR as i32, sensor_name)? };
+            let sensor_id =
+                unsafe { name2id(sim.model, mjtObj__mjOBJ_SENSOR as i32, sensor_name)? };
             let adr = unsafe { *(*sim.model).sensor_adr.add(sensor_id as usize) as usize };
             let dim = unsafe { *(*sim.model).sensor_dim.add(sensor_id as usize) as usize };
             sim.sensor_adr_dim

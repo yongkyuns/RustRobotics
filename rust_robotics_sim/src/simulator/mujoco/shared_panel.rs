@@ -17,7 +17,12 @@ pub(super) fn show_shared_panel(
     ui.heading("Robot");
     ui.label("Robot simulation running inside RustRobotics.");
     egui::ComboBox::from_label("Robot")
-        .selected_text(robot_labels.get(selected_index).copied().unwrap_or("Unknown"))
+        .selected_text(
+            robot_labels
+                .get(selected_index)
+                .copied()
+                .unwrap_or("Unknown"),
+        )
         .show_ui(ui, |ui| {
             for (index, label) in robot_labels.iter().copied().enumerate() {
                 ui.selectable_value(&mut selected_index, index, label);
