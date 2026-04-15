@@ -6,6 +6,7 @@ use rust_robotics_algo::path_planning::{
     AStarPlanner, CircleObstacle, DijkstraPlanner, Grid, RrtConfig, RrtNode, RrtPlanner,
     ThetaStarPlanner,
 };
+use web_time::Instant;
 
 use super::{Draw, Simulate};
 
@@ -32,13 +33,6 @@ impl Algorithm {
             Algorithm::ThetaStar => "Theta*",
             Algorithm::Dijkstra => "Dijkstra",
             Algorithm::Rrt => "RRT",
-        }
-    }
-
-    fn is_grid(&self) -> bool {
-        match self {
-            Algorithm::AStar | Algorithm::Dijkstra => true,
-            Algorithm::ThetaStar | Algorithm::Rrt => false,
         }
     }
 }
@@ -71,8 +65,12 @@ struct PlanningResult {
     path_length: f32,
     /// Euclidean distance from start to goal (for optimality ratio)
     euclidean_distance: f32,
-    /// Execution time
-    execution_time: std::time::Duration,
+    /// Time spent on environment/setup adaptation before the planner runs.
+    prep_time: std::time::Duration,
+    /// Time spent inside the planner call itself.
+    plan_time: std::time::Duration,
+    /// End-to-end time for producing the result shown in the UI.
+    total_time: std::time::Duration,
 }
 
 struct PlannerInstance {
@@ -95,7 +93,7 @@ impl PlannerInstance {
             rrt_expand_dist: 1.0,
             rrt_goal_sample_rate: 0.1,
             rrt_max_iter: 500,
-            show_visited: true,
+            show_visited: false,
             color,
         }
     }
@@ -127,6 +125,8 @@ pub struct PathPlanning {
     animation_progress: f32,
     /// Whether animation is complete
     animation_complete: bool,
+    /// Whether a fresh plan should be computed on the next simulation step
+    pending_replan: bool,
     /// Last cell toggled during drag (to avoid re-toggling same cell)
     last_toggled_cell: Option<(usize, usize)>,
     /// Whether we're adding or removing obstacles during drag
@@ -159,6 +159,7 @@ impl PathPlanning {
             grid_resolution,
             animation_progress: 0.0,
             animation_complete: false,
+            pending_replan: false,
             last_toggled_cell: None,
             drag_adding_obstacle: true,
             continuous_obstacle_radius: 1.0,
@@ -200,17 +201,12 @@ impl PathPlanning {
         }
     }
 
-    fn remove_planner(&mut self, planner_id: usize) {
-        if let Some(pos) = self.planners.iter().position(|p| p.id == planner_id) {
-            self.planners.remove(pos);
-        }
-    }
-
     /// Run all planners
     fn run_all_planners(&mut self) {
         if self.start.is_some() && self.goal.is_some() {
             self.animation_progress = 0.0;
             self.animation_complete = false;
+            self.pending_replan = false;
 
             // Need to compute this once but borrow checker makes it hard to share euclidean_dist
             // So we'll just let each planner compute it or compute it inside the loop
@@ -231,6 +227,9 @@ impl PathPlanning {
             let dy = goal.1 - start.1;
             let euclidean_distance = (dx * dx + dy * dy).sqrt();
 
+            let total_started = Instant::now();
+            let prep_started = Instant::now();
+
             // If in continuous mode and using a grid-based algo (or Theta*), rasterize first
             if self.mode == EnvironmentMode::Continuous {
                 match algo {
@@ -243,8 +242,8 @@ impl PathPlanning {
 
             // Re-borrow for RRT config access if needed
             // But we need to be careful. RRT Configs are stored in planner_inst.
-
-            let start_time = std::time::Instant::now();
+            let prep_time = prep_started.elapsed();
+            let plan_started = Instant::now();
 
             let mut result = match algo {
                 Algorithm::AStar => {
@@ -258,7 +257,9 @@ impl PathPlanning {
                         iterations: res.iterations,
                         path_length: 0.0,
                         euclidean_distance,
-                        execution_time: std::time::Duration::default(),
+                        prep_time: std::time::Duration::default(),
+                        plan_time: std::time::Duration::default(),
+                        total_time: std::time::Duration::default(),
                     }
                 }
                 Algorithm::ThetaStar => {
@@ -272,7 +273,9 @@ impl PathPlanning {
                         iterations: res.iterations,
                         path_length: 0.0,
                         euclidean_distance,
-                        execution_time: std::time::Duration::default(),
+                        prep_time: std::time::Duration::default(),
+                        plan_time: std::time::Duration::default(),
+                        total_time: std::time::Duration::default(),
                     }
                 }
                 Algorithm::Dijkstra => {
@@ -286,7 +289,9 @@ impl PathPlanning {
                         iterations: res.iterations,
                         path_length: 0.0,
                         euclidean_distance,
-                        execution_time: std::time::Duration::default(),
+                        prep_time: std::time::Duration::default(),
+                        plan_time: std::time::Duration::default(),
+                        total_time: std::time::Duration::default(),
                     }
                 }
                 Algorithm::Rrt => {
@@ -327,12 +332,16 @@ impl PathPlanning {
                         iterations: res.iterations,
                         path_length: 0.0,
                         euclidean_distance,
-                        execution_time: std::time::Duration::default(),
+                        prep_time: std::time::Duration::default(),
+                        plan_time: std::time::Duration::default(),
+                        total_time: std::time::Duration::default(),
                     }
                 }
             };
 
-            result.execution_time = start_time.elapsed();
+            result.prep_time = prep_time;
+            result.plan_time = plan_started.elapsed();
+            result.total_time = total_started.elapsed();
             result.path_length = Self::compute_path_length(&result.path);
             self.planners[idx].result = Some(result);
         }
@@ -362,10 +371,27 @@ impl PathPlanning {
         self.state = PlanningState::WaitingForStart;
         self.animation_progress = 0.0;
         self.animation_complete = false;
+        self.pending_replan = false;
     }
 
     /// Copy state from another planner (Used for persistent state across hot reloads or resets)
     pub fn copy_state_from(&mut self, other: &PathPlanning) {
+        let continuous_obstacles_changed = self.continuous_obstacles.len()
+            != other.continuous_obstacles.len()
+            || self
+                .continuous_obstacles
+                .iter()
+                .zip(other.continuous_obstacles.iter())
+                .any(|(a, b)| a.x != b.x || a.y != b.y || a.radius != b.radius);
+        let shared_scene_changed = self.mode != other.mode
+            || self.grid_width != other.grid_width
+            || self.grid_height != other.grid_height
+            || self.grid_resolution != other.grid_resolution
+            || self.grid.obstacles() != other.grid.obstacles()
+            || continuous_obstacles_changed
+            || self.start != other.start
+            || self.goal != other.goal;
+
         self.mode = other.mode;
 
         // Copy grid settings
@@ -385,27 +411,11 @@ impl PathPlanning {
         // Copy start and goal
         self.start = other.start;
         self.goal = other.goal;
+        self.pending_replan = other.pending_replan;
 
-        // Copy planners configs?
-        // Since Planners are dynamic now, we try to preserve them if possible
-        // But for simplicity in this context, we just keep defaults or copy if struct matches.
-        // Given complexity, we'll reset planners list but respect the mode.
-        // (A robust implementation would serialize/deserialize or clone configs)
-        self.planners.clear();
-        if !other.planners.is_empty() {
-            // Re-create planners with same algos
-            for p in &other.planners {
-                let color = Self::get_color(self.id, p.id);
-                let mut new_p = PlannerInstance::new(p.id, p.algorithm, color);
-                new_p.rrt_expand_dist = p.rrt_expand_dist;
-                new_p.rrt_goal_sample_rate = p.rrt_goal_sample_rate;
-                new_p.rrt_max_iter = p.rrt_max_iter;
-                new_p.show_visited = p.show_visited;
-                self.planners.push(new_p);
-            }
-            self.next_planner_id = other.next_planner_id;
-        } else {
-            // Fallback default
+        // Preserve this panel's own planner configuration so different algorithms
+        // can be compared side-by-side while sharing the same environment.
+        if self.planners.is_empty() {
             let default_algo = if self.mode == EnvironmentMode::Grid {
                 Algorithm::AStar
             } else {
@@ -414,10 +424,21 @@ impl PathPlanning {
             self.add_planner(default_algo);
         }
 
+        if shared_scene_changed {
+            for planner in &mut self.planners {
+                planner.result = None;
+            }
+            self.animation_progress = 0.0;
+            self.animation_complete = false;
+
+            if self.start.is_some() && self.goal.is_some() {
+                self.pending_replan = true;
+            }
+        }
+
         // Update state based on what we have
         if self.start.is_some() && self.goal.is_some() {
             self.state = PlanningState::ShowingResult;
-            self.run_all_planners();
         } else if self.start.is_some() {
             self.state = PlanningState::WaitingForGoal;
         } else {
@@ -477,7 +498,6 @@ impl PathPlanning {
         // Clear all obstacles first
         self.grid.clear_all_obstacles();
 
-        let radius_sq = self.continuous_obstacle_radius * self.continuous_obstacle_radius;
         // Padding to ensure we cover all cells that might overlap
         let check_radius_cells =
             (self.continuous_obstacle_radius / self.grid.resolution).ceil() as usize;
@@ -565,7 +585,7 @@ impl PathPlanning {
                 }
             }
             // Left-click to set start/goal
-            else if plot_response.response.clicked() {
+            else if plot_response.response.clicked_by(PointerButton::Primary) {
                 if !self.grid.is_obstacle(gx, gy) {
                     let world_pos = self.grid.grid_to_world(gx, gy);
                     self.handle_left_click(world_pos);
@@ -609,7 +629,7 @@ impl PathPlanning {
             }
         }
         // Left-click to set start/goal
-        else if plot_response.response.clicked() {
+        else if plot_response.response.clicked_by(PointerButton::Primary) {
             // Check collision with obstacles
             let mut collision = false;
             for obs in &self.continuous_obstacles {
@@ -635,7 +655,8 @@ impl PathPlanning {
             }
             PlanningState::WaitingForGoal => {
                 self.goal = Some(world_pos);
-                self.run_all_planners();
+                self.pending_replan = true;
+                self.state = PlanningState::ShowingResult;
             }
             PlanningState::ShowingResult => {
                 self.start = Some(world_pos);
@@ -644,6 +665,7 @@ impl PathPlanning {
                     p.result = None;
                 }
                 self.state = PlanningState::WaitingForGoal;
+                self.pending_replan = false;
             }
         }
     }
@@ -861,14 +883,20 @@ impl Default for PathPlanning {
 
 impl Simulate for PathPlanning {
     fn get_state(&self) -> &dyn std::any::Any {
-        &self.id
+        self
     }
 
-    fn match_state_with(&mut self, _other: &dyn Simulate) {
-        // No state synchronization needed for path planning
+    fn match_state_with(&mut self, other: &dyn Simulate) {
+        if let Some(other) = other.get_state().downcast_ref::<PathPlanning>() {
+            self.copy_state_from(other);
+        }
     }
 
     fn step(&mut self, dt: f32) {
+        if self.pending_replan {
+            self.run_all_planners();
+        }
+
         // Animate visited cells / tree visualization
         // Check if ANY planner has a result
         if self.planners.iter().any(|p| p.result.is_some()) && !self.animation_complete {
@@ -1049,7 +1077,7 @@ impl Draw for PathPlanning {
                                         ui.label("No path found");
                                     }
                                     ui.label(format!("Iter: {}", res.iterations));
-                                    ui.label(format!("Time: {:.2?}", res.execution_time));
+                                    ui.label(format!("Plan: {:.2?}", res.plan_time));
                                 }
                             });
                         });

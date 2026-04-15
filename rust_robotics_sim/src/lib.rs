@@ -5,7 +5,10 @@ pub mod data;
 pub mod item;
 pub mod math;
 pub mod simulator;
+pub mod theme;
 pub mod time;
+#[cfg(target_arch = "wasm32")]
+mod web_ppo_worker;
 
 pub use app::App;
 

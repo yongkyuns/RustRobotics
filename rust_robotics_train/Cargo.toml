@@ -1,0 +1,16 @@
+[package]
+name = "rust_robotics_train"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rust_robotics_algo = { version = "0.1", path = "../rust_robotics_algo" }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+burn = { version = "0.20.1", default-features = false, features = ["std", "autodiff", "ndarray"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+burn = { version = "0.20.1", default-features = false, features = ["std", "autodiff", "ndarray"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }

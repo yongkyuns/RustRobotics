@@ -5,6 +5,7 @@
 pub mod control;
 pub mod localization;
 pub mod path_planning;
+pub mod robot_fw;
 pub mod slam;
 pub mod util;
 pub mod prelude {

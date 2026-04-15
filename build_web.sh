@@ -42,8 +42,55 @@ export RUSTFLAGS=--cfg=web_sys_unstable_apis
 
 # Clear output from old stuff:
 rm -f "docs/${CRATE_NAME_SNAKE_CASE}_bg.wasm"
+rm -rf "docs/vendor/onnxruntime-web"
+mkdir -p "docs/ort"
+mkdir -p "docs/vendor/mujoco"
+mkdir -p "docs/vendor/mujoco/mt"
+mkdir -p "docs/assets/mujoco"
 
-echo "Building rust…"
+rm -rf "docs/assets/mujoco/go2"
+rm -rf "docs/assets/mujoco/openduckmini"
+cp -R "rust_robotics_sim/assets/mujoco/go2" "docs/assets/mujoco/"
+cp -R "rust_robotics_sim/assets/mujoco/openduckmini" "docs/assets/mujoco/"
+
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort.wasm.min.js" \
+  "docs/ort/ort.wasm.min.js"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm.wasm" \
+  "docs/ort/ort-wasm.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-threaded.wasm" \
+  "docs/ort/ort-wasm-threaded.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd.wasm" \
+  "docs/ort/ort-wasm-simd.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm" \
+  "docs/ort/ort-wasm-simd-threaded.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd.jsep.wasm" \
+  "docs/ort/ort-wasm-simd.jsep.wasm"
+cp "rust_robotics_sim/web/vendor/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm" \
+  "docs/ort/ort-wasm-simd-threaded.jsep.wasm"
+cp "rust_robotics_sim/web/vendor/mujoco/mujoco.js" \
+  "docs/vendor/mujoco/mujoco.js"
+cp "rust_robotics_sim/web/vendor/mujoco/mujoco.wasm" \
+  "docs/vendor/mujoco/mujoco.wasm"
+cp "rust_robotics_sim/web/vendor/mujoco/mujoco_wasm.js" \
+  "docs/vendor/mujoco/mujoco_wasm.js"
+cp "rust_robotics_sim/web/vendor/mujoco/mujoco_wasm.wasm" \
+  "docs/vendor/mujoco/mujoco_wasm.wasm"
+cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.js" \
+  "docs/vendor/mujoco/mt/mujoco.js"
+cp "rust_robotics_sim/web/vendor/mujoco/mt/mujoco.wasm" \
+  "docs/vendor/mujoco/mt/mujoco.wasm"
+cp "rust_robotics_sim/web/ort_web/_loader.js" \
+  "docs/_loader.js"
+cp "rust_robotics_sim/web/ort_web/_telemetry.js" \
+  "docs/_telemetry.js"
+cp "rust_robotics_sim/web/mujoco_runtime.js" \
+  "docs/mujoco_runtime.js"
+cp "rust_robotics_sim/web/ppo_trainer_bridge.js" \
+  "docs/ppo_trainer_bridge.js"
+cp "rust_robotics_sim/web/ppo_trainer_worker.js" \
+  "docs/ppo_trainer_worker.js"
+
+echo "Building web bundle…"
 BUILD=release
 cargo build -p "${CRATE_NAME}" --release --lib --target wasm32-unknown-unknown
 
@@ -53,7 +100,24 @@ TARGET=$(cargo metadata --format-version=1 | jq --raw-output .target_directory)
 echo "Generating JS bindings for wasm…"
 TARGET_NAME="${CRATE_NAME_SNAKE_CASE}.wasm"
 WASM_PATH="${TARGET}/wasm32-unknown-unknown/${BUILD}/${TARGET_NAME}"
-wasm-bindgen "${WASM_PATH}" --out-dir docs --no-modules --no-typescript
+wasm-bindgen "${WASM_PATH}" --out-dir docs --target web --no-typescript
+
+# Jekyll/GitHub Pages commonly drops underscore-prefixed static assets.
+# wasm-bindgen snippet output can include files like `_loader.js` and
+# `_telemetry.js`, so rewrite them to publish-safe names and update imports.
+if [[ -d "docs/snippets" ]]; then
+  while IFS= read -r -d '' snippet_dir; do
+    if [[ -f "${snippet_dir}/_loader.js" ]]; then
+      mv "${snippet_dir}/_loader.js" "${snippet_dir}/loader.js"
+    fi
+    if [[ -f "${snippet_dir}/_telemetry.js" ]]; then
+      mv "${snippet_dir}/_telemetry.js" "${snippet_dir}/telemetry.js"
+    fi
+  done < <(find "docs/snippets" -mindepth 1 -maxdepth 1 -type d -print0)
+
+  perl -0pi -e "s#/_loader\\.js#\/loader.js#g; s#/_telemetry\\.js#\/telemetry.js#g" \
+    "docs/${CRATE_NAME}.js"
+fi
 
 if [[ "${FAST}" == false ]]; then
   echo "Optimizing wasm…"
@@ -61,7 +125,7 @@ if [[ "${FAST}" == false ]]; then
   wasm-opt "docs/${CRATE_NAME}_bg.wasm" -O2 --fast-math -o "docs/${CRATE_NAME}_bg.wasm" # add -g to get debug symbols
 fi
 
-echo "Finished: docs/${CRATE_NAME_SNAKE_CASE}.wasm"
+echo "Finished web bundle: docs/${CRATE_NAME_SNAKE_CASE}.wasm"
 
 if [[ "${OPEN}" == true ]]; then
   if [[ "$OSTYPE" == "linux-gnu"* ]]; then
