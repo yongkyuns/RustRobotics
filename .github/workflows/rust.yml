@@ -108,8 +108,14 @@ jobs:
       with:
         targets: wasm32-unknown-unknown
 
+    - name: Install wasm-bindgen-cli
+      run: cargo install wasm-bindgen-cli --version 0.2.108 --locked
+
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
 
-    - name: Check WASM
-      run: cargo check --verbose --workspace --target wasm32-unknown-unknown
+    - name: Check web runtime JS
+      run: node --check rust_robotics_sim/web/mujoco_runtime.js
+
+    - name: Build web bundle
+      run: ./build_web.sh --fast
