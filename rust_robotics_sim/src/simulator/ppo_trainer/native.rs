@@ -1,4 +1,5 @@
-use rust_robotics_train::{PpoMetrics, PpoSharedState, PpoTrainerConfig, PpoTrainerSession};
+use rust_robotics_core::{PpoMetrics, PpoSharedState};
+use rust_robotics_train::{PpoTrainerConfig, PpoTrainerSession};
 
 pub struct NativePpoReplicaExecutor {
     session: PpoTrainerSession,

@@ -1,7 +1,7 @@
 #[cfg(target_arch = "wasm32")]
-use rust_robotics_train::{
-    PolicySnapshot, PpoMetrics, PpoSharedState, PpoTrainerConfig, PpoTrainerSession,
-};
+use rust_robotics_core::{PolicySnapshot, PpoMetrics, PpoSharedState};
+#[cfg(target_arch = "wasm32")]
+use rust_robotics_train::{PpoTrainerConfig, PpoTrainerSession};
 #[cfg(target_arch = "wasm32")]
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]

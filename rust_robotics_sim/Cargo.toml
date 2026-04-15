@@ -18,6 +18,7 @@ default = ["web_wgpu_viewport"]
 web_wgpu_viewport = []
 
 [dependencies]
+rust_robotics_core = {version="0.1", path="../rust_robotics_core"}
 rust_robotics_algo = {version="0.1", path="../rust_robotics_algo"}
 rust_robotics_train = {version="0.1", path="../rust_robotics_train"}
 rand = "0.8"

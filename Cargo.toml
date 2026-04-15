@@ -1,5 +1,6 @@
 [workspace]
 members = [
+	"rust_robotics_core",
 	"rust_robotics_algo",
 	"rust_robotics_sim",
 	"rust_robotics_train",

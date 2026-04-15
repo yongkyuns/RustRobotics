@@ -3,7 +3,8 @@ use crate::{
     backend::{AutodiffBackend, AutodiffDevice},
     env::{PendulumEnv, PendulumEnvConfig},
     model::{
-        obs_tensor, scalar_tensor, PolicyNetwork, PolicySnapshot, ValueNetwork, ValueSnapshot,
+        obs_tensor, policy_network_from_snapshot, scalar_tensor, value_network_from_snapshot,
+        PolicyNetwork, ValueNetwork,
     },
 };
 use burn::{
@@ -11,6 +12,7 @@ use burn::{
     optim::{adaptor::OptimizerAdaptor, AdamConfig, GradientsParams, Optimizer},
 };
 use rand::{seq::SliceRandom, Rng};
+use rust_robotics_core::{PolicySnapshot, PpoMetrics, PpoSharedState};
 use serde::{Deserialize, Serialize};
 
 const OBS_DIM: usize = 4;
@@ -34,25 +36,6 @@ impl Default for PpoTrainerConfig {
             sync_policy_each_update: true,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PpoMetrics {
-    pub total_updates: usize,
-    pub total_env_steps: usize,
-    pub total_episodes: usize,
-    pub last_episode_return: f32,
-    pub mean_episode_return: f32,
-    pub best_episode_return: f32,
-    pub last_policy_loss: f32,
-    pub last_value_loss: f32,
-    pub last_mean_advantage: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PpoSharedState {
-    pub policy: PolicySnapshot,
-    pub value: ValueSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -112,19 +95,19 @@ impl PpoTrainerSession {
     }
 
     pub fn snapshot(&self) -> PolicySnapshot {
-        PolicySnapshot::from_policy_network(&self.actor.valid(), self.config.action_std)
+        self.actor.valid().snapshot(self.config.action_std)
     }
 
     pub fn shared_state(&self) -> PpoSharedState {
         PpoSharedState {
             policy: self.snapshot(),
-            value: ValueSnapshot::from_value_network(&self.critic.valid()),
+            value: self.critic.valid().snapshot(),
         }
     }
 
     pub fn load_shared_state(&mut self, state: &PpoSharedState) {
-        self.actor = state.policy.to_policy_network(&self.device);
-        self.critic = state.value.to_value_network(&self.device);
+        self.actor = policy_network_from_snapshot(&state.policy, &self.device);
+        self.critic = value_network_from_snapshot(&state.value, &self.device);
         self.actor_optimizer = AdamConfig::new().init();
         self.critic_optimizer = AdamConfig::new().init();
     }

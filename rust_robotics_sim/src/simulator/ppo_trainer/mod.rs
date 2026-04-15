@@ -1,6 +1,7 @@
-use rust_robotics_train::{
-    LinearSnapshot, PolicySnapshot, PpoMetrics, PpoSharedState, PpoTrainerConfig, ValueSnapshot,
+use rust_robotics_core::{
+    LinearSnapshot, PolicySnapshot, PpoMetrics, PpoSharedState, ValueSnapshot,
 };
+use rust_robotics_train::PpoTrainerConfig;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

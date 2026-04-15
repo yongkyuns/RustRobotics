@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rust_robotics_core = { version = "0.1", path = "../rust_robotics_core" }
 rust_robotics_algo = { version = "0.1", path = "../rust_robotics_algo" }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }

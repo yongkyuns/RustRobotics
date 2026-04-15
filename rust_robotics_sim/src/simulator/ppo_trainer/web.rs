@@ -1,4 +1,5 @@
-use rust_robotics_train::{PolicySnapshot, PpoMetrics, PpoSharedState, PpoTrainerConfig};
+use rust_robotics_core::{PolicySnapshot, PpoMetrics, PpoSharedState};
+use rust_robotics_train::PpoTrainerConfig;
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
