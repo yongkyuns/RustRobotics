@@ -5,6 +5,12 @@
 //! - Dijkstra (grid-based, optimal without heuristic)
 //! - RRT (continuous space, probabilistically complete)
 //! - Theta* (grid-based, any-angle path planning)
+//!
+//! The module intentionally exposes both discrete and continuous-space planners
+//! because the simulator supports both environment styles:
+//!
+//! - `Grid` + A* / Dijkstra / Theta*
+//! - circular obstacles + RRT
 
 pub mod astar;
 pub mod dijkstra;

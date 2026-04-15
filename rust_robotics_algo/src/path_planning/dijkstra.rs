@@ -1,6 +1,13 @@
 //! Dijkstra's path planning algorithm
 //!
-//! Similar to A* but without heuristic - guarantees optimal path.
+//! Similar to A* but without a heuristic term.
+//!
+//! This means it expands nodes in increasing order of cost-to-come only:
+//!
+//! `f(n) = g(n)`
+//!
+//! It is still optimal on graphs with non-negative edge costs, but typically
+//! explores more broadly than A* because it has no notion of goal direction.
 
 use super::grid::Grid;
 use std::cmp::Ordering;

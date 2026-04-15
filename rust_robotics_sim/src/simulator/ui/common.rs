@@ -1,8 +1,20 @@
+//! Top-level shared UI layout for the simulator shell.
+//!
+//! This module owns the pieces of UI that are common regardless of which mode
+//! is active:
+//!
+//! - shared keyboard shortcuts
+//! - mode selector row
+//! - playback / reset / comparison controls
+//! - responsive sidebar + scene layout
+//! - graph window orchestration
 use super::super::{SimMode, Simulator};
 use egui::*;
 use egui_plot::{Corner, Legend, Plot};
 
 impl Simulator {
+    /// Clears the cached rectangles used by the help overlay before a new frame
+    /// lays out the UI again.
     pub(in crate::simulator) fn reset_help_regions(&mut self) {
         self.help_state.help_mode_selector_rect = None;
         self.help_state.help_controls_rect = None;
@@ -10,6 +22,7 @@ impl Simulator {
         self.help_state.help_scene_rect = None;
     }
 
+    /// Handles shared keyboard shortcuts and forwards mode-specific input.
     pub(in crate::simulator) fn handle_ui_input(&mut self, ctx: &Context) {
         if ctx.input(|i| i.key_pressed(Key::Space)) {
             self.paused = !self.paused;
@@ -26,6 +39,7 @@ impl Simulator {
         }
     }
 
+    /// Renders the top row used to switch between simulator modes.
     pub(in crate::simulator) fn show_mode_selector_row(&mut self, ui: &mut Ui) {
         let mode_selector_response = ui.horizontal(|ui| {
             ui.label("Simulation:");
@@ -47,6 +61,7 @@ impl Simulator {
         self.help_state.help_mode_selector_rect = Some(mode_selector_response.response.rect);
     }
 
+    /// Starts the first-time tutorial for a mode when appropriate.
     pub(in crate::simulator) fn maybe_start_tutorial_for_mode(&mut self) {
         if self.help_state.visited_modes.contains(&self.mode) {
             return;
@@ -65,6 +80,7 @@ impl Simulator {
         }
     }
 
+    /// Renders controls that are meaningful across all modes.
     pub(in crate::simulator) fn show_shared_controls_row(&mut self, ui: &mut Ui, display_fps: f32) {
         let controls_response = ui.horizontal(|ui| {
             let btn_text = if self.paused { "Play" } else { "Pause" };
@@ -131,6 +147,7 @@ impl Simulator {
         self.help_state.help_controls_rect = Some(controls_response.response.rect);
     }
 
+    /// Builds the responsive two-pane layout for options and the scene view.
     pub(in crate::simulator) fn show_main_content(
         &mut self,
         ui: &mut Ui,
@@ -193,6 +210,8 @@ impl Simulator {
         }
     }
 
+    /// Renders the sidebar containing option cards, contextual keyboard help,
+    /// and mode-specific instructions.
     pub(in crate::simulator) fn show_sidebar(&mut self, ui: &mut Ui, cards_vertical: bool) {
         ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -256,6 +275,7 @@ impl Simulator {
             });
     }
 
+    /// Renders the main visualization pane for the active mode.
     pub(in crate::simulator) fn show_scene_pane(
         &mut self,
         ui: &mut Ui,
@@ -291,6 +311,7 @@ impl Simulator {
         }
     }
 
+    /// Renders the detached graph window when the user enables it.
     pub(in crate::simulator) fn show_graph_window(&mut self, ctx: &Context) -> Option<Rect> {
         Window::new("Signal Plot")
             .default_size(vec2(400.0, 300.0))

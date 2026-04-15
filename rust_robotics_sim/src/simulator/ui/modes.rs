@@ -1,21 +1,28 @@
+//! Mode-specific UI helpers used by the shared simulator shell.
+//!
+//! The goal of this module is to keep `ui::common` focused on layout while this
+//! file owns the branching logic that differs per simulator mode.
 use super::super::{Draw, SimMode, Simulate, Simulator};
 use crate::simulator::path_planning::EnvironmentMode;
 use egui::*;
 use egui_plot::{Corner, Legend, Plot};
 
 impl Simulator {
+    /// Forwards keyboard input to localization demos that support manual control.
     pub(super) fn handle_localization_input(&mut self, ctx: &Context) {
         for vehicle in &mut self.simulations.vehicles {
             vehicle.handle_keyboard(ctx);
         }
     }
 
+    /// Forwards keyboard input to SLAM demos that support manual control.
     pub(super) fn handle_slam_input(&mut self, ctx: &Context) {
         for slam in &mut self.simulations.slam_demos {
             slam.handle_keyboard(ctx);
         }
     }
 
+    /// Dispatches the mode-specific option-card rendering path.
     pub(super) fn show_option_cards(&mut self, ui: &mut Ui, cards_vertical: bool) {
         match self.mode {
             SimMode::InvertedPendulum => self.show_pendulum_option_cards(ui, cards_vertical),
@@ -177,6 +184,7 @@ impl Simulator {
         }
     }
 
+    /// Renders the instructional text block for the current mode.
     pub(super) fn show_mode_instructions(&self, ui: &mut Ui) {
         match self.mode {
             SimMode::PathPlanning => {
@@ -215,6 +223,7 @@ impl Simulator {
         }
     }
 
+    /// Draws the active mode's main scene into the shared plot surface.
     pub(super) fn draw_mode_scene_plot(&self, plot_ui: &mut egui_plot::PlotUi<'_>) {
         match self.mode {
             SimMode::InvertedPendulum => {

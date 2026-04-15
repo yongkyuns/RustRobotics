@@ -1,4 +1,16 @@
-//! A* path planning algorithm
+//! A* path planning algorithm.
+//!
+//! This implementation works on a `Grid` and uses 8-connected motion:
+//!
+//! - four cardinal neighbors with unit cost
+//! - four diagonal neighbors with cost `sqrt(2)`
+//!
+//! The priority queue is ordered by the usual A* score:
+//!
+//! `f(n) = g(n) + h(n)`
+//!
+//! where `g` is the path cost so far and `h` is an admissible Euclidean
+//! heuristic to the goal.
 
 use super::grid::Grid;
 use std::cmp::Ordering;
@@ -17,12 +29,12 @@ pub struct AStarResult {
     pub iterations: usize,
 }
 
-/// A* path planner
+/// A* path planner over a borrowed grid map.
 pub struct AStarPlanner<'a> {
     grid: &'a Grid,
 }
 
-/// Node for A* search
+/// Search node stored in the open-set heap.
 #[derive(Clone)]
 struct Node {
     x: usize,
@@ -218,14 +230,14 @@ impl<'a> AStarPlanner<'a> {
         }
     }
 
-    /// Euclidean heuristic
+    /// Euclidean heuristic on grid coordinates.
     fn heuristic(&self, a: (usize, usize), b: (usize, usize)) -> f32 {
         let dx = (a.0 as f32 - b.0 as f32).abs();
         let dy = (a.1 as f32 - b.1 as f32).abs();
         (dx * dx + dy * dy).sqrt()
     }
 
-    /// Reconstruct path from came_from map
+    /// Reconstructs the final world-space path from the predecessor map.
     fn reconstruct_path(
         &self,
         came_from: &std::collections::HashMap<(usize, usize), (usize, usize)>,

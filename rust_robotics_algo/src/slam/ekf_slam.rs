@@ -8,6 +8,24 @@
 //! - Robot pose: [x, y, θ] (position and orientation)
 //! - Landmarks: [m1_x, m1_y, m2_x, m2_y, ...] (2D positions)
 //!
+//! ## Filter Structure
+//!
+//! EKF-SLAM alternates between two phases:
+//!
+//! 1. **Prediction**
+//!    - propagate the robot pose with the motion model
+//!    - linearize the motion model with a Jacobian
+//!    - grow covariance according to motion uncertainty
+//! 2. **Update**
+//!    - associate each observation with an existing landmark or a new one
+//!    - compute the innovation between predicted and measured observation
+//!    - compute the Kalman gain
+//!    - correct the joint state mean and covariance
+//!
+//! The defining characteristic is that the robot pose and all landmarks live in
+//! one joint Gaussian. That means landmark uncertainty and robot uncertainty are
+//! coupled through cross-covariance terms.
+//!
 //! ## References
 //! - [EKF-SLAM Tutorial](https://jihongju.github.io/2018/10/05/slam-05-ekf-slam/)
 //! - [MATLAB ekfSLAM](https://www.mathworks.com/help/nav/ref/ekfslam.html)
@@ -61,12 +79,12 @@ impl Default for EkfSlamState {
 }
 
 impl EkfSlamState {
-    /// Create a new EKF-SLAM state with initial robot pose at origin
+    /// Creates a new EKF-SLAM state with robot pose initialized at the origin.
     pub fn new() -> Self {
         Self::with_pose(0.0, 0.0, 0.0)
     }
 
-    /// Create a new EKF-SLAM state with specified initial robot pose
+    /// Creates a new EKF-SLAM state with a specified initial robot pose.
     pub fn with_pose(x: f32, y: f32, theta: f32) -> Self {
         let mut mu = DVector::zeros(3);
         mu[0] = x;
@@ -81,7 +99,7 @@ impl EkfSlamState {
         }
     }
 
-    /// Get the robot pose [x, y, θ]
+    /// Returns the robot pose portion `[x, y, theta]` of the joint state.
     pub fn robot_pose(&self) -> Vector3<f32> {
         Vector3::new(self.mu[0], self.mu[1], self.mu[2])
     }
@@ -171,7 +189,7 @@ impl Default for EkfSlamConfig {
     }
 }
 
-/// Motion model: predict robot pose given velocity and angular velocity
+/// Motion model: predicts robot pose from linear and angular velocity.
 ///
 /// Uses velocity-based motion model:
 /// - If ω ≈ 0 (straight line): x' = x + v·dt·cos(θ), y' = y + v·dt·sin(θ)
@@ -196,7 +214,7 @@ pub fn motion_model(pose: &Vector3<f32>, v: f32, w: f32, dt: f32) -> Vector3<f32
     }
 }
 
-/// Compute the Jacobian of the motion model with respect to the robot state
+/// Computes the Jacobian of the motion model with respect to robot pose.
 fn motion_jacobian(pose: &Vector3<f32>, v: f32, w: f32, dt: f32) -> Matrix3<f32> {
     let theta = pose[2];
 
@@ -229,7 +247,7 @@ fn motion_jacobian(pose: &Vector3<f32>, v: f32, w: f32, dt: f32) -> Matrix3<f32>
     }
 }
 
-/// Observation model: compute expected range and bearing to a landmark
+/// Computes the expected range-bearing observation to a landmark.
 fn observation_model(robot_pose: &Vector3<f32>, landmark: &Vector2<f32>) -> Observation {
     let dx = landmark[0] - robot_pose[0];
     let dy = landmark[1] - robot_pose[1];
@@ -239,10 +257,12 @@ fn observation_model(robot_pose: &Vector3<f32>, landmark: &Vector2<f32>) -> Obse
     }
 }
 
-/// Compute the Jacobian of the observation model with respect to robot pose and landmark position
-/// Returns (H_robot, H_landmark) where:
-/// - H_robot is 2x3 Jacobian with respect to [x, y, θ]
-/// - H_landmark is 2x2 Jacobian with respect to [mx, my]
+/// Computes the Jacobian of the observation model with respect to robot pose
+/// and landmark position.
+///
+/// Returns `(H_robot, H_landmark)` where:
+/// - `H_robot` is the 2x3 Jacobian with respect to `[x, y, theta]`
+/// - `H_landmark` is the 2x2 Jacobian with respect to `[mx, my]`
 fn observation_jacobian(
     robot_pose: &Vector3<f32>,
     landmark: &Vector2<f32>,
@@ -273,7 +293,16 @@ fn normalize_angle(angle: f32) -> f32 {
     a
 }
 
-/// EKF-SLAM prediction step: update robot pose estimate based on control input
+/// EKF-SLAM prediction step.
+///
+/// This is the "time update" of the filter:
+///
+/// - propagate the robot pose mean with the motion model
+/// - linearize the motion model about the current estimate
+/// - update the full covariance as `Sigma' = G Sigma G^T + R`
+///
+/// Landmark means are unchanged during prediction, but their cross-covariance
+/// with the robot is affected by the motion Jacobian.
 pub fn predict(state: &mut EkfSlamState, config: &EkfSlamConfig, v: f32, w: f32, dt: f32) {
     let n = state.mu.len();
 
@@ -425,7 +454,11 @@ fn associate_landmark(
     AssociationResult::Matched(candidates[0].0)
 }
 
-/// Add a new landmark to the state based on an observation
+/// Adds a new landmark to the joint EKF state from a single observation.
+///
+/// This is the augmentation step that makes EKF-SLAM different from pure
+/// localization: the state vector and covariance matrix both grow as new
+/// landmarks are discovered.
 fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamConfig) {
     let robot_pose = state.robot_pose();
 
@@ -537,6 +570,13 @@ fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamCon
 /// Includes collective consistency checking to prevent wrong data associations
 /// when robot uncertainty is high.
 ///
+/// Conceptually, this is the measurement update:
+///
+/// 1. associate each observation
+/// 2. split observations into known landmarks vs genuinely new landmarks
+/// 3. update the existing map with Kalman innovations
+/// 4. augment the state with newly discovered landmarks when confidence is good
+///
 /// # Arguments
 /// * `state` - The current EKF-SLAM state (will be modified)
 /// * `config` - Configuration parameters
@@ -614,8 +654,11 @@ pub fn update(
     // They'll be added later when conditions improve (after revisiting known landmarks)
 }
 
-/// Batch update using multiple landmark observations simultaneously
-/// This provides better heading constraints through geometric relationships
+/// Batch update using multiple landmark observations simultaneously.
+///
+/// Stacking multiple observations into one innovation vector improves heading
+/// observability because relative landmark geometry constrains orientation more
+/// strongly than independent scalar updates.
 fn batch_update_landmarks(
     state: &mut EkfSlamState,
     config: &EkfSlamConfig,
@@ -739,7 +782,7 @@ fn batch_update_landmarks(
     }
 }
 
-/// Update state using observation of a known landmark
+/// Updates the joint EKF state from a single known-landmark observation.
 fn update_landmark(
     state: &mut EkfSlamState,
     config: &EkfSlamConfig,
@@ -858,9 +901,10 @@ fn enforce_min_covariance(state: &mut EkfSlamState) {
     }
 }
 
-/// Generate observations from the robot's current position to visible landmarks
+/// Generates synthetic range-bearing observations to visible landmarks.
 ///
-/// Returns a vector of (landmark_index, observation) tuples for landmarks within range
+/// Returns a vector of `(landmark_index, observation)` tuples for landmarks
+/// within the configured sensing range.
 pub fn generate_observations(
     robot_pose: &Vector3<f32>,
     true_landmarks: &[Vector2<f32>],
@@ -898,7 +942,10 @@ pub fn generate_observations(
     observations
 }
 
-/// Perform one complete EKF-SLAM cycle: prediction + observation + update
+/// Performs one complete EKF-SLAM cycle: prediction, sensing, and update.
+///
+/// This helper is intended for demos and tests where the same module owns both
+/// the estimator state and a simple simulated sensing path.
 pub fn step(
     state: &mut EkfSlamState,
     config: &EkfSlamConfig,

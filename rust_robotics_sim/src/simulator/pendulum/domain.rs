@@ -1,3 +1,22 @@
+//! Inverted-pendulum dynamics and controller-domain logic.
+//!
+//! The pendulum mode is intentionally a compact teaching environment. It uses a
+//! shared four-state representation:
+//!
+//! `x = [cart_position, cart_velocity, rod_angle, rod_angular_velocity]`
+//!
+//! and advances the plant with the discrete linear model provided by
+//! `rust_robotics_algo::control::inverted_pendulum`:
+//!
+//! `x_(k+1) = A(dt) x_k + B(dt) u_k`
+//!
+//! Optional noise can perturb:
+//!
+//! - the measured state seen by the controller
+//! - the control force actually applied to the plant
+//!
+//! which makes it easy to compare classical and learned controllers under the
+//! same disturbance model.
 use super::super::ppo_trainer::PpoTrainerCoordinator;
 use super::super::{Draw, Simulate};
 use crate::data::{IntoValues, TimeTable};
@@ -12,15 +31,19 @@ use rust_robotics_algo as rb;
 use rust_robotics_core::PolicySnapshot;
 use rust_robotics_train::PpoTrainerConfig;
 
+/// Pendulum state vector with ordering `[x, x_dot, theta, theta_dot]`.
 pub type State = rb::Vector4;
+/// Fixed simulator step used by both visualization and PPO training.
 pub const PENDULUM_FIXED_DT: f32 = 0.01;
 
+/// High-level toggle for stochastic perturbations in the pendulum demo.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NoiseConfig {
     pub enabled: bool,
     pub scale: f32,
 }
 
+/// Concrete noise amplitudes derived from the dimensionless `NoiseConfig`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NoiseProfile {
     pub(crate) position_m: f32,
@@ -31,10 +54,15 @@ pub(crate) struct NoiseProfile {
 }
 
 impl NoiseConfig {
+    /// Returns whether noise should currently be injected.
     pub(super) fn is_active(self) -> bool {
         self.enabled && self.scale > 0.0
     }
 
+    /// Converts the user-facing noise scale into per-signal standard amplitudes.
+    ///
+    /// The constants were chosen as practical demo values rather than from a
+    /// particular hardware sensor model.
     pub(super) fn profile(self) -> NoiseProfile {
         let scale = self.scale.max(0.0);
         NoiseProfile {
@@ -47,6 +75,10 @@ impl NoiseConfig {
     }
 }
 
+/// Controller variants supported by the pendulum demo.
+///
+/// All controllers consume the same state vector and emit the same scalar force
+/// command, which makes side-by-side comparison straightforward.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Controller {
     LQR(Model),
@@ -64,6 +96,7 @@ pub(crate) enum ControllerKind {
 }
 
 impl ControllerKind {
+    /// Human-readable label used in the UI controller selector.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Lqr => "LQR",
@@ -75,6 +108,11 @@ impl ControllerKind {
 }
 
 impl Controller {
+    /// Computes the control command for the current pendulum state.
+    ///
+    /// - LQR and MPC operate on the model state directly
+    /// - PID treats rod angle as the primary error signal
+    /// - PPO runs deterministic actor inference from the exported snapshot
     pub fn control(&mut self, x: State, dt: f32) -> f32 {
         match self {
             Self::LQR(model) => *model.control(x, dt).index(0),
@@ -97,22 +135,27 @@ impl Controller {
         }
     }
 
+    /// Builds an LQR-backed controller.
     pub fn lqr(model: Model) -> Self {
         Self::LQR(model)
     }
 
+    /// Builds the default angle-based PID controller.
     pub fn pid() -> Self {
         Self::PID(PID::with_gains(25.0, 3.0, 3.0))
     }
 
+    /// Builds an MPC-backed controller.
     pub fn mpc(model: Model) -> Self {
         Self::MPC(model)
     }
 
+    /// Builds a controller from a trained PPO actor snapshot.
     pub fn policy(snapshot: PolicySnapshot) -> Self {
         Self::Policy(snapshot)
     }
 
+    /// Returns the logical controller kind for UI/state synchronization.
     pub(crate) fn kind(&self) -> ControllerKind {
         match self {
             Self::LQR(_) => ControllerKind::Lqr,
@@ -122,6 +165,8 @@ impl Controller {
         }
     }
 
+    /// Replaces the controller implementation while preserving the requested
+    /// semantic kind.
     pub(crate) fn set_kind(
         &mut self,
         kind: ControllerKind,
@@ -140,12 +185,14 @@ impl Controller {
         }
     }
 
+    /// Updates the embedded PPO policy in-place.
     pub fn sync_policy(&mut self, snapshot: &PolicySnapshot) {
         if let Self::Policy(policy) = self {
             *policy = snapshot.clone();
         }
     }
 
+    /// Resets controller-internal dynamic state while preserving configuration.
     pub fn reset_state(&mut self) {
         match self {
             Self::LQR(_) => (),
@@ -155,6 +202,7 @@ impl Controller {
         }
     }
 
+    /// Restores controller defaults.
     pub fn reset_all(&mut self) {
         match self {
             Self::LQR(_) => *self = Self::lqr(Model::default()),
@@ -165,6 +213,14 @@ impl Controller {
     }
 }
 
+/// One pendulum simulation instance shown in the UI.
+///
+/// Each instance owns:
+/// - current plant state
+/// - selected controller implementation
+/// - time-series data for plotting
+/// - PPO trainer state and configuration
+/// - local UI metadata such as `id`
 pub struct InvertedPendulum {
     pub(crate) state: State,
     pub(crate) controller: Controller,
@@ -213,6 +269,7 @@ impl Default for InvertedPendulum {
 }
 
 impl InvertedPendulum {
+    /// Labels for the five signals stored in the time-series table.
     pub const SIGNAL_LABELS: [&'static str; 5] = [
         "Lateral Position",
         "Lateral Velocity",
@@ -221,6 +278,7 @@ impl InvertedPendulum {
         "Control Input",
     ];
 
+    /// Creates a new pendulum instance anchored to the given simulation time.
     pub fn new(id: usize, time: f32) -> Self {
         Self {
             id,
@@ -229,22 +287,27 @@ impl InvertedPendulum {
         }
     }
 
+    /// Stable identifier used to label cards and plots.
     pub fn id(&self) -> usize {
         self.id
     }
 
+    /// Returns the cart position in meters.
     pub fn x_position(&self) -> f32 {
         self.state[0]
     }
 
+    /// Returns the rod angle in radians.
     pub fn rod_angle(&self) -> f32 {
         self.state[2]
     }
 
+    /// Exposes the underlying pendulum model for UI and tests.
     pub fn model(&self) -> &Model {
         &self.model
     }
 
+    /// Plots one recorded signal for this pendulum instance.
     pub fn plot_signal(&self, plot_ui: &mut PlotUi<'_>, signal_index: usize) {
         if signal_index >= Self::SIGNAL_LABELS.len() {
             return;
@@ -256,6 +319,14 @@ impl InvertedPendulum {
             .map(|values| plot_ui.line(Line::new(&line_name, values)));
     }
 
+    /// Advances the pendulum by one fixed step with optional injected noise.
+    ///
+    /// The update follows three stages:
+    ///
+    /// 1. derive the measured state seen by the controller
+    /// 2. compute the controller command from that measured state
+    /// 3. perturb the applied force if actuation noise is enabled and advance the
+    ///    true plant state with the discrete linear model
     pub fn step_with_noise(&mut self, dt: f32, noise: NoiseConfig) {
         let mut measured_state = self.state;
         if noise.is_active() {

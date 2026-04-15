@@ -1,3 +1,14 @@
+//! ONNX Runtime-backed inference adapters for shared robot policies.
+//!
+//! This module isolates the backend-specific details of policy loading and
+//! execution from the robot controllers themselves. The controllers only depend
+//! on the abstract `InferenceBackend` / `InferenceInput` interface, while this
+//! module handles:
+//!
+//! - ONNX model metadata
+//! - native ONNX Runtime session creation
+//! - wasm-side dispatch into browser inference paths
+//! - translation from backend outputs into `PolicyOutput`
 #[cfg(target_arch = "wasm32")]
 use super::duck::DuckController;
 #[cfg(target_arch = "wasm32")]
@@ -9,6 +20,7 @@ use super::{Actuation, Command, RawState};
 #[cfg(not(target_arch = "wasm32"))]
 use super::{InferenceBackend, InferenceInput, PolicyOutput};
 
+/// Minimal metadata required to map semantic tensor names to backend I/O names.
 #[derive(Clone, Debug)]
 pub struct OrtModelMetadata {
     pub input_keys: Vec<String>,

@@ -3,6 +3,9 @@
 //! Theta* is an any-angle path planning algorithm that extends A* by allowing
 //! the parent of a node to be any other node in the grid, as long as there is
 //! a line of sight between them. This produces smoother, shorter paths than A*.
+//!
+//! Intuitively, Theta* replaces some "stair-step" grid paths with longer
+//! straight segments whenever the map geometry permits a direct connection.
 
 use super::grid::Grid;
 use std::cmp::Ordering;

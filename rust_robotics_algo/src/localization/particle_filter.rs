@@ -1,9 +1,23 @@
+//! Particle-filter localization for a planar vehicle.
+//!
+//! The filter estimates the 4D vehicle state:
+//!
+//! `x = [pos_x, pos_y, heading, speed]`
+//!
+//! from noisy control inputs and landmark range observations. The implementation
+//! uses a fixed-size particle cloud and includes a few practical recovery
+//! features:
+//!
+//! - robust likelihood mixing to reduce weight collapse
+//! - divergence detection and particle reset around observations
+//! - adaptive smoothing of the final estimate during recovery
 use super::*;
 use nalgebra::{ArrayStorage, Matrix, U1, U100, U4};
 
 /// Maximum observation range
 pub const MAX_RANGE: f32 = 60.0;
 
+/// Number of particles in the filter.
 pub const NP: usize = 100;
 pub const NTh: f32 = NP as f32 / 2.0;
 
@@ -15,6 +29,7 @@ pub fn rand() -> f32 {
     2.0 * (rand::random::<f32>() - 0.5)
 }
 
+/// Samples a uniform random value in `[low, high)`.
 pub fn rand_unifrom(low: f32, high: f32) -> f32 {
     use rand::Rng;
     let lim = rand::distributions::Uniform::new(low, high);
@@ -22,12 +37,15 @@ pub fn rand_unifrom(low: f32, high: f32) -> f32 {
     rng.sample(lim)
 }
 
+/// Returns a simple default command input used by basic examples.
 pub fn calc_input() -> Vector2 {
     let v = 1.0;
     let yaw_rate = 0.1;
     vector![v, yaw_rate]
 }
 
+/// Generates landmark observations and noisy odometry from the internally
+/// propagated true state.
 pub fn observation(
     x_true: &mut Vector4,
     xd: &mut Vector4,
@@ -96,6 +114,9 @@ pub fn observation_from_state(
     (z, ud)
 }
 
+/// Simple kinematic motion model for the planar vehicle.
+///
+/// The state is updated with forward speed and yaw rate over one time step.
 pub fn motion_model(x: Vector4, u: Vector2, dt: f32) -> Vector4 {
     let F = diag![1., 1., 1., 0.];
 
@@ -107,10 +128,12 @@ pub fn motion_model(x: Vector4, u: Vector2, dt: f32) -> Vector4 {
     F * x + B * u
 }
 
+/// Computes the scalar Gaussian likelihood for residual `x`.
 pub fn gauss_likelihood(x: f32, sigma: f32) -> f32 {
     1.0 / sqrt(2.0 * PI * sigma.powi(2)) * exp(-(x.powi(2)) / (2.0 * sigma.powi(2)))
 }
 
+/// Computes the 3x3 covariance of the estimated pose components.
 pub fn calc_covariance(x_est: &Vector4, px: &PX, pw: &PW) -> Matrix3 {
     let mut cov = zeros!(3, 3);
     for i in 0..NP {
@@ -142,6 +165,7 @@ fn robust_likelihood(dz: f32, sigma: f32) -> f32 {
     (1.0 - LIKELIHOOD_UNIFORM_WEIGHT) * gauss + LIKELIHOOD_UNIFORM_WEIGHT * 0.01
 }
 
+/// Runs one particle-filter update using default recovery and noise settings.
 pub fn pf_localization(
     x_est: &mut Vector4,
     px: &mut PX,
@@ -193,6 +217,16 @@ impl Default for PFNoiseParams {
 }
 
 /// Extended particle filter localization with state tracking
+/// Runs one full particle-filter update with explicit recovery state and noise.
+///
+/// The update sequence is:
+///
+/// 1. propagate each particle with noisy control
+/// 2. weight particles against landmark observations
+/// 3. normalize or recover if weights collapsed
+/// 4. compute a weighted state estimate
+/// 5. adaptively smooth the estimate when recovering
+/// 6. resample if the effective sample size becomes too small
 pub fn pf_localization_with_state(
     x_est: &mut Vector4,
     px: &mut PX,
@@ -310,6 +344,7 @@ fn reset_particles_around_observations(px: &mut PX, pw: &mut PW, z: &[Vector3], 
     *pw = ones!(1, NP) * (1. / NP as f32);
 }
 
+/// Performs low-variance resampling over the particle set.
 pub fn re_sampling(px: &mut PX, pw: &mut PW) {
     let w_cum: Vec<f32> = pw
         .as_slice()

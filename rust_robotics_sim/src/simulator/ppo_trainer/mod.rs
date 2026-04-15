@@ -1,3 +1,12 @@
+//! Cross-platform PPO trainer coordination for the simulator.
+//!
+//! The simulator uses this module instead of embedding a single trainer session
+//! directly so it can:
+//!
+//! - run one or more native trainer replicas
+//! - cooperate with a wasm/web worker implementation in the browser
+//! - average shared state across replicas
+//! - expose a single snapshot / metric view back to the pendulum UI
 use rust_robotics_core::{
     LinearSnapshot, PolicySnapshot, PpoMetrics, PpoSharedState, ValueSnapshot,
 };
@@ -13,6 +22,7 @@ use native::NativePpoReplicaExecutor as PlatformPpoReplicaExecutor;
 #[cfg(target_arch = "wasm32")]
 use web::WebPpoReplicaExecutor as PlatformPpoReplicaExecutor;
 
+/// Summary of replica readiness reported to the UI.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PpoReplicaStatus {
     pub total: usize,
@@ -20,6 +30,7 @@ pub struct PpoReplicaStatus {
     pub busy: usize,
 }
 
+/// Simulator-facing coordinator for one or more PPO trainer executors.
 #[derive(Default)]
 pub struct PpoTrainerCoordinator {
     executors: Vec<PlatformPpoReplicaExecutor>,
@@ -31,6 +42,7 @@ pub struct PpoTrainerCoordinator {
 }
 
 impl PpoTrainerCoordinator {
+    /// Creates a fresh set of trainer replicas from the given configuration.
     pub fn reset(&mut self, config: &PpoTrainerConfig, replicas: usize) {
         let replicas = replicas.max(1);
         self.destroy();
@@ -41,6 +53,7 @@ impl PpoTrainerCoordinator {
         self.refresh_summary();
     }
 
+    /// Destroys all trainer replicas and clears cached summaries.
     pub fn destroy(&mut self) {
         for executor in &mut self.executors {
             executor.destroy();
@@ -53,10 +66,13 @@ impl PpoTrainerCoordinator {
         self.status = PpoReplicaStatus::default();
     }
 
+    /// Returns whether at least one trainer replica exists.
     pub fn is_initialized(&self) -> bool {
         self.status.total > 0
     }
 
+    /// Advances each executor, then averages and redistributes shared state when
+    /// enough replicas are ready to contribute.
     pub fn tick(&mut self, updates: usize) {
         let updates = updates.max(1);
 
@@ -81,6 +97,7 @@ impl PpoTrainerCoordinator {
         self.refresh_summary();
     }
 
+    /// Polls executors for asynchronously completed work.
     pub fn refresh(&mut self) {
         for executor in &mut self.executors {
             executor.poll();
@@ -88,26 +105,33 @@ impl PpoTrainerCoordinator {
         self.refresh_summary();
     }
 
+    /// Returns the current merged policy snapshot, if one is available.
     pub fn snapshot(&self) -> Option<&PolicySnapshot> {
         self.snapshot.as_ref()
     }
 
+    /// Returns the current aggregated metrics view.
     pub fn metrics(&self) -> Option<&PpoMetrics> {
         self.metrics.as_ref()
     }
 
+    /// Returns the most recent executor error, if any.
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
 
+    /// Returns whether any executor is still actively training.
     pub fn busy(&self) -> bool {
         self.busy
     }
 
+    /// Returns the last computed replica status summary.
     pub fn status(&self) -> PpoReplicaStatus {
         self.status
     }
 
+    /// Rebuilds cached snapshot, metric, and readiness summaries from the
+    /// current executor set.
     fn refresh_summary(&mut self) {
         let ready = self
             .executors
@@ -144,6 +168,7 @@ impl Drop for PpoTrainerCoordinator {
     }
 }
 
+/// Combines trainer metrics across replicas into one UI-facing summary.
 fn aggregate_metrics(executors: &[PlatformPpoReplicaExecutor]) -> Option<PpoMetrics> {
     let mut counted = 0usize;
     let mut metrics = PpoMetrics::default();
@@ -177,6 +202,7 @@ fn aggregate_metrics(executors: &[PlatformPpoReplicaExecutor]) -> Option<PpoMetr
     Some(metrics)
 }
 
+/// Averages actor/critic parameters across compatible shared states.
 fn average_shared_states(states: &[PpoSharedState]) -> Option<PpoSharedState> {
     let first = states.first()?;
     let policy = PolicySnapshot {
@@ -198,6 +224,7 @@ fn average_shared_states(states: &[PpoSharedState]) -> Option<PpoSharedState> {
     Some(PpoSharedState { policy, value })
 }
 
+/// Averages dense linear-layer parameters across compatible snapshots.
 fn average_linear_snapshots(snapshots: Vec<&LinearSnapshot>) -> Option<LinearSnapshot> {
     let first = snapshots.first()?;
     let mut weight = vec![0.0; first.weight.len()];

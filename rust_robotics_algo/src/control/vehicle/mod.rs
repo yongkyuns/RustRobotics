@@ -4,6 +4,7 @@
 //! - Nonlinear tire dynamics using Pacejka Magic Formula
 //! - Linear tire option for comparison
 //! - Simple longitudinal dynamics (acceleration-based)
+//! - Smooth blending between low-speed kinematic and higher-speed dynamic behavior
 //!
 //! # State Vector
 //! The lateral state vector is: [yaw_rate (r), yaw (ψ), lateral_position (y), lateral_velocity (vy)]
@@ -11,6 +12,18 @@
 //! # Inputs
 //! - Steering angle (δ) for lateral control
 //! - Acceleration (ax) for longitudinal control
+//!
+//! # Modeling Idea
+//!
+//! At very low speed, tire slip is negligible and a kinematic bicycle model is
+//! usually more numerically stable and more physically appropriate:
+//!
+//! `yaw_rate ~= vx * tan(delta) / wheelbase`
+//!
+//! At higher speed, lateral tire forces and slip matter, so the dynamic bicycle
+//! model becomes important. This module blends between the two regimes so the
+//! simulator can remain stable at parking-lot speed while still showing drift,
+//! slip, and under/oversteer behavior at speed.
 
 use crate::prelude::*;
 
@@ -47,7 +60,7 @@ impl TireParams {
         }
     }
 
-    /// Compute lateral force using Pacejka Magic Formula
+    /// Compute lateral force using the Pacejka Magic Formula.
     ///
     /// F = D * sin(C * atan(B * α - E * (B * α - atan(B * α))))
     ///
@@ -70,7 +83,7 @@ pub type AMatLat = Mat<NX_LAT, NX_LAT>;
 pub type BMatLat = Mat<NX_LAT, NU_LAT>;
 pub type StateLat = Vector<NX_LAT>;
 
-/// Vehicle parameters for bicycle model
+/// Physical parameters for the bicycle model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VehicleParams {
     /// Vehicle mass [kg]
@@ -101,7 +114,7 @@ impl Default for VehicleParams {
 }
 
 impl VehicleParams {
-    /// Get wheelbase (total length between axles)
+    /// Returns the wheelbase, i.e. the axle-to-axle distance.
     pub fn wheelbase(&self) -> f32 {
         self.lf + self.lr
     }
@@ -117,7 +130,7 @@ pub enum TireModel {
     Pacejka,
 }
 
-/// Bicycle model for vehicle lateral dynamics
+/// Bicycle model for vehicle lateral dynamics.
 ///
 /// Supports both linear and Pacejka tire models.
 /// State: [yaw_rate (r), yaw (ψ), lateral_position (y), lateral_velocity (vy)]
@@ -160,7 +173,7 @@ impl BicycleModel {
         }
     }
 
-    /// Create a bicycle model with custom tire parameters
+    /// Creates a bicycle model with custom tire parameters.
     pub fn with_tires(
         params: VehicleParams,
         vx: f32,
@@ -176,7 +189,7 @@ impl BicycleModel {
         }
     }
 
-    /// Set the tire model
+    /// Sets the tire model used by the dynamic update path.
     pub fn with_tire_model(mut self, tire_model: TireModel) -> Self {
         self.tire_model = tire_model;
         self
@@ -197,7 +210,7 @@ impl BicycleModel {
     /// Higher value allows larger slip angles
     pub const MAX_VY: f32 = 15.0;
 
-    /// Get the continuous-time state-space matrices (A, B) for lateral dynamics
+    /// Returns the continuous-time state-space matrices `(A, B)` for lateral dynamics.
     ///
     /// The linearized bicycle model equations:
     /// ```text
@@ -245,7 +258,7 @@ impl BicycleModel {
         (A, B)
     }
 
-    /// Get discrete-time state-space matrices using Euler discretization
+    /// Returns discrete-time state-space matrices using forward Euler discretization.
     ///
     /// Ad = I + A*dt
     /// Bd = B*dt
@@ -256,7 +269,7 @@ impl BicycleModel {
         (Ad, Bd)
     }
 
-    /// Step the lateral dynamics forward by dt
+    /// Steps the linear lateral state forward by one time step.
     ///
     /// x_new = Ad * x + Bd * u
     pub fn step_lateral(&self, state: StateLat, steering_angle: f32, dt: f32) -> StateLat {
@@ -264,7 +277,7 @@ impl BicycleModel {
         Ad * state + Bd * steering_angle
     }
 
-    /// Compute yaw rate using kinematic bicycle model (valid at low speeds)
+    /// Computes yaw rate using the kinematic bicycle model.
     ///
     /// At low speeds, tire slip is negligible, so:
     /// yaw_rate = vx * tan(steering) / wheelbase
@@ -273,7 +286,7 @@ impl BicycleModel {
         self.vx * steering.tan() / wheelbase
     }
 
-    /// Compute front tire slip angle (ISO convention)
+    /// Computes the front tire slip angle (ISO convention).
     ///
     /// α_f = atan((vy + lf * r) / vx) - δ
     ///
@@ -284,7 +297,7 @@ impl BicycleModel {
         ((vy + self.params.lf * yaw_rate) / vx).atan() - steering
     }
 
-    /// Compute rear tire slip angle (ISO convention)
+    /// Computes the rear tire slip angle (ISO convention).
     ///
     /// α_r = atan((vy - lr * r) / vx)
     ///
@@ -302,7 +315,7 @@ impl BicycleModel {
     /// Represents aerodynamic side drag
     pub const LATERAL_DAMPING: f32 = 100.0;
 
-    /// Apply friction circle constraint to tire forces
+    /// Applies a friction-circle constraint to longitudinal/lateral tire forces.
     ///
     /// If combined force exceeds grip limit, scale both forces proportionally
     /// Returns (limited_fx, limited_fy)
@@ -316,7 +329,7 @@ impl BicycleModel {
         }
     }
 
-    /// Step dynamics using nonlinear Pacejka tire model with friction circle
+    /// Steps the dynamic model using nonlinear Pacejka tire forces.
     ///
     /// Equations of motion (body frame, SAE convention):
     /// m * dvx/dt = Fx_f + Fx_r (limited by friction circle)
@@ -383,7 +396,7 @@ impl BicycleModel {
         (new_yaw_rate, new_vy, actual_ax)
     }
 
-    /// Step dynamics using linear tire model (cornering stiffness)
+    /// Steps the dynamic model using linear tire forces.
     ///
     /// Uses linearized tire forces: Fy = -Cf * α
     /// This model doesn't allow slip-out but provides stable, predictable handling.
@@ -428,7 +441,7 @@ impl BicycleModel {
         (new_yaw_rate, new_vy, requested_ax)
     }
 
-    /// Compute blending factor between kinematic (0.0) and dynamic (1.0) models
+    /// Computes the blend factor between kinematic (`0.0`) and dynamic (`1.0`) models.
     fn dynamic_blend_factor(&self) -> f32 {
         let low = Self::KINEMATIC_THRESHOLD - Self::BLEND_ZONE * 0.5;
         let high = Self::KINEMATIC_THRESHOLD + Self::BLEND_ZONE * 0.5;
@@ -444,7 +457,7 @@ impl BicycleModel {
         }
     }
 
-    /// Update longitudinal velocity based on acceleration
+    /// Updates longitudinal velocity from acceleration.
     ///
     /// vx_new = vx + ax * dt
     pub fn step_longitudinal(&mut self, acceleration: f32, dt: f32) {
@@ -470,7 +483,7 @@ pub struct VehicleState {
 }
 
 impl VehicleState {
-    /// Create a new vehicle state at the origin
+    /// Creates a new vehicle state at the origin.
     pub fn new() -> Self {
         Self {
             vx: 1.0, // Start with some velocity
@@ -478,18 +491,24 @@ impl VehicleState {
         }
     }
 
-    /// Convert to Vector4 format [x, y, yaw, vx] for compatibility with existing code
+    /// Converts to `[x, y, yaw, vx]` for compatibility with existing code.
     pub fn to_vector4(&self) -> Vector4 {
         vector![self.x, self.y, self.yaw, self.vx]
     }
 
-    /// Step the vehicle state using bicycle model dynamics
+    /// Steps the full vehicle state using bicycle-model dynamics.
     ///
     /// Uses kinematic model at low speeds and dynamic model at high speeds,
     /// with smooth blending in between to avoid discontinuities.
     ///
     /// For Pacejka tire model: friction circle limits combined braking and steering forces.
     /// For Linear tire model: stable handling without slip-out.
+    ///
+    /// The world-frame position update comes from rotating body-frame velocity
+    /// `(vx, vy)` by the current heading:
+    ///
+    /// `x_dot = vx cos(yaw) - vy sin(yaw)`
+    /// `y_dot = vx sin(yaw) + vy cos(yaw)`
     pub fn step(&mut self, model: &mut BicycleModel, steering: f32, acceleration: f32, dt: f32) {
         // Get blending factor: 0.0 = kinematic, 1.0 = dynamic
         let alpha = model.dynamic_blend_factor();

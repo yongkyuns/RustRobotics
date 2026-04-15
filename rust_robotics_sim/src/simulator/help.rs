@@ -1,6 +1,17 @@
+//! Guided help-tour definitions and overlay rendering.
+//!
+//! The simulator intentionally includes a lightweight walkthrough layer because
+//! the application mixes several distinct robotics domains behind one shared
+//! shell. This module owns:
+//!
+//! - the ordered help steps per mode
+//! - which UI region each step should highlight
+//! - popup progression state
+//! - dimming / highlight rendering
 use super::{SimMode, Simulator};
 use egui::*;
 
+/// Logical UI region that a help step can point to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum HelpTarget {
     ModeSelector,
@@ -9,6 +20,7 @@ enum HelpTarget {
     Scene,
 }
 
+/// One instructional step in the guided walkthrough.
 #[derive(Debug, Clone, Copy)]
 struct HelpStep {
     title: &'static str,
@@ -17,6 +29,7 @@ struct HelpStep {
 }
 
 impl Simulator {
+    /// Returns the full help-step sequence for the currently selected mode.
     fn help_steps(&self) -> &'static [HelpStep] {
         const INVERTED_PENDULUM_STEPS: [HelpStep; 9] = [
             HelpStep {
@@ -218,6 +231,8 @@ impl Simulator {
         }
     }
 
+    /// Returns the active help sequence after removing already-explained shared
+    /// introduction steps.
     fn active_help_steps(&self) -> Vec<HelpStep> {
         self.help_steps()
             .iter()
@@ -232,10 +247,12 @@ impl Simulator {
             .collect()
     }
 
+    /// Rewinds the current guided tour to its first step.
     pub(super) fn reset_help_tour(&mut self) {
         self.help_state.help_step_index = 0;
     }
 
+    /// Resolves the screen rectangle associated with a logical help target.
     fn help_target_rect(&self, target: HelpTarget) -> Option<Rect> {
         match target {
             HelpTarget::ModeSelector => self.help_state.help_mode_selector_rect,
@@ -245,6 +262,7 @@ impl Simulator {
         }
     }
 
+    /// Paints the current highlight overlay around the active help target.
     pub(super) fn paint_help_highlight(&self, ui: &Ui) {
         if !self.help_state.show_help_popup {
             return;

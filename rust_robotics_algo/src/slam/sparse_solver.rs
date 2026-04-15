@@ -30,7 +30,7 @@ fn normalize_angle(angle: f32) -> f32 {
     a
 }
 
-/// Sparse triplet for building CSR/CSC matrices
+/// Sparse triplet for building CSR/CSC matrices.
 #[derive(Debug, Clone)]
 pub struct Triplet {
     pub row: usize,
@@ -53,7 +53,7 @@ impl Default for SparseSolverConfig {
     }
 }
 
-/// Sparse linear system builder for Graph SLAM
+/// Sparse linear system builder for graph SLAM.
 ///
 /// Constructs sparse Jacobian and residual vector, then solves
 /// the normal equations using sparse Cholesky decomposition.
@@ -68,12 +68,14 @@ impl Default for SparseSlamSolver {
 }
 
 impl SparseSlamSolver {
+    /// Creates a solver with default sparse-factorization settings.
     pub fn new() -> Self {
         Self {
             config: SparseSolverConfig::default(),
         }
     }
 
+    /// Creates a solver with caller-provided configuration.
     pub fn with_config(config: SparseSolverConfig) -> Self {
         Self { config }
     }

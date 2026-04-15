@@ -15,6 +15,22 @@
 //! - Chi-squared test for outlier detection and flagging
 //! - Iteratively Reweighted Least Squares (IRLS) for robust optimization
 //!
+//! ## Optimization Picture
+//!
+//! Graph SLAM turns estimation into a sparse nonlinear least-squares problem:
+//!
+//! `min_x sum_i ||r_i(x)||^2_{Omega_i}`
+//!
+//! where each residual `r_i` comes from:
+//!
+//! - an odometry edge between two poses
+//! - an observation edge between a pose and a landmark
+//! - optional loop-closure or prior constraints
+//!
+//! The optimizer linearizes these residuals around the current estimate,
+//! assembles a sparse normal system, solves for an increment, and iterates until
+//! the graph error stops improving.
+//!
 //! ## References
 //! - [Graph-Based SLAM Tutorial](https://www.roboticsproceedings.org/rss06/p10.pdf)
 //! - [g2o: A General Framework for Graph Optimization](https://github.com/RainerKuemmerle/g2o)
@@ -42,7 +58,7 @@ fn normalize_angle(angle: f32) -> f32 {
     a
 }
 
-/// A robot pose in the graph (x, y, theta)
+/// A robot pose vertex in the graph `(x, y, theta)`.
 #[derive(Debug, Clone, Copy)]
 pub struct Pose2D {
     pub x: f32,
@@ -51,18 +67,22 @@ pub struct Pose2D {
 }
 
 impl Pose2D {
+    /// Builds a pose from scalar components.
     pub fn new(x: f32, y: f32, theta: f32) -> Self {
         Self { x, y, theta }
     }
 
+    /// Returns the identity/world-origin pose.
     pub fn origin() -> Self {
         Self::new(0.0, 0.0, 0.0)
     }
 
+    /// Converts the pose into its vector form.
     pub fn to_vector(&self) -> Vector3<f32> {
         Vector3::new(self.x, self.y, self.theta)
     }
 
+    /// Builds a pose from a vector, normalizing heading to `[-pi, pi]`.
     pub fn from_vector(v: &Vector3<f32>) -> Self {
         Self {
             x: v[0],
@@ -72,7 +92,7 @@ impl Pose2D {
     }
 }
 
-/// A landmark position in the graph (x, y)
+/// A landmark vertex in the graph `(x, y)`.
 #[derive(Debug, Clone, Copy)]
 pub struct Landmark2D {
     pub x: f32,
@@ -80,14 +100,17 @@ pub struct Landmark2D {
 }
 
 impl Landmark2D {
+    /// Builds a landmark from scalar coordinates.
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
 
+    /// Converts the landmark into its vector form.
     pub fn to_vector(&self) -> Vector2<f32> {
         Vector2::new(self.x, self.y)
     }
 
+    /// Builds a landmark from a vector.
     pub fn from_vector(v: &Vector2<f32>) -> Self {
         Self { x: v[0], y: v[1] }
     }
@@ -227,7 +250,14 @@ pub struct SlamDiagnostics {
     pub loop_closures_detected: usize,
 }
 
-/// Graph SLAM state containing all nodes and edges
+/// Graph SLAM state containing all nodes and edges.
+///
+/// This struct is effectively the full optimization problem definition:
+///
+/// - `poses` and `landmarks` are the graph variables
+/// - odometry / observation / prior constraints are the residual terms
+/// - `config` controls how aggressively optimization, robust weighting, loop
+///   closure, and re-localization behave
 #[derive(Debug, Clone)]
 pub struct GraphSlam {
     /// Robot poses (nodes)
@@ -265,7 +295,7 @@ impl Default for GraphSlam {
 }
 
 impl GraphSlam {
-    /// Create a new empty graph
+    /// Creates a new empty graph with default optimizer settings.
     pub fn new() -> Self {
         Self {
             poses: Vec::new(),
@@ -284,7 +314,7 @@ impl GraphSlam {
         }
     }
 
-    /// Add a pose to the graph, returns the pose index
+    /// Adds a pose vertex to the graph and returns its index.
     pub fn add_pose(&mut self, pose: Pose2D) -> usize {
         let idx = self.poses.len();
         self.poses.push(pose);
@@ -292,7 +322,7 @@ impl GraphSlam {
         idx
     }
 
-    /// Add a landmark to the graph, returns the landmark index
+    /// Adds a landmark vertex to the graph and returns its index.
     pub fn add_landmark(&mut self, landmark: Landmark2D) -> usize {
         let idx = self.landmarks.len();
         self.landmarks.push(landmark);
@@ -301,7 +331,7 @@ impl GraphSlam {
         idx
     }
 
-    /// Add an odometry constraint between two poses
+    /// Adds an odometry constraint between two pose vertices.
     pub fn add_odometry(
         &mut self,
         from_idx: usize,
@@ -320,7 +350,7 @@ impl GraphSlam {
         });
     }
 
-    /// Add an observation constraint from a pose to a landmark
+    /// Adds an observation constraint from a pose to a landmark.
     pub fn add_observation(
         &mut self,
         pose_idx: usize,
@@ -350,7 +380,11 @@ impl GraphSlam {
         });
     }
 
-    /// Prune old poses to maintain sliding window size
+    /// Prunes old poses to maintain the sliding-window size.
+    ///
+    /// This keeps problem size bounded in long-running demos. When
+    /// marginalization is enabled elsewhere, old information can be converted
+    /// into prior constraints instead of being discarded entirely.
     pub fn prune_old_poses(&mut self) -> usize {
         if self.max_poses == 0 || self.poses.len() <= self.max_poses {
             return 0;
@@ -1169,7 +1203,18 @@ impl GraphSlam {
         (jacobian, residuals)
     }
 
-    /// Optimize the graph using Levenberg-Marquardt with IRLS
+    /// Optimizes the graph using Levenberg-Marquardt with IRLS.
+    ///
+    /// High-level flow:
+    ///
+    /// 1. optionally attempt re-localization if diagnostics suggest severe drift
+    /// 2. choose sparse or dense optimization depending on configuration
+    /// 3. linearize residuals around the current estimate
+    /// 4. solve for an increment
+    /// 5. update robust weights and diagnostics
+    ///
+    /// Sparse mode is preferred for larger graphs because the normal equations
+    /// are structurally sparse.
     pub fn optimize(&mut self) -> OptimizationResult {
         if self.num_variables() == 0 {
             return OptimizationResult {

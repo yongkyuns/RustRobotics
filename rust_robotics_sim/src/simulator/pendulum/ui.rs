@@ -1,9 +1,15 @@
+//! Pendulum-specific UI controls.
+//!
+//! This module contains the `egui` widgets that expose plant parameters,
+//! controller selection, classical-controller tuning, and PPO trainer status for
+//! each pendulum instance.
 use super::super::ppo_trainer::PpoReplicaStatus;
 use super::domain::{Controller, ControllerKind, InvertedPendulum, PENDULUM_FIXED_DT};
 use egui::{ComboBox, DragValue, Grid, Ui};
 use rust_robotics_core::PolicySnapshot;
 
 impl Controller {
+    /// Draws the controller-specific parameter UI.
     pub fn options(&mut self, ui: &mut Ui, available_policy: Option<&PolicySnapshot>) {
         match self {
             Self::LQR(model) => {
@@ -130,6 +136,7 @@ impl Controller {
         }
     }
 
+    /// Returns a stable display string for the current controller.
     pub fn to_string(&self) -> String {
         match self {
             Self::LQR(_) => "LQR".to_owned(),
@@ -141,6 +148,11 @@ impl Controller {
 }
 
 impl InvertedPendulum {
+    /// Draws the full option card for one pendulum instance.
+    ///
+    /// The method keeps policy selection and trainer state synchronized before
+    /// rendering so the card always reflects the currently active controller
+    /// backend.
     pub fn options_with_policy(&mut self, ui: &mut Ui) -> bool {
         let mut keep = true;
         if self.controller_selection == ControllerKind::Policy

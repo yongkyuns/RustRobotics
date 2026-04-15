@@ -1,7 +1,22 @@
+//! Open Duck Mini-specific observation and actuation logic.
+//!
+//! The duck controller is imitation-policy oriented: it builds a compact
+//! observation vector from IMU, joint, action-history, contact, and phase
+//! features, then decodes policy outputs into bounded joint-position targets.
+//!
+//! The main execution path is:
+//!
+//! 1. collect sensors and joint state into a policy observation
+//! 2. run the imitation policy
+//! 3. store the newest action in a short action history
+//! 4. advance the gait phase embedding
+//! 5. decode actions into position targets
+//! 6. rate-limit those targets to respect motor-velocity limits
 use super::{
     Actuation, Command, InferenceBackend, InferenceInput, Observation, PolicyOutput, RawState,
 };
 
+/// Shared controller wrapper for the Open Duck Mini policy.
 pub struct DuckController {
     default_joint_pos: Vec<f32>,
     action_scale: f32,
@@ -19,6 +34,7 @@ pub struct DuckController {
 }
 
 impl DuckController {
+    /// Creates a controller with the provided nominal joint targets and scaling.
     pub fn new(
         default_joint_pos: Vec<f32>,
         action_scale: f32,
@@ -44,6 +60,7 @@ impl DuckController {
         }
     }
 
+    /// Resets action histories, phase, and motor targets to defaults.
     pub fn reset(&mut self) {
         self.last_actions.fill(0.0);
         self.last_last_actions.fill(0.0);
@@ -54,6 +71,20 @@ impl DuckController {
         self.imitation_phase = [1.0, 0.0];
     }
 
+    /// Builds the duck policy observation vector from raw runtime state.
+    ///
+    /// The vector mixes several sources of information:
+    ///
+    /// - IMU angular velocity and acceleration
+    /// - high-level command features
+    /// - joint position and velocity relative to defaults
+    /// - a short action history
+    /// - current motor targets
+    /// - contact indicators
+    /// - a 2D sinusoidal phase embedding
+    ///
+    /// This layout is typical for locomotion policies trained from privileged
+    /// simulator data and then deployed from compact proprioceptive features.
     pub fn build_observation(&self, raw: &RawState, command: &Command) -> Observation {
         let gyro = self.sensor3(raw, "imu_gyro");
         let mut accel = self.sensor3(raw, "imu_accel");
@@ -86,6 +117,11 @@ impl DuckController {
         Observation { values: obs }
     }
 
+    /// Incorporates a policy output into controller-internal action history.
+    ///
+    /// The duck controller keeps three lagged action vectors so the next
+    /// observation carries temporal action context in addition to the current
+    /// motor target.
     pub fn integrate_policy_output(&mut self, output: &PolicyOutput) -> Result<(), String> {
         if output.actions.len() < self.default_joint_pos.len() {
             return Err(format!(
@@ -104,6 +140,7 @@ impl DuckController {
         Ok(())
     }
 
+    /// Runs one full observe-infer-decode step for the duck policy.
     pub fn step(
         &mut self,
         raw: &RawState,
@@ -118,6 +155,16 @@ impl DuckController {
         Ok(self.decode_actuation())
     }
 
+    /// Decodes the latest policy action into bounded joint-position targets.
+    ///
+    /// The raw action is interpreted as an offset around `default_joint_pos`,
+    /// scaled by `action_scale`. The resulting target is then rate-limited by a
+    /// motor-velocity bound:
+    ///
+    /// `|q_target(k) - q_target(k-1)| <= max_motor_velocity * timestep * decimation`
+    ///
+    /// This keeps the policy from instantaneously commanding unreachable joint
+    /// motions.
     pub fn decode_actuation(&mut self) -> Actuation {
         let delta = self.max_motor_velocity * self.timestep * self.decimation as f32;
         for i in 0..self.default_joint_pos.len() {
@@ -132,10 +179,12 @@ impl DuckController {
         Actuation::JointPositionTargets(self.motor_targets.clone())
     }
 
+    /// Returns the most recent action vector produced by the policy.
     pub fn last_actions(&self) -> &[f32] {
         &self.last_actions
     }
 
+    /// Builds the compact command vector consumed by the duck policy.
     fn build_command_vector(&self, raw: &RawState, command: &Command) -> [f32; 7] {
         let setpoint = command.setpoint_world.unwrap_or([
             raw.base_pos[0] + command.vel_x,
@@ -161,6 +210,7 @@ impl DuckController {
         ]
     }
 
+    /// Advances the sinusoidal phase embedding used by the imitation policy.
     fn update_phase(&mut self) {
         let phase_steps = self.phase_steps.max(1);
         self.imitation_index = (self.imitation_index + 1) % phase_steps;
@@ -168,6 +218,8 @@ impl DuckController {
         self.imitation_phase = [phase.cos(), phase.sin()];
     }
 
+    /// Reads a 3-value sensor from the raw sensor map, defaulting missing values
+    /// to zero.
     fn sensor3(&self, raw: &RawState, name: &str) -> [f32; 3] {
         let values = raw.sensor_values.get(name);
         [

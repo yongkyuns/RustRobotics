@@ -1,6 +1,14 @@
 //! RRT (Rapidly-exploring Random Tree) path planning algorithm
 //!
 //! Works in continuous space with circular obstacles.
+//!
+//! RRT grows a search tree by repeatedly:
+//!
+//! 1. sampling a random point (with optional goal bias)
+//! 2. finding the nearest existing tree node
+//! 3. stepping toward the sample by a fixed expansion distance
+//! 4. rejecting collisions
+//! 5. stopping once a node reaches the goal region
 
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::StdRng;

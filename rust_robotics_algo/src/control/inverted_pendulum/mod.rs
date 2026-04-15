@@ -1,3 +1,12 @@
+//! Linear inverted-pendulum model and controller support.
+//!
+//! The state ordering used throughout this module is:
+//!
+//! `x = [cart_position, cart_velocity, rod_angle, rod_angular_velocity]`
+//!
+//! and the input is a single horizontal cart force. The default `Model`
+//! exposes the discrete-time matrices consumed by LQR and MPC, while the PID
+//! controller acts directly on the rod-angle error as a simpler baseline.
 mod lqr;
 mod mpc;
 mod pid;
@@ -26,6 +35,12 @@ pub type QMat = AMat;
 pub type RMat = Mat<NU, NU>;
 
 /// Define model parameters and LQR-related parameters.
+///
+/// The continuous-time linearization corresponds to the upright operating point
+/// of the cart-pole system. `Q` and `R` are the standard quadratic costs used
+/// by LQR / MPC:
+///
+/// `J = sum (x_k^T Q x_k + u_k^T R u_k)`
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Model {
     /// Length of bar [m]
@@ -60,6 +75,13 @@ impl Default for Model {
 }
 
 impl StateSpace<NX, NU> for Model {
+    /// Returns the discrete-time system matrices for one simulation step.
+    ///
+    /// The implementation uses a first-order forward Euler discretization of
+    /// the linearized continuous model:
+    ///
+    /// `A_d ~= I + A_c dt`
+    /// `B_d ~= B_c dt`
     fn model(&self, dt: f32) -> (AMat, BMat) {
         let Self {
             l_bar,

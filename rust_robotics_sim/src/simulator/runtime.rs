@@ -1,3 +1,15 @@
+//! Runtime and timebase management for the interactive simulator.
+//!
+//! This module is the execution side of `Simulator`. It owns:
+//!
+//! - the active mode and pause state
+//! - fixed-step accumulation against wall-clock time
+//! - restart / reset semantics
+//! - per-mode stepping dispatch
+//! - MuJoCo overlay synchronization hooks
+//!
+//! Separating this logic from the UI modules keeps update semantics readable and
+//! makes it easier to test the simulator state machine without involving `egui`.
 use super::{
     InvertedPendulum, ParticleFilter, PathPlanning, PendulumNoiseConfig, SimMode, Simulate,
     Simulator, SlamDemo, PENDULUM_FIXED_DT,
@@ -5,22 +17,30 @@ use super::{
 use web_time::Instant;
 
 impl Simulator {
+    /// Returns the currently selected simulator mode.
     pub fn mode(&self) -> SimMode {
         self.mode
     }
 
+    /// Returns whether simulation stepping is currently paused.
     pub fn paused(&self) -> bool {
         self.paused
     }
 
+    /// Returns the current simulation time in seconds.
     pub fn time(&self) -> f32 {
         self.time
     }
 
+    /// Sets the paused state without mutating any other simulator state.
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
     }
 
+    /// Restarts the active mode from the same configured parameters.
+    ///
+    /// This clears the current timebase and dynamic state, but intentionally
+    /// keeps user-selected tuning and configuration intact.
     pub fn restart(&mut self) {
         self.time = 0.0;
         self.sim_accumulator = 0.0;
@@ -28,6 +48,10 @@ impl Simulator {
         self.reset_state();
     }
 
+    /// Switches the active mode and resets cross-mode transient state.
+    ///
+    /// Mode changes reset the local time accumulator and the contextual help
+    /// tour so each mode starts from a clean interaction baseline.
     pub fn set_mode(&mut self, mode: SimMode) {
         if self.mode == mode {
             return;
@@ -39,11 +63,13 @@ impl Simulator {
         self.reset_help_tour();
     }
 
+    /// Synchronizes whether the MuJoCo overlay should be active this frame.
     pub(super) fn sync_mujoco_overlay_active(&mut self) {
         let active = self.mode == SimMode::Mujoco;
         self.simulations.mujoco_panel.set_active(active);
     }
 
+    /// Publishes rectangles that should occlude interactive MuJoCo overlays.
     pub(super) fn sync_mujoco_overlay_occlusions(&mut self, rects: &[egui::Rect]) {
         let interactive = self.mode == SimMode::Mujoco && rects.is_empty();
         self.simulations
@@ -51,6 +77,7 @@ impl Simulator {
             .set_overlay_occlusions(rects, interactive);
     }
 
+    /// Builds the current pendulum noise configuration from top-level toggles.
     fn pendulum_noise_config(&self) -> PendulumNoiseConfig {
         PendulumNoiseConfig {
             enabled: self.pendulum_noise_enabled,
@@ -58,6 +85,11 @@ impl Simulator {
         }
     }
 
+    /// Advances the active mode using a fixed-step wall-clock accumulator.
+    ///
+    /// All non-MuJoCo modes currently share the pendulum demo's `dt`, while
+    /// MuJoCo uses its own panel-defined fixed step. The accumulator is capped
+    /// to avoid an unbounded catch-up burst after long frame stalls.
     pub fn update(&mut self) {
         self.sync_mujoco_overlay_active();
         let now = Instant::now();
@@ -124,6 +156,8 @@ impl Simulator {
         }
     }
 
+    /// Accumulates elapsed wall-clock time and runs as many fixed-size steps as
+    /// needed to catch the simulation up.
     fn step_fixed_dt<F>(&mut self, elapsed: f32, dt: f32, mut step_once: F)
     where
         F: FnMut(&mut Self, f32),
@@ -137,6 +171,7 @@ impl Simulator {
         }
     }
 
+    /// Resets only dynamic state for the active mode.
     fn reset_state(&mut self) {
         match self.mode {
             SimMode::InvertedPendulum => {
@@ -172,6 +207,7 @@ impl Simulator {
         }
     }
 
+    /// Restores the active mode to its full default state.
     pub(super) fn reset_all(&mut self) {
         match self.mode {
             SimMode::InvertedPendulum => {
@@ -204,6 +240,10 @@ impl Simulator {
         }
     }
 
+    /// Adds another simulation instance for the active mode when supported.
+    ///
+    /// The simulator uses this to enable side-by-side comparisons under a shared
+    /// timebase and mostly shared initial conditions.
     pub(super) fn add_simulation(&mut self) {
         match self.mode {
             SimMode::InvertedPendulum => {

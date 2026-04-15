@@ -1,3 +1,11 @@
+//! Localization helpers and state conventions.
+//!
+//! The localization demos in this workspace use a common vehicle state ordering:
+//!
+//! `x = [pos_x, pos_y, heading, speed]`
+//!
+//! This module provides small shared traits and the particle-filter
+//! implementation used by the simulator.
 use crate::prelude::*;
 
 pub mod particle_filter;

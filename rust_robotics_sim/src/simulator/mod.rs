@@ -1,3 +1,17 @@
+//! Top-level simulator orchestration for the Rust Robotics application.
+//!
+//! This module defines the public simulator traits and the `Simulator`
+//! coordinator that stitches all interactive demos together. The internal split
+//! is responsibility-driven:
+//!
+//! - `runtime`: stepping, reset, pause, mode switching, timebase management
+//! - `help`: guided tutorial overlays and highlighted UI regions
+//! - `ui`: shared UI layout plus mode-specific panels
+//! - `pendulum`, `localization`, `path_planning`, `slam`, `mujoco`: concrete
+//!   mode implementations
+//!
+//! The central design rule is that `Simulator` owns cross-mode application
+//! state, while each mode owns its own domain logic.
 pub mod common;
 mod help;
 pub mod localization;
@@ -131,6 +145,7 @@ impl SimMode {
     }
 }
 
+/// Shared UI state that is independent of a specific simulation mode.
 struct SharedUiState {
     show_graph: bool,
     pendulum_plot_tab: PendulumPlotTab,
@@ -145,6 +160,10 @@ impl Default for SharedUiState {
     }
 }
 
+/// Shared planner/environment settings applied to newly created planning demos.
+///
+/// These values live at the simulator level so multiple planners can be kept in
+/// sync while still allowing each planner instance to own its own search state.
 struct PathPlanningSettings {
     grid_width: usize,
     grid_height: usize,
@@ -165,6 +184,7 @@ impl Default for PathPlanningSettings {
     }
 }
 
+/// State required to drive the guided help tour and highlight overlays.
 struct HelpUiState {
     visited_modes: HashSet<SimMode>,
     tutorial_enabled: Option<bool>,
@@ -195,6 +215,11 @@ impl Default for HelpUiState {
     }
 }
 
+/// Per-mode simulation collections owned by the app coordinator.
+///
+/// Grouping these together keeps the top-level `Simulator` from becoming a flat
+/// bag of unrelated vectors and makes the distinction between "global app state"
+/// and "per-mode simulation instances" explicit.
 struct SimulationCollections {
     pendulums: Vec<InvertedPendulum>,
     vehicles: Vec<ParticleFilter>,

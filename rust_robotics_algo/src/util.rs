@@ -372,14 +372,14 @@ macro_rules! diag {
 #[macro_export]
 macro_rules! eye {
     (
-        $size:expr        
+        $size:expr
     ) => {{
         use nalgebra::{SMatrix, SVector};
         SMatrix::from_diagonal(&SVector::from([1.0; $size]))
     }};
     (
         $size:expr,
-        $off_diag:expr      
+        $off_diag:expr
     ) => {{
         // use crate::S;
         let mut out = zeros!($size, $size);
@@ -431,7 +431,7 @@ macro_rules! zeros {
         use nalgebra::SMatrix;
         SMatrix::<f32, $rows, $cols>::zeros()
     }};
-    (    
+    (
         $rows:expr,
         $cols:expr,
         $ty:ty
@@ -456,7 +456,7 @@ macro_rules! ones {
         use nalgebra::SMatrix;
         SMatrix::<f32, $rows, $cols>::from_element(1.0)
     }};
-    (    
+    (
         $rows:expr,
         $cols:expr,
         $ty:ty

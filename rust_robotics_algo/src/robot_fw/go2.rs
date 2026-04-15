@@ -1,15 +1,36 @@
+//! Go2-specific observation building and actuation decoding.
+//!
+//! The Go2 policy interface is recurrent and history-dependent. This controller
+//! therefore keeps short histories of gravity, joint position, joint velocity,
+//! and previous actions so it can reconstruct the exact observation layout
+//! expected by the policy.
+//!
+//! The overall execution path is:
+//!
+//! 1. ingest raw robot state from the world/runtime
+//! 2. update short history buffers
+//! 3. build the observation vector expected by the ONNX policy
+//! 4. build the command feature vector for the current command mode
+//! 5. run inference, including recurrent state
+//! 6. smooth and store the new action
+//! 7. decode the action into joint torques via PD tracking
 use super::{
     oscillator, quaternion_yaw, rotate_vector_by_inverse_quaternion, shift_history_12,
     shift_history_3, Actuation, Command, InferenceBackend, InferenceInput, Observation,
     PolicyOutput, RawState,
 };
 
+/// High-level command style used by the Go2 controller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Go2CommandMode {
+    /// Track commanded body-frame velocity and yaw-rate features.
     Velocity,
+    /// Track a Cartesian setpoint interpreted as an impedance-style target.
     Impedance,
 }
 
+/// Shared Go2 controller wrapper around observation construction, recurrent
+/// state management, and actuation decoding.
 pub struct Go2Controller {
     command_mode: Go2CommandMode,
     default_jpos: [f32; 12],
@@ -26,6 +47,7 @@ pub struct Go2Controller {
 }
 
 impl Go2Controller {
+    /// Creates a controller with the provided nominal joint and gain settings.
     pub fn new(
         command_mode: Go2CommandMode,
         default_jpos: [f32; 12],
@@ -49,6 +71,7 @@ impl Go2Controller {
         }
     }
 
+    /// Resets all recurrent and history-dependent state.
     pub fn reset(&mut self) {
         self.last_actions = [0.0; 12];
         self.action_history = [[0.0; 12]; 3];
@@ -59,6 +82,7 @@ impl Go2Controller {
         self.is_init = true;
     }
 
+    /// Updates history buffers from the latest raw robot state.
     pub fn update_from_raw_state(&mut self, raw: &RawState) {
         let gravity = rotate_vector_by_inverse_quaternion(raw.base_quat, [0.0, 0.0, -1.0]);
         shift_history_3(&mut self.gravity_history, gravity);
@@ -66,6 +90,18 @@ impl Go2Controller {
         shift_history_12(&mut self.joint_vel_history, raw.joint_vel);
     }
 
+    /// Builds the policy observation vector from the stored short histories.
+    ///
+    /// The observation is a dense concatenation of:
+    ///
+    /// - three samples of gravity in body coordinates
+    /// - three samples of joint positions
+    /// - three samples of joint velocities
+    /// - three samples of previous actions
+    ///
+    /// This gives the recurrent policy both instantaneous state and a short
+    /// finite window of temporal context, which is useful even before the
+    /// recurrent hidden state has adapted.
     pub fn build_observation(&self) -> Observation {
         let mut out = Vec::with_capacity(117);
 
@@ -87,6 +123,13 @@ impl Go2Controller {
         Observation { values: out }
     }
 
+    /// Builds the command-side feature vector expected by the policy.
+    ///
+    /// The feature layout depends on the command mode because the same robot can
+    /// be driven as:
+    ///
+    /// - a velocity-tracking locomotion policy
+    /// - a setpoint/impedance-style target tracker
     pub fn build_command_input(&self, raw: &RawState, command: &Command) -> Observation {
         match self.command_mode {
             Go2CommandMode::Velocity => self.build_velocity_command_input(raw, command),
@@ -94,6 +137,10 @@ impl Go2Controller {
         }
     }
 
+    /// Builds command features for velocity-tracking mode.
+    ///
+    /// Commands are rotated into the body frame so the policy sees a
+    /// robot-centric target regardless of world yaw.
     fn build_velocity_command_input(&self, raw: &RawState, command: &Command) -> Observation {
         let command_body =
             rotate_vector_by_inverse_quaternion(raw.base_quat, [command.vel_x, command.vel_y, 0.0]);
@@ -122,6 +169,11 @@ impl Go2Controller {
         }
     }
 
+    /// Builds command features for setpoint / impedance-style mode.
+    ///
+    /// A world-space setpoint is first expressed in the robot body frame, then
+    /// clamped to a bounded radius so the policy always sees a normalized local
+    /// target rather than an arbitrarily large world displacement.
     fn build_impedance_command_input(&self, raw: &RawState, command: &Command) -> Observation {
         let kp = 24.0f32;
         let kd = 1.8 * kp.sqrt();
@@ -186,14 +238,27 @@ impl Go2Controller {
         }
     }
 
+    /// Returns whether the recurrent policy should treat the next step as an
+    /// initialization step.
     pub fn is_init(&self) -> bool {
         self.is_init
     }
 
+    /// Returns the current recurrent hidden state buffer.
     pub fn adapt_hx(&self) -> &[f32; 128] {
         &self.adapt_hx
     }
 
+    /// Integrates a raw policy output into the controller state.
+    ///
+    /// Two important pieces of logic happen here:
+    ///
+    /// - the recurrent state is updated for the next inference call
+    /// - actions are low-pass filtered against the previous action
+    ///
+    /// That smoothing is a practical robustness measure: it reduces abrupt
+    /// target jumps that would otherwise become sharp torque spikes after PD
+    /// decoding.
     pub fn integrate_policy_output(&mut self, output: &PolicyOutput) -> Result<(), String> {
         if output.actions.len() < 12 {
             return Err(format!(
@@ -220,6 +285,11 @@ impl Go2Controller {
         Ok(())
     }
 
+    /// Runs one full Go2 control step.
+    ///
+    /// This is the main bridge from world state to actuation:
+    ///
+    /// `raw state -> observation/history -> inference -> smoothed action -> PD torque`
     pub fn step(
         &mut self,
         raw: &RawState,
@@ -239,6 +309,12 @@ impl Go2Controller {
         Ok(self.decode_actuation(raw))
     }
 
+    /// Decodes the latest normalized action into joint torques.
+    ///
+    /// The current decoder treats the policy output as a joint-position offset
+    /// around `default_jpos`, then applies a standard PD tracking law:
+    ///
+    /// `tau = kp * (q_target - q) + kd * (0 - q_dot)`
     pub fn decode_actuation(&self, raw: &RawState) -> Actuation {
         let mut torques = [0.0f32; 12];
         for i in 0..12 {
@@ -249,10 +325,12 @@ impl Go2Controller {
         Actuation::JointTorques(torques)
     }
 
+    /// Returns the most recent smoothed action vector.
     pub fn last_actions(&self) -> &[f32; 12] {
         &self.last_actions
     }
 
+    /// Returns the controller's current command mode.
     pub fn command_mode(&self) -> Go2CommandMode {
         self.command_mode
     }

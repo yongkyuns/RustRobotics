@@ -1,7 +1,30 @@
+//! Model Predictive Control for the inverted pendulum.
+//!
+//! This module solves a finite-horizon quadratic program at each control step.
+//! Compared with LQR, the main difference is that MPC explicitly optimizes over
+//! a sequence of future states and controls:
+//!
+//! - decision variables: all predicted states `x(0..N)` and controls `u(0..N-1)`
+//! - objective: sum of stage costs plus a terminal cost
+//! - constraints: system dynamics and actuator bounds
+//!
+//! The quadratic program has the standard form:
+//!
+//! `min 1/2 z^T P z + q^T z`
+//!
+//! subject to:
+//!
+//! `A z = b` for dynamics
+//! `G z <= h` for control bounds
+//!
+//! where `z` stacks all future states and controls. The terminal cost uses the
+//! infinite-horizon LQR Riccati solution so the finite-horizon optimization
+//! inherits a stabilizing tail cost.
 use super::*;
 use crate::prelude::*;
 
-const N: usize = 12; // Prediction horizon
+/// Prediction horizon length.
+const N: usize = 12;
 
 /// Total number of decision variables: (N+1) states + N controls
 const N_VARS: usize = (N + 1) * NX + N * NU;
@@ -10,7 +33,7 @@ const N_EQ: usize = (N + 1) * NX;
 /// Number of inequality constraints (control bounds only: upper + lower for each control)
 const N_INEQ: usize = 2 * N * NU;
 
-/// MPC control using quadratic programming with Clarabel solver
+/// MPC control using quadratic programming with the Clarabel solver.
 ///
 /// This function computes the optimal control input for an inverted pendulum
 /// using Model Predictive Control with a quadratic cost function.
@@ -21,7 +44,18 @@ const N_INEQ: usize = 2 * N * NU;
 /// * `dt` - Time step
 ///
 /// # Returns
-/// The optimal control input (force on cart)
+/// The optimal control input (force on cart).
+///
+/// High-level derivation:
+///
+/// 1. discretize the pendulum model into `(A_d, B_d)`
+/// 2. build a horizon-stacked quadratic objective over states and controls
+/// 3. encode dynamics as equality constraints
+/// 4. encode actuator saturation as inequality constraints
+/// 5. solve the QP
+/// 6. apply only the first optimized control `u(0)` and discard the rest
+///
+/// This "receding horizon" procedure is repeated every time step.
 pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     use crate::control::LQR;
     use clarabel::algebra::*;
@@ -33,7 +67,8 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let umin = -50.0_f64;
     let umax = 50.0_f64;
 
-    // Stage cost weights - add position regulation to prevent drift
+    // Stage cost weights. Position is penalized so the cart does not drift
+    // while stabilizing the rod angle.
     let Q = diag![1.0_f32, 1., 10., 1.]; // [pos, vel, angle, angular_vel]
     let R = model.R; // Use model's R matrix
 
@@ -41,17 +76,21 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let mut mpc_model = model;
     mpc_model.Q = Q;
 
-    // Terminal cost: Use LQR cost-to-go (DARE solution) for stability
+    // Terminal cost: use the infinite-horizon LQR value function approximation
+    // from the Riccati equation. This is the standard MPC trick for better
+    // finite-horizon stability.
     let QN = mpc_model.solve_DARE(Ad, Bd);
 
     // Initial state (from input) and reference state
     let x0_vec: [f64; NX] = [x[0] as f64, x[1] as f64, x[2] as f64, x[3] as f64];
     let xr: [f64; NX] = [0.0, 0.0, 0.0, 0.0]; // Reference: upright at origin
 
-    // Build QP matrices
+    // Build QP matrices.
     // Decision variables: z = [x(0), x(1), ..., x(N), u(0), ..., u(N-1)]
 
-    // Quadratic cost matrix P (block diagonal)
+    // Quadratic cost matrix P (block diagonal in the stacked variables):
+    // repeated stage-state cost, one terminal-state cost, then repeated
+    // control cost.
     let P_mat = block_diag!(kron!(eye!(N), Q), QN, kron!(eye!(N), R));
 
     // Linear cost vector q
@@ -163,7 +202,9 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let mut solver = DefaultSolver::new(&P_csc, &q_vec, &A_csc, &b_vec, &cones, settings);
     solver.solve();
 
-    // Extract first control input u(0)
+    // Extract only the first control input u(0). This is the standard receding
+    // horizon MPC pattern: solve for the whole sequence, apply the first
+    // action, then re-solve next step with a new measured state.
     // Decision variables are ordered: [x(0)..x(N), u(0)..u(N-1)]
     // u(0) starts at index (N+1)*NX
     let u_idx = (N + 1) * NX;

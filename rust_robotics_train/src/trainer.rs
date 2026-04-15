@@ -1,3 +1,14 @@
+//! PPO training loop for the pendulum environment.
+//!
+//! The implementation here is intentionally direct and readable. It follows the
+//! standard PPO recipe:
+//!
+//! 1. roll out the current policy in the environment
+//! 2. estimate returns and generalized advantages
+//! 3. normalize advantages
+//! 4. optimize the clipped surrogate objective for the actor
+//! 5. optimize mean-squared error for the critic
+//! 6. expose portable snapshots for runtime consumption
 use crate::{
     algorithm::PpoConfig,
     backend::{AutodiffBackend, AutodiffDevice},
@@ -17,6 +28,16 @@ use serde::{Deserialize, Serialize};
 
 const OBS_DIM: usize = 4;
 
+/// Configuration for a pendulum PPO training session.
+///
+/// The fields are split between:
+///
+/// - environment dynamics (`env`)
+/// - PPO optimizer behavior (`ppo`)
+/// - model capacity (`hidden_dim`)
+/// - action sampling behavior (`action_std`)
+/// - whether snapshots should be synchronized back into the simulator after
+///   each update (`sync_policy_each_update`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PpoTrainerConfig {
     pub env: PendulumEnvConfig,
@@ -38,6 +59,10 @@ impl Default for PpoTrainerConfig {
     }
 }
 
+/// A single rollout worth of PPO training data.
+///
+/// The trainer stores already-computed returns and advantages so optimization
+/// can focus purely on minibatch updates.
 #[derive(Debug, Clone)]
 struct RolloutBatch {
     observations: Vec<[f32; 4]>,
@@ -47,6 +72,15 @@ struct RolloutBatch {
     advantages: Vec<f32>,
 }
 
+/// Stateful PPO trainer session for the inverted pendulum task.
+///
+/// A session owns:
+///
+/// - the current environment state
+/// - actor / critic networks
+/// - optimizer state
+/// - running metrics
+/// - the latest observation used to continue rollouts across update calls
 pub struct PpoTrainerSession {
     config: PpoTrainerConfig,
     device: AutodiffDevice,
@@ -63,6 +97,7 @@ pub struct PpoTrainerSession {
 }
 
 impl PpoTrainerSession {
+    /// Creates a new trainer session with fresh actor and critic networks.
     pub fn new(config: PpoTrainerConfig) -> Self {
         let device = Default::default();
         let env = PendulumEnv::new(Default::default(), config.env);
@@ -86,18 +121,22 @@ impl PpoTrainerSession {
         }
     }
 
+    /// Returns the immutable training configuration for this session.
     pub fn config(&self) -> &PpoTrainerConfig {
         &self.config
     }
 
+    /// Returns the latest runtime metrics.
     pub fn metrics(&self) -> &PpoMetrics {
         &self.metrics
     }
 
+    /// Exports the current actor as a portable runtime snapshot.
     pub fn snapshot(&self) -> PolicySnapshot {
         self.actor.valid().snapshot(self.config.action_std)
     }
 
+    /// Exports both actor and critic state for replica synchronization.
     pub fn shared_state(&self) -> PpoSharedState {
         PpoSharedState {
             policy: self.snapshot(),
@@ -105,6 +144,10 @@ impl PpoTrainerSession {
         }
     }
 
+    /// Replaces the actor and critic with externally provided shared state.
+    ///
+    /// Optimizers are reinitialized because their internal moments are tied to
+    /// the old parameter tensors.
     pub fn load_shared_state(&mut self, state: &PpoSharedState) {
         self.actor = policy_network_from_snapshot(&state.policy, &self.device);
         self.critic = value_network_from_snapshot(&state.value, &self.device);
@@ -112,6 +155,10 @@ impl PpoTrainerSession {
         self.critic_optimizer = AdamConfig::new().init();
     }
 
+    /// Runs a requested number of PPO updates.
+    ///
+    /// Each update collects a fresh rollout, then performs one optimization pass
+    /// over that rollout using shuffled minibatches.
     pub fn train_updates(&mut self, num_updates: usize) {
         for _ in 0..num_updates {
             let rollout = self.collect_rollout();
@@ -120,6 +167,14 @@ impl PpoTrainerSession {
         }
     }
 
+    /// Collects a rollout from the current policy and computes GAE targets.
+    ///
+    /// This is the part of PPO where raw environment interaction is converted
+    /// into stable supervised targets for the actor and critic:
+    ///
+    /// - observations / actions / log-probs are stored for policy replay
+    /// - rewards and values feed generalized advantage estimation
+    /// - terminal transitions reset the environment and update metrics
     fn collect_rollout(&mut self) -> RolloutBatch {
         let rollout_steps = self.config.ppo.rollout_steps;
         let mut observations = Vec::with_capacity(rollout_steps);
@@ -194,6 +249,14 @@ impl PpoTrainerSession {
         }
     }
 
+    /// Optimizes actor and critic networks from a prepared rollout batch.
+    ///
+    /// The actor uses the clipped PPO surrogate:
+    ///
+    /// `min(r_t * A_t, clip(r_t, 1-eps, 1+eps) * A_t)`
+    ///
+    /// where `r_t` is the ratio of new to old action probability. The critic
+    /// uses a plain mean-squared error objective against bootstrapped returns.
     fn optimize(&mut self, rollout: &RolloutBatch) {
         let mut indices = (0..rollout.observations.len()).collect::<Vec<_>>();
         let batch_size = self.config.ppo.mini_batch_size.max(1);
@@ -255,6 +318,7 @@ impl PpoTrainerSession {
         self.metrics.last_value_loss = last_value_loss;
     }
 
+    /// Computes the deterministic mean action predicted by the actor.
     fn policy_mean(&self, observation: [f32; 4]) -> f32 {
         let policy = self.actor.valid();
         let tensor = obs_tensor::<
@@ -263,6 +327,7 @@ impl PpoTrainerSession {
         tensor_scalar(&policy.forward(tensor))
     }
 
+    /// Computes the critic's scalar value estimate for one observation.
     fn value_estimate(&self, observation: [f32; 4]) -> f32 {
         let critic = self.critic.valid();
         let tensor = obs_tensor::<
@@ -271,6 +336,8 @@ impl PpoTrainerSession {
         tensor_scalar(&critic.forward(tensor))
     }
 
+    /// Samples a bounded scalar action from the actor mean and configured
+    /// Gaussian exploration noise.
     fn sample_action(&self, mean: f32) -> f32 {
         let std = self.config.action_std.max(1.0e-3);
         (mean + sample_standard_normal() * std)

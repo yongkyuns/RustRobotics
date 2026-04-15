@@ -79,7 +79,11 @@ impl Default for LoopClosureConfig {
     }
 }
 
-/// Loop closure detector for Graph SLAM
+/// Loop-closure detector for graph SLAM.
+///
+/// The detector combines simple spatial heuristics with landmark-consistency
+/// checks so that revisiting a previously mapped region can add a corrective
+/// long-range constraint to the graph.
 pub struct LoopClosureDetector {
     config: LoopClosureConfig,
 }
@@ -91,12 +95,14 @@ impl Default for LoopClosureDetector {
 }
 
 impl LoopClosureDetector {
+    /// Creates a detector with default thresholds.
     pub fn new() -> Self {
         Self {
             config: LoopClosureConfig::default(),
         }
     }
 
+    /// Creates a detector with a caller-provided configuration.
     pub fn with_config(config: LoopClosureConfig) -> Self {
         Self { config }
     }

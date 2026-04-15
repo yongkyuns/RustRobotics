@@ -1,4 +1,9 @@
-//! Grid representation for path planning
+//! Grid representation for path planning.
+//!
+//! `Grid` is the shared environment representation for A*, Dijkstra, and
+//! Theta*. It stores obstacle occupancy in grid coordinates while providing
+//! conversion helpers between discrete cells and world-space positions used by
+//! the simulator UI.
 
 use std::collections::HashSet;
 
