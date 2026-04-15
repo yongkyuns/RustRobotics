@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MUJOCO_VERSION: 3.4.0
 
 jobs:
   build:
@@ -44,6 +45,48 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
+    - name: Install MuJoCo (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        curl -L --fail \
+          -o "$RUNNER_TEMP/mujoco.tar.gz" \
+          "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz"
+        tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
+        echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+    - name: Install MuJoCo (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        curl -L --fail \
+          -o "$RUNNER_TEMP/mujoco.dmg" \
+          "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-macos-universal2.dmg"
+        hdiutil attach "$RUNNER_TEMP/mujoco.dmg" -mountpoint "$RUNNER_TEMP/mujoco-mount" -nobrowse
+        mkdir -p "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/include/mujoco" "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib"
+        cp -R \
+          "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework/Headers/." \
+          "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/include/mujoco/"
+        cp \
+          "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework/Versions/Current/libmujoco.${MUJOCO_VERSION}.dylib" \
+          "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/libmujoco.dylib"
+        hdiutil detach "$RUNNER_TEMP/mujoco-mount"
+        echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+        echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+    - name: Install MuJoCo (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $zip = Join-Path $env:RUNNER_TEMP 'mujoco.zip'
+        $root = Join-Path $env:RUNNER_TEMP "mujoco-$env:MUJOCO_VERSION"
+        Invoke-WebRequest `
+          -Uri "https://github.com/google-deepmind/mujoco/releases/download/$env:MUJOCO_VERSION/mujoco-$env:MUJOCO_VERSION-windows-x86_64.zip" `
+          -OutFile $zip
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        Expand-Archive -Path $zip -DestinationPath $root -Force
+        "MUJOCO_HOME=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        "PATH=$root\\bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
