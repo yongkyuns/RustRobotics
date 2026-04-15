@@ -1,0 +1,11 @@
+{
+  "name": "rust-robotics-web-smoke",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:web-smoke": "playwright test --config playwright.config.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.54.2"
+  }
+}

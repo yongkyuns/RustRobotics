@@ -233,3 +233,119 @@ fn average_linear_snapshots(snapshots: Vec<&LinearSnapshot>) -> Option<LinearSna
         bias,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn linear_snapshot(
+        in_dim: usize,
+        out_dim: usize,
+        weight: &[f32],
+        bias: &[f32],
+    ) -> LinearSnapshot {
+        LinearSnapshot {
+            in_dim,
+            out_dim,
+            weight: weight.to_vec(),
+            bias: bias.to_vec(),
+        }
+    }
+
+    fn shared_state(scale: f32) -> PpoSharedState {
+        PpoSharedState {
+            policy: PolicySnapshot {
+                input: linear_snapshot(
+                    4,
+                    2,
+                    &[
+                        scale,
+                        2.0 * scale,
+                        3.0 * scale,
+                        4.0 * scale,
+                        5.0 * scale,
+                        6.0 * scale,
+                        7.0 * scale,
+                        8.0 * scale,
+                    ],
+                    &[0.5 * scale, 1.5 * scale],
+                ),
+                hidden: linear_snapshot(
+                    2,
+                    2,
+                    &[1.0 * scale, 2.0 * scale, 3.0 * scale, 4.0 * scale],
+                    &[0.25 * scale, 0.75 * scale],
+                ),
+                output: linear_snapshot(2, 1, &[2.0 * scale, 4.0 * scale], &[1.25 * scale]),
+                action_limit: 5.0 + scale,
+                action_std: 0.2 + scale,
+            },
+            value: ValueSnapshot {
+                input: linear_snapshot(
+                    4,
+                    2,
+                    &[
+                        1.0 * scale,
+                        3.0 * scale,
+                        5.0 * scale,
+                        7.0 * scale,
+                        9.0 * scale,
+                        11.0 * scale,
+                        13.0 * scale,
+                        15.0 * scale,
+                    ],
+                    &[2.0 * scale, 4.0 * scale],
+                ),
+                hidden: linear_snapshot(
+                    2,
+                    2,
+                    &[0.5 * scale, 1.5 * scale, 2.5 * scale, 3.5 * scale],
+                    &[4.0 * scale, 6.0 * scale],
+                ),
+                output: linear_snapshot(2, 1, &[8.0 * scale, 10.0 * scale], &[12.0 * scale]),
+            },
+        }
+    }
+
+    #[test]
+    fn average_linear_snapshots_returns_none_on_shape_mismatch() {
+        let first = linear_snapshot(2, 2, &[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0]);
+        let mismatched = linear_snapshot(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[7.0, 8.0]);
+
+        let averaged = average_linear_snapshots(vec![&first, &mismatched]);
+
+        assert!(averaged.is_none());
+    }
+
+    #[test]
+    fn average_shared_states_averages_weights_and_preserves_policy_metadata() {
+        let first = shared_state(1.0);
+        let second = shared_state(3.0);
+
+        let averaged = average_shared_states(&[first.clone(), second]).expect("average state");
+
+        assert_eq!(
+            averaged.policy.input,
+            linear_snapshot(
+                4,
+                2,
+                &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0],
+                &[1.0, 3.0],
+            )
+        );
+        assert_eq!(
+            averaged.policy.hidden,
+            linear_snapshot(2, 2, &[2.0, 4.0, 6.0, 8.0], &[0.5, 1.5])
+        );
+        assert_eq!(
+            averaged.policy.output,
+            linear_snapshot(2, 1, &[4.0, 8.0], &[2.5])
+        );
+        assert_eq!(
+            averaged.value.output,
+            linear_snapshot(2, 1, &[16.0, 20.0], &[24.0])
+        );
+        assert_eq!(averaged.policy.action_limit, first.policy.action_limit);
+        assert_eq!(averaged.policy.action_std, first.policy.action_std);
+    }
+}

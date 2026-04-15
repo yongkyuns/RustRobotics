@@ -104,6 +104,27 @@ impl SimMode {
             SimMode::Slam => "SLAM",
         }
     }
+
+    pub fn test_id(self) -> &'static str {
+        match self {
+            SimMode::InvertedPendulum => "inverted_pendulum",
+            SimMode::Localization => "localization",
+            SimMode::Mujoco => "robot",
+            SimMode::PathPlanning => "path_planning",
+            SimMode::Slam => "slam",
+        }
+    }
+
+    pub fn from_test_id(value: &str) -> Option<Self> {
+        match value {
+            "inverted_pendulum" => Some(Self::InvertedPendulum),
+            "localization" => Some(Self::Localization),
+            "robot" => Some(Self::Mujoco),
+            "path_planning" => Some(Self::PathPlanning),
+            "slam" => Some(Self::Slam),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -263,6 +284,40 @@ impl Default for Simulator {
 }
 
 impl Simulator {
+    pub fn mode(&self) -> SimMode {
+        self.mode
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    pub fn time(&self) -> f32 {
+        self.time
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    pub fn restart(&mut self) {
+        self.time = 0.0;
+        self.sim_accumulator = 0.0;
+        self.last_tick = None;
+        self.reset_state();
+    }
+
+    pub fn set_mode(&mut self, mode: SimMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        self.time = 0.0;
+        self.sim_accumulator = 0.0;
+        self.last_tick = None;
+        self.reset_help_tour();
+    }
+
     fn sync_mujoco_overlay_active(&mut self) {
         let active = self.mode == SimMode::Mujoco;
         self.mujoco_panel.set_active(active);
@@ -1285,7 +1340,7 @@ impl Simulator {
     }
 
     /// Draw the UI directly into a Ui (for embedding in CentralPanel)
-    pub fn ui(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
+    pub fn ui(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>, display_fps: f32) {
         self.sync_mujoco_overlay_active();
         self.help_mode_selector_rect = None;
         self.help_controls_rect = None;
@@ -1299,8 +1354,7 @@ impl Simulator {
 
         // Handle enter key to restart simulation
         if ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
-            self.time = 0.0;
-            self.reset_state();
+            self.restart();
         }
 
         // Handle keyboard input for vehicle simulations
@@ -1333,11 +1387,7 @@ impl Simulator {
                     .selectable_label(self.mode == mode, mode.label())
                     .clicked()
                 {
-                    self.mode = mode;
-                    self.time = 0.0;
-                    self.sim_accumulator = 0.0;
-                    self.last_tick = None;
-                    self.reset_help_tour();
+                    self.set_mode(mode);
                 }
             }
         });
@@ -1369,8 +1419,7 @@ impl Simulator {
                 self.paused = !self.paused;
             }
             if ui.button("Restart").clicked() {
-                self.time = 0.0;
-                self.reset_state();
+                self.restart();
             }
             if ui.button("Reset All").clicked() {
                 self.time = 0.0;
@@ -1421,6 +1470,13 @@ impl Simulator {
                     }
                 }
             }
+
+            ui.separator();
+            ui.label(
+                RichText::new(format!("Display FPS: {:.1}", display_fps))
+                    .strong()
+                    .color(Color32::from_rgb(238, 243, 249)),
+            );
         });
         self.help_controls_rect = Some(controls_response.response.rect);
 

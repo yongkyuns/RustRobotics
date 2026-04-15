@@ -5,3 +5,6 @@
 Cargo.lock
 .DS_Store
 slam_*.csv
+node_modules/
+playwright-report/
+test-results/

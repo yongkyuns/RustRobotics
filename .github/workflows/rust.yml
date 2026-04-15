@@ -113,6 +113,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -129,3 +134,12 @@ jobs:
 
     - name: Build web bundle
       run: ./build_web.sh --fast
+
+    - name: Install web smoke dependencies
+      run: npm install
+
+    - name: Install Chromium for Playwright
+      run: npx playwright install --with-deps chromium
+
+    - name: Run browser smoke tests
+      run: npm run test:web-smoke

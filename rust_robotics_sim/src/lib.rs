@@ -62,3 +62,36 @@ pub async fn start(canvas_id: &str) -> Result<(), wasm_bindgen::JsValue> {
 
     Ok(())
 }
+
+#[cfg(target_arch = "wasm32")]
+fn js_err(message: impl Into<String>) -> JsValue {
+    js_sys::Error::new(&message.into()).into()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_get_state() -> Result<JsValue, JsValue> {
+    let state = app::web_test_state().ok_or_else(|| js_err("web test state is not initialized"))?;
+    serde_wasm_bindgen::to_value(&state).map_err(|err| js_err(err.to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_set_mode(mode: &str) -> Result<(), JsValue> {
+    let mode = simulator::SimMode::from_test_id(mode)
+        .ok_or_else(|| js_err(format!("unsupported simulator mode: {mode}")))?;
+    app::web_test_set_mode(mode);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_set_paused(paused: bool) {
+    app::web_test_set_paused(paused);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_restart() {
+    app::web_test_restart();
+}
