@@ -43,8 +43,15 @@ jobs:
     - name: Install Linux dependencies
       if: runner.os == 'Linux'
       run: |
-        sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+        export DEBIAN_FRONTEND=noninteractive
+        timeout 10m sudo apt-get update -o Acquire::Retries=3
+        timeout 15m sudo apt-get install -y --no-install-recommends \
+          libgtk-3-dev \
+          libxcb-render0-dev \
+          libxcb-shape0-dev \
+          libxcb-xfixes0-dev \
+          libxkbcommon-dev \
+          libssl-dev
 
     - name: Install MuJoCo (Linux)
       if: runner.os == 'Linux'
