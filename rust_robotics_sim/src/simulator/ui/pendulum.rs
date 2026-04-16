@@ -79,17 +79,22 @@ impl Simulator {
         nice * magnitude
     }
 
-    pub(super) fn render_pendulum_scene(&self, ui: &mut Ui) -> Rect {
+    pub(super) fn render_pendulum_scene(&self, ui: &mut Ui, embedded: bool) -> Rect {
+        let min_scene_height = if embedded { 140.0 } else { 240.0 };
         let desired_size = vec2(
             ui.available_width().max(240.0),
-            ui.available_height().max(240.0),
+            ui.available_height().max(min_scene_height),
         );
         let (response, painter) = ui.allocate_painter(desired_size, Sense::hover());
         let rect = response.rect;
         let visuals = ui.visuals();
         let plot_rect = rect;
-        let scene_rect = plot_rect.shrink(12.0);
-        let pad = 12.0;
+        let scene_rect = if embedded {
+            plot_rect.shrink(10.0)
+        } else {
+            plot_rect.shrink(12.0)
+        };
+        let pad = if embedded { 10.0 } else { 12.0 };
         let painter = painter.with_clip_rect(plot_rect);
 
         painter.rect_filled(plot_rect, 2.0, visuals.extreme_bg_color);
@@ -142,8 +147,13 @@ impl Simulator {
             max_y = max_y.max(rod_bottom_y);
         }
 
-        let width = (max_x - min_x).max(2.0);
-        let height = (max_y - min_y).max(2.0);
+        let framing_padding = if scene_rect.width() < 820.0 {
+            1.35
+        } else {
+            1.2
+        };
+        let width = (max_x - min_x).max(2.0) * framing_padding;
+        let height = (max_y - min_y).max(2.0) * framing_padding;
         let usable_width = (scene_rect.width() - 2.0 * pad).max(1.0);
         let usable_height = (scene_rect.height() - 2.0 * pad).max(1.0);
         let scale = (usable_width / width).min(usable_height / height);

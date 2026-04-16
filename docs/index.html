@@ -35,6 +35,11 @@
         background: #909090;
       }
 
+      html.embedded-focused,
+      html.embedded-focused body {
+        background: transparent;
+      }
+
       @media (prefers-color-scheme: dark) {
         body {
           /* Dark mode background color for what is not covered by the egui canvas,
@@ -218,6 +223,53 @@
       globalThis.rustRoboticsTestSetMode = wasm_bindgen.rust_robotics_test_set_mode;
       globalThis.rustRoboticsTestSetPaused = wasm_bindgen.rust_robotics_test_set_paused;
       globalThis.rustRoboticsTestRestart = wasm_bindgen.rust_robotics_test_restart;
+      globalThis.rustRoboticsSetEmbedMode = wasm_bindgen.rust_robotics_set_embed_mode;
+
+      function applyInitialSimulatorStateFromQuery() {
+        const params = new URLSearchParams(window.location.search);
+        const mode = params.get("mode");
+        const paused = params.get("paused");
+        const restart = params.get("restart");
+        const embed = params.get("embed");
+
+        if (embed === "focused") {
+          document.documentElement.classList.add("embedded-focused");
+        }
+
+        if (mode && typeof globalThis.rustRoboticsTestSetMode === "function") {
+          try {
+            globalThis.rustRoboticsTestSetMode(mode);
+          } catch (error) {
+            console.warn("Failed to apply simulator mode from query string:", error);
+          }
+        }
+
+        if (embed && typeof globalThis.rustRoboticsSetEmbedMode === "function") {
+          try {
+            globalThis.rustRoboticsSetEmbedMode(embed);
+          } catch (error) {
+            console.warn("Failed to apply embed mode from query string:", error);
+          }
+        }
+
+        if (paused !== null && typeof globalThis.rustRoboticsTestSetPaused === "function") {
+          try {
+            const pausedValue = paused === "1" || paused === "true";
+            globalThis.rustRoboticsTestSetPaused(pausedValue);
+          } catch (error) {
+            console.warn("Failed to apply paused state from query string:", error);
+          }
+        }
+
+        if ((restart === "1" || restart === "true")
+          && typeof globalThis.rustRoboticsTestRestart === "function") {
+          try {
+            globalThis.rustRoboticsTestRestart();
+          } catch (error) {
+            console.warn("Failed to apply restart from query string:", error);
+          }
+        }
+      }
 
       console.log("=== SCRIPT START ===");
       console.log("loading wasm…");
@@ -237,6 +289,9 @@
           await wasm_bindgen.start("the_canvas_id");
           console.log("=== APP STARTED ===");
           console.log("Canvas after start:", canvas.width, "x", canvas.height);
+          requestAnimationFrame(() => {
+            applyInitialSimulatorStateFromQuery();
+          });
 
           document.getElementById("center_text").remove();
         } catch (e) {

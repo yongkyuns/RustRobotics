@@ -8,3 +8,4 @@ slam_*.csv
 node_modules/
 playwright-report/
 test-results/
+site_docs/_build/

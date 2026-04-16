@@ -187,7 +187,7 @@ impl Simulator {
                 ui.allocate_ui_with_layout(
                     vec2(total_width, scene_height),
                     Layout::top_down(Align::Min),
-                    |ui| self.show_scene_pane(ui, frame),
+                    |ui| self.show_scene_pane(ui, frame, false),
                 );
             });
         } else {
@@ -204,10 +204,210 @@ impl Simulator {
                 ui.allocate_ui_with_layout(
                     vec2(ui.available_width(), content_height),
                     Layout::top_down(Align::Min),
-                    |ui| self.show_scene_pane(ui, frame),
+                    |ui| self.show_scene_pane(ui, frame, false),
                 );
             });
         }
+    }
+
+    /// Builds the focused tutorial/embed layout with controls across the top
+    /// and the main visualization below.
+    pub(in crate::simulator) fn show_embedded_content(
+        &mut self,
+        ui: &mut Ui,
+        frame: Option<&eframe::Frame>,
+        display_fps: f32,
+    ) {
+        let total_width = ui.available_width();
+        let is_narrow = total_width < 900.0;
+        let controls_max_height = match self.mode {
+            SimMode::Mujoco => {
+                if is_narrow {
+                    (total_width * 0.42).clamp(220.0, 360.0)
+                } else {
+                    (total_width * 0.24).clamp(200.0, 300.0)
+                }
+            }
+            SimMode::PathPlanning | SimMode::Slam => {
+                if is_narrow {
+                    (total_width * 0.36).clamp(190.0, 280.0)
+                } else {
+                    (total_width * 0.2).clamp(170.0, 240.0)
+                }
+            }
+            SimMode::InvertedPendulum | SimMode::Localization => {
+                if is_narrow {
+                    (total_width * 0.22).clamp(130.0, 180.0)
+                } else {
+                    (total_width * 0.12).clamp(120.0, 160.0)
+                }
+            }
+        };
+        let scene_height = match self.mode {
+            SimMode::Mujoco => {
+                if is_narrow {
+                    (total_width * 0.9).clamp(360.0, 580.0)
+                } else {
+                    (total_width * 0.58).clamp(360.0, 520.0)
+                }
+            }
+            SimMode::InvertedPendulum => {
+                if is_narrow {
+                    (total_width * 0.28).clamp(180.0, 240.0)
+                } else {
+                    (total_width * 0.18).clamp(160.0, 220.0)
+                }
+            }
+            SimMode::Localization | SimMode::PathPlanning | SimMode::Slam => {
+                if is_narrow {
+                    (total_width * 0.72).clamp(320.0, 460.0)
+                } else {
+                    (total_width * 0.48).clamp(320.0, 420.0)
+                }
+            }
+        };
+
+        let controls_response = egui::Frame::NONE
+            .inner_margin(Margin {
+                left: 8,
+                right: 8,
+                top: 12,
+                bottom: 8,
+            })
+            .show(ui, |ui| {
+                self.show_embedded_shared_controls_row(ui, display_fps);
+                ui.add_space(6.0);
+
+                ScrollArea::vertical()
+                    .max_height((controls_max_height - 48.0).max(120.0))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.show_embedded_controls_panel(ui))
+            });
+        self.help_state.help_options_rect = Some(controls_response.response.rect);
+
+        ui.add_space(4.0);
+
+        ui.allocate_ui_with_layout(
+            vec2(total_width, scene_height),
+            Layout::top_down(Align::Min),
+            |ui| {
+                egui::Frame::group(ui.style())
+                    .inner_margin(Margin::same(6))
+                    .show(ui, |ui| self.show_scene_pane(ui, frame, true));
+            },
+        );
+    }
+
+    fn show_embedded_shared_controls_row(&mut self, ui: &mut Ui, display_fps: f32) {
+        ui.horizontal_wrapped(|ui| {
+            let btn_text = if self.paused { "Play" } else { "Pause" };
+            if ui.button(btn_text).clicked() {
+                self.paused = !self.paused;
+            }
+            if ui.button("Restart").clicked() {
+                self.restart();
+            }
+            if ui.button("Reset All").clicked() {
+                self.time = 0.0;
+                self.reset_all();
+            }
+
+            if self.mode != SimMode::Slam && self.mode != SimMode::Mujoco {
+                let add_label = match self.mode {
+                    SimMode::InvertedPendulum => "Add Pendulum",
+                    SimMode::Localization => "Add Vehicle",
+                    SimMode::Mujoco => unreachable!(),
+                    SimMode::PathPlanning => "Add Planner",
+                    SimMode::Slam => unreachable!(),
+                };
+                if ui.button(add_label).clicked() {
+                    self.add_simulation();
+                }
+            }
+
+            ui.separator();
+            ui.label("Speed:");
+            ui.add(Slider::new(&mut self.sim_speed, 1..=20).show_value(true));
+
+            if self.mode == SimMode::InvertedPendulum {
+                ui.separator();
+                ui.checkbox(&mut self.pendulum_noise_enabled, "Noise");
+                ui.add_enabled(
+                    self.pendulum_noise_enabled,
+                    Slider::new(&mut self.pendulum_noise_scale, 0.0..=3.0)
+                        .text("Magnitude")
+                        .show_value(true),
+                );
+            }
+
+            if self.mode == SimMode::Slam {
+                if let Some(slam) = self.simulations.slam_demos.first_mut() {
+                    ui.separator();
+                    ui.label("Landmarks:");
+                    let response =
+                        ui.add(Slider::new(&mut slam.n_landmarks, 1..=50).show_value(true));
+                    if response.drag_stopped() {
+                        slam.regenerate_landmarks();
+                    }
+                }
+            }
+
+            ui.separator();
+            ui.label(
+                RichText::new(format!("FPS: {:.1}", display_fps))
+                    .strong()
+                    .color(Color32::from_rgb(238, 243, 249)),
+            );
+        });
+    }
+
+    fn show_embedded_controls_panel(&mut self, ui: &mut Ui) {
+        let use_vertical_cards = matches!(
+            self.mode,
+            SimMode::InvertedPendulum | SimMode::Localization | SimMode::Slam
+        );
+        self.show_option_cards(ui, use_vertical_cards);
+
+        let show_keyboard_controls = (self.mode == SimMode::Localization
+            && self
+                .simulations
+                .vehicles
+                .iter()
+                .any(|vehicle| vehicle.is_dynamic_mode()))
+            || (self.mode == SimMode::Slam
+                && self
+                    .simulations
+                    .slam_demos
+                    .iter()
+                    .any(|slam| slam.is_manual_mode()));
+
+        if show_keyboard_controls {
+            ui.add_space(6.0);
+            ui.collapsing("Keyboard Controls", |ui| match self.mode {
+                SimMode::Localization => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("← → : Steering");
+                        ui.label("↑ ↓ : Accelerate / Brake");
+                        ui.label("Space : Pause");
+                        ui.label("Enter : Restart");
+                    });
+                }
+                SimMode::Slam => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("← → : Turn Left / Right");
+                        ui.label("↑ ↓ : Speed Up / Slow Down");
+                        ui.label("Space : Pause");
+                        ui.label("Enter : Restart");
+                    });
+                }
+                _ => {}
+            });
+        }
+
+        ui.add_space(6.0);
+        ui.collapsing("Instructions", |ui| {
+            self.show_mode_instructions(ui);
+        });
     }
 
     /// Renders the sidebar containing option cards, contextual keyboard help,
@@ -280,12 +480,13 @@ impl Simulator {
         &mut self,
         ui: &mut Ui,
         frame: Option<&eframe::Frame>,
+        embedded: bool,
     ) {
         if self.mode == SimMode::Mujoco {
             self.simulations.mujoco_panel.ui_viewport(ui, frame);
             self.help_state.help_scene_rect = Some(ui.min_rect());
         } else if self.mode == SimMode::InvertedPendulum {
-            self.help_state.help_scene_rect = Some(self.render_pendulum_scene(ui));
+            self.help_state.help_scene_rect = Some(self.render_pendulum_scene(ui, embedded));
         } else {
             let mut plot = Plot::new("Scene")
                 .legend(Legend::default().position(Corner::RightTop))

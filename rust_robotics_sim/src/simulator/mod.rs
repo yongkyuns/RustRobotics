@@ -319,4 +319,41 @@ impl Simulator {
         self.sync_mujoco_overlay_occlusions(&overlay_occlusions);
         self.sync_mujoco_overlay_active();
     }
+
+    /// Draws only the mode-specific main content area for tightly embedded
+    /// tutorial/documentation contexts.
+    ///
+    /// This intentionally omits the global mode selector, shared controls row,
+    /// help overlays, and detached graph window so the caller can embed just
+    /// the active simulator surface and its mode-specific sidebar.
+    pub fn ui_embedded(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>, display_fps: f32) {
+        self.sync_mujoco_overlay_active();
+        self.reset_help_regions();
+        self.handle_ui_input(ui.ctx());
+        self.show_embedded_content(ui, frame, display_fps);
+        self.sync_mujoco_overlay_occlusions(&[]);
+        self.sync_mujoco_overlay_active();
+    }
+
+    /// Returns the rendered content height for the focused embed layout.
+    ///
+    /// This is used by the docs iframe host to size the embed from actual egui
+    /// layout measurements instead of a heuristic guess.
+    pub fn embedded_content_height(&self) -> Option<f32> {
+        let mut bottom = 0.0_f32;
+        let mut saw_rect = false;
+
+        for rect in [
+            self.help_state.help_options_rect,
+            self.help_state.help_scene_rect,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            saw_rect = true;
+            bottom = bottom.max(rect.bottom());
+        }
+
+        saw_rect.then_some(bottom + 20.0)
+    }
 }

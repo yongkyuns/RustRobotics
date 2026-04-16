@@ -4,46 +4,64 @@ use eframe::egui::{
 
 pub fn install(ctx: &egui::Context) {
     ctx.set_theme(Theme::Dark);
-    ctx.set_style(build_style());
+    ctx.set_style(build_style(UiDensity::Comfortable));
     ctx.set_visuals(build_visuals());
 }
 
-fn build_style() -> Style {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiDensity {
+    Comfortable,
+    Compact,
+}
+
+pub fn apply_density(ctx: &egui::Context, density: UiDensity) {
+    ctx.set_style(build_style(density));
+    ctx.set_visuals(build_visuals());
+}
+
+fn build_style(density: UiDensity) -> Style {
     let mut style = Style::default();
+    let scale = match density {
+        UiDensity::Comfortable => 1.0,
+        UiDensity::Compact => 0.82,
+    };
 
     style.text_styles = [
         (
             TextStyle::Heading,
-            FontId::new(22.0, FontFamily::Proportional),
+            FontId::new(22.0 * scale, FontFamily::Proportional),
         ),
         (
             TextStyle::Name("Heading2".into()),
-            FontId::new(20.0, FontFamily::Proportional),
+            FontId::new(20.0 * scale, FontFamily::Proportional),
         ),
-        (TextStyle::Body, FontId::new(15.5, FontFamily::Proportional)),
+        (
+            TextStyle::Body,
+            FontId::new(15.5 * scale, FontFamily::Proportional),
+        ),
         (
             TextStyle::Monospace,
-            FontId::new(14.0, FontFamily::Monospace),
+            FontId::new(14.0 * scale, FontFamily::Monospace),
         ),
         (
             TextStyle::Button,
-            FontId::new(15.0, FontFamily::Proportional),
+            FontId::new(15.0 * scale, FontFamily::Proportional),
         ),
         (
             TextStyle::Small,
-            FontId::new(13.0, FontFamily::Proportional),
+            FontId::new(13.0 * scale, FontFamily::Proportional),
         ),
     ]
     .into();
 
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    style.spacing.button_padding = egui::vec2(12.0, 8.0);
-    style.spacing.menu_margin = egui::Margin::same(10);
-    style.spacing.window_margin = egui::Margin::same(8);
-    style.spacing.indent = 18.0;
-    style.spacing.combo_width = 148.0;
-    style.spacing.slider_width = 180.0;
-    style.spacing.interact_size = egui::vec2(42.0, 28.0);
+    style.spacing.item_spacing = egui::vec2(10.0 * scale, 10.0 * scale);
+    style.spacing.button_padding = egui::vec2(12.0 * scale, 8.0 * scale);
+    style.spacing.menu_margin = egui::Margin::same((10.0 * scale).round() as i8);
+    style.spacing.window_margin = egui::Margin::same((8.0 * scale).round() as i8);
+    style.spacing.indent = 18.0 * scale;
+    style.spacing.combo_width = 148.0 * scale;
+    style.spacing.slider_width = 180.0 * scale;
+    style.spacing.interact_size = egui::vec2(42.0 * scale, 28.0 * scale);
     style.visuals = build_visuals();
 
     style

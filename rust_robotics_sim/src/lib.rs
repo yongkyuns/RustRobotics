@@ -95,3 +95,12 @@ pub fn rust_robotics_test_set_paused(paused: bool) {
 pub fn rust_robotics_test_restart() {
     app::web_test_restart();
 }
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_set_embed_mode(mode: &str) -> Result<(), JsValue> {
+    let mode = app::WebEmbedMode::from_query_value(mode)
+        .ok_or_else(|| js_err(format!("unsupported embed mode: {mode}")))?;
+    app::web_test_set_embed_mode(mode);
+    Ok(())
+}
