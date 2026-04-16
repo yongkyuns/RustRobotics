@@ -11,6 +11,11 @@
 //! Separating this logic from the UI modules keeps update semantics readable and
 //! makes it easier to test the simulator state machine without involving `egui`.
 use super::{
+    localization::{DriveMode as LocalizationDriveMode, LocalizationCardState, LocalizationPatch},
+    path_planning::{
+        Algorithm as PathPlanningAlgorithm, EnvironmentMode as PathPlanningEnvironmentMode,
+        PathPlannerCardState, PathPlannerPatch,
+    },
     pendulum::{ControllerKind, PendulumCardState, PendulumPatch},
     InvertedPendulum, ParticleFilter, PathPlanning, PendulumNoiseConfig, SimMode, Simulate,
     Simulator, SlamDemo, PENDULUM_FIXED_DT,
@@ -122,6 +127,144 @@ impl Simulator {
             .find(|pendulum| pendulum.id() == pendulum_id)
         {
             pendulum.apply_patch(patch);
+        }
+    }
+
+    /// Returns the serialized DOM-card state for each active localization demo.
+    pub(crate) fn localization_ui_state(&self) -> Vec<LocalizationCardState> {
+        self.simulations
+            .vehicles
+            .iter()
+            .map(ParticleFilter::card_state)
+            .collect()
+    }
+
+    /// Removes a localization vehicle instance by id, keeping at least one alive.
+    pub(crate) fn remove_localization_vehicle(&mut self, vehicle_id: usize) {
+        if self.simulations.vehicles.len() <= 1 {
+            return;
+        }
+        self.simulations
+            .vehicles
+            .retain(|vehicle| vehicle.id() != vehicle_id);
+    }
+
+    /// Sets the drive mode for one localization vehicle.
+    pub(crate) fn set_localization_drive_mode(
+        &mut self,
+        vehicle_id: usize,
+        drive_mode: LocalizationDriveMode,
+    ) {
+        if let Some(vehicle) = self
+            .simulations
+            .vehicles
+            .iter_mut()
+            .find(|vehicle| vehicle.id() == vehicle_id)
+        {
+            vehicle.set_drive_mode(drive_mode);
+        }
+    }
+
+    /// Applies a partial configuration patch to one localization vehicle.
+    pub(crate) fn patch_localization_vehicle(
+        &mut self,
+        vehicle_id: usize,
+        patch: LocalizationPatch,
+    ) {
+        if let Some(vehicle) = self
+            .simulations
+            .vehicles
+            .iter_mut()
+            .find(|vehicle| vehicle.id() == vehicle_id)
+        {
+            vehicle.apply_patch(patch);
+        }
+    }
+
+    /// Returns the current path-planning environment mode used by the web embed.
+    pub(crate) fn path_planning_env_mode(&self) -> PathPlanningEnvironmentMode {
+        self.path_settings.env_mode
+    }
+
+    /// Returns the current continuous obstacle radius used by new and existing planners.
+    pub(crate) fn path_planning_continuous_obstacle_radius(&self) -> f32 {
+        self.path_settings.continuous_obstacle_radius
+    }
+
+    /// Returns the serialized DOM-card state for each active path-planning comparison panel.
+    pub(crate) fn path_planning_ui_state(&self) -> Vec<PathPlannerCardState> {
+        self.simulations
+            .planners
+            .iter()
+            .map(PathPlanning::card_state)
+            .collect()
+    }
+
+    /// Sets the global path-planning environment mode and propagates it to all planners.
+    pub(crate) fn set_path_planning_env_mode(&mut self, mode: PathPlanningEnvironmentMode) {
+        self.path_settings.env_mode = mode;
+        for planner in &mut self.simulations.planners {
+            planner.set_env_mode(mode);
+            planner.set_continuous_obstacle_radius(self.path_settings.continuous_obstacle_radius);
+        }
+    }
+
+    /// Sets the continuous obstacle radius used by all path-planning demos.
+    pub(crate) fn set_path_planning_continuous_obstacle_radius(&mut self, radius: f32) {
+        let radius = radius.clamp(0.1, 5.0);
+        self.path_settings.continuous_obstacle_radius = radius;
+        for planner in &mut self.simulations.planners {
+            planner.set_continuous_obstacle_radius(radius);
+        }
+    }
+
+    /// Removes a path-planning comparison panel by id, keeping at least one alive.
+    pub(crate) fn remove_path_planner(&mut self, planner_id: usize) {
+        if self.simulations.planners.len() <= 1 {
+            return;
+        }
+        self.simulations
+            .planners
+            .retain(|planner| planner.id() != planner_id);
+    }
+
+    /// Updates the selected primary algorithm for one path-planning comparison panel.
+    pub(crate) fn set_path_planner_algorithm(
+        &mut self,
+        planner_id: usize,
+        algorithm: PathPlanningAlgorithm,
+    ) {
+        if let Some(planner) = self
+            .simulations
+            .planners
+            .iter_mut()
+            .find(|planner| planner.id() == planner_id)
+        {
+            planner.set_primary_algorithm(algorithm);
+        }
+    }
+
+    /// Updates whether one planner card shows visited cells / the RRT tree.
+    pub(crate) fn set_path_planner_show_visited(&mut self, planner_id: usize, show_visited: bool) {
+        if let Some(planner) = self
+            .simulations
+            .planners
+            .iter_mut()
+            .find(|planner| planner.id() == planner_id)
+        {
+            planner.set_primary_show_visited(show_visited);
+        }
+    }
+
+    /// Applies a partial patch to one path-planning comparison panel.
+    pub(crate) fn patch_path_planner(&mut self, planner_id: usize, patch: PathPlannerPatch) {
+        if let Some(planner) = self
+            .simulations
+            .planners
+            .iter_mut()
+            .find(|planner| planner.id() == planner_id)
+        {
+            planner.apply_primary_patch(patch);
         }
     }
 

@@ -77,6 +77,14 @@ pub fn rust_robotics_test_get_state() -> Result<JsValue, JsValue> {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+pub fn rust_robotics_embed_get_state() -> Result<JsValue, JsValue> {
+    let state =
+        app::web_embed_state().ok_or_else(|| js_err("web embed state is not initialized"))?;
+    serde_wasm_bindgen::to_value(&state).map_err(|err| js_err(err.to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 pub fn rust_robotics_test_set_mode(mode: &str) -> Result<(), JsValue> {
     let mode = simulator::SimMode::from_test_id(mode)
         .ok_or_else(|| js_err(format!("unsupported simulator mode: {mode}")))?;
@@ -127,10 +135,10 @@ pub fn rust_robotics_test_set_pendulum_controller(
     controller: &str,
 ) -> Result<(), JsValue> {
     let kind = match controller {
-        "lqr" => app::SimPendulumControllerKind::Lqr,
-        "pid" => app::SimPendulumControllerKind::Pid,
-        "mpc" => app::SimPendulumControllerKind::Mpc,
-        "policy" => app::SimPendulumControllerKind::Policy,
+        "lqr" => simulator::pendulum::ControllerKind::Lqr,
+        "pid" => simulator::pendulum::ControllerKind::Pid,
+        "mpc" => simulator::pendulum::ControllerKind::Mpc,
+        "policy" => simulator::pendulum::ControllerKind::Policy,
         _ => {
             return Err(js_err(format!(
                 "unsupported pendulum controller: {controller}"
@@ -180,5 +188,14 @@ pub fn rust_robotics_test_set_theme(theme: &str) -> Result<(), JsValue> {
     let theme = app::WebThemeMode::from_str(theme)
         .ok_or_else(|| js_err(format!("unsupported web theme: {theme}")))?;
     app::web_test_set_theme_mode(theme);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_embed_dispatch_action(action_json: &str) -> Result<(), JsValue> {
+    let action: app::WebEmbedAction =
+        serde_json::from_str(action_json).map_err(|err| js_err(err.to_string()))?;
+    app::web_embed_dispatch(action);
     Ok(())
 }

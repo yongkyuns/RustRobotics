@@ -24,9 +24,18 @@ pub mod slam;
 mod ui;
 
 use localization::ParticleFilter;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use localization::{
+    DriveMode as LocalizationDriveMode, LocalizationCardState, LocalizationPatch,
+};
 use mujoco::MujocoPanel;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use path_planning::{
+    Algorithm as PathPlanningAlgorithm, PathPlannerCardState, PathPlannerPatch,
+};
 use path_planning::{EnvironmentMode, PathPlanning};
 use pendulum::{InvertedPendulum, NoiseConfig as PendulumNoiseConfig, PENDULUM_FIXED_DT};
+#[cfg(target_arch = "wasm32")]
 pub(crate) use pendulum::{PendulumCardState, PendulumPatch};
 use slam::SlamDemo;
 use ui::PendulumPlotTab;
@@ -488,7 +497,10 @@ impl Simulator {
     /// This is used by the docs iframe host to size the embed from actual egui
     /// layout measurements instead of a heuristic guess.
     pub fn embedded_content_height(&self) -> Option<f32> {
-        if self.mode == SimMode::InvertedPendulum {
+        if matches!(
+            self.mode,
+            SimMode::Localization | SimMode::InvertedPendulum | SimMode::PathPlanning
+        ) {
             let width = self
                 .help_state
                 .help_scene_rect

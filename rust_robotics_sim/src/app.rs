@@ -1,7 +1,9 @@
-use crate::{
-    simulator::{PendulumPatch, Simulator},
-    theme,
+#[cfg(target_arch = "wasm32")]
+use crate::simulator::{
+    LocalizationDriveMode, LocalizationPatch, PathPlannerPatch, PathPlanningAlgorithm,
+    PendulumPatch,
 };
+use crate::{simulator::Simulator, theme};
 
 use eframe::egui::{self, CornerRadius, Stroke};
 use std::time::Duration;
@@ -12,7 +14,7 @@ use crate::simulator::SimMode;
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Object, Reflect};
 #[cfg(target_arch = "wasm32")]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
@@ -27,29 +29,8 @@ thread_local! {
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
 struct WebTestBridge {
-    state: Option<WebTestState>,
-    pending_mode: Option<SimMode>,
-    pending_paused: Option<bool>,
-    pending_embed_mode: Option<WebEmbedMode>,
-    pending_theme: Option<WebThemeMode>,
-    pending_show_graph: Option<bool>,
-    pending_sim_speed: Option<usize>,
-    pending_pendulum_noise_enabled: Option<bool>,
-    pending_pendulum_noise_scale: Option<f32>,
-    pending_pendulum_controller: Option<(usize, SimPendulumControllerKind)>,
-    pending_pendulum_patch: Option<(usize, PendulumPatch)>,
-    pending_remove_pendulum: Option<usize>,
-    add_pendulum_requested: bool,
-    restart_requested: bool,
-}
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SimPendulumControllerKind {
-    Lqr,
-    Pid,
-    Mpc,
-    Policy,
+    state: Option<WebEmbedState>,
+    pending_actions: Vec<WebEmbedAction>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -99,16 +80,124 @@ impl WebEmbedMode {
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(crate) struct WebTestState {
+pub(crate) struct WebEmbedState {
     mode: &'static str,
     paused: bool,
     time: f32,
-    show_graph: bool,
+    toolbar: WebEmbedToolbarState,
+    view: WebEmbedViewState,
+    payload: WebEmbedPayload,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct WebEmbedToolbarState {
     sim_speed: usize,
-    pendulum_noise_enabled: bool,
-    pendulum_noise_scale: f32,
-    pendulum_count: usize,
-    pendulums: Vec<crate::simulator::PendulumCardState>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct WebEmbedViewState {
+    show_graph: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum WebEmbedPayload {
+    Localization {
+        vehicle_count: usize,
+        vehicles: Vec<crate::simulator::LocalizationCardState>,
+    },
+    Pendulum {
+        noise_enabled: bool,
+        noise_scale: f32,
+        pendulum_count: usize,
+        pendulums: Vec<crate::simulator::PendulumCardState>,
+    },
+    PathPlanning {
+        env_mode: crate::simulator::path_planning::EnvironmentMode,
+        continuous_obstacle_radius: f32,
+        planner_count: usize,
+        planners: Vec<crate::simulator::PathPlannerCardState>,
+    },
+    Unsupported,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WebEmbedAction {
+    SetMode {
+        mode: String,
+    },
+    SetPaused {
+        paused: bool,
+    },
+    Restart,
+    SetEmbedMode {
+        mode: String,
+    },
+    SetTheme {
+        theme: String,
+    },
+    SetShowGraph {
+        show_graph: bool,
+    },
+    SetSimSpeed {
+        sim_speed: usize,
+    },
+    SetPendulumNoiseEnabled {
+        enabled: bool,
+    },
+    SetPendulumNoiseScale {
+        scale: f32,
+    },
+    AddActiveSimulation,
+    RemoveLocalizationVehicle {
+        vehicle_id: usize,
+    },
+    SetLocalizationDriveMode {
+        vehicle_id: usize,
+        drive_mode: LocalizationDriveMode,
+    },
+    PatchLocalizationVehicle {
+        vehicle_id: usize,
+        patch: LocalizationPatch,
+    },
+    AddPendulum,
+    RemovePendulum {
+        pendulum_id: usize,
+    },
+    SetPendulumController {
+        pendulum_id: usize,
+        controller: crate::simulator::pendulum::ControllerKind,
+    },
+    PatchPendulum {
+        pendulum_id: usize,
+        patch: PendulumPatch,
+    },
+    SetPathPlanningEnvMode {
+        mode: crate::simulator::path_planning::EnvironmentMode,
+    },
+    SetPathPlanningContinuousObstacleRadius {
+        radius: f32,
+    },
+    RemovePathPlanner {
+        planner_id: usize,
+    },
+    SetPathPlannerAlgorithm {
+        planner_id: usize,
+        algorithm: PathPlanningAlgorithm,
+    },
+    SetPathPlannerShowVisited {
+        planner_id: usize,
+        show_visited: bool,
+    },
+    PatchPathPlanner {
+        planner_id: usize,
+        patch: PathPlannerPatch,
+    },
 }
 
 pub struct App {
@@ -224,62 +313,86 @@ impl eframe::App for App {
 fn apply_web_test_commands(app: &mut App) {
     WEB_TEST_BRIDGE.with(|bridge| {
         let mut bridge = bridge.borrow_mut();
-        if let Some(mode) = bridge.pending_mode.take() {
-            app.sim.set_mode(mode);
-        }
-        if let Some(paused) = bridge.pending_paused.take() {
-            app.sim.set_paused(paused);
-        }
-        if let Some(embed_mode) = bridge.pending_embed_mode.take() {
-            app.embed_mode = embed_mode;
-        }
-        if let Some(theme_mode) = bridge.pending_theme.take() {
-            app.theme_mode = theme_mode.ui_theme();
-        }
-        if let Some(show_graph) = bridge.pending_show_graph.take() {
-            app.sim.set_show_graph(show_graph);
-        }
-        if let Some(sim_speed) = bridge.pending_sim_speed.take() {
-            app.sim.set_sim_speed(sim_speed);
-        }
-        if let Some(enabled) = bridge.pending_pendulum_noise_enabled.take() {
-            app.sim.set_pendulum_noise_enabled(enabled);
-        }
-        if let Some(scale) = bridge.pending_pendulum_noise_scale.take() {
-            app.sim.set_pendulum_noise_scale(scale);
-        }
-        if let Some((pendulum_id, kind)) = bridge.pending_pendulum_controller.take() {
-            app.sim.set_pendulum_controller_kind(
-                pendulum_id,
-                match kind {
-                    SimPendulumControllerKind::Lqr => {
-                        crate::simulator::pendulum::ControllerKind::Lqr
+        for action in bridge.pending_actions.drain(..) {
+            match action {
+                WebEmbedAction::SetMode { mode } => {
+                    if let Some(mode) = SimMode::from_test_id(&mode) {
+                        app.sim.set_mode(mode);
                     }
-                    SimPendulumControllerKind::Pid => {
-                        crate::simulator::pendulum::ControllerKind::Pid
+                }
+                WebEmbedAction::SetPaused { paused } => app.sim.set_paused(paused),
+                WebEmbedAction::Restart => app.sim.restart(),
+                WebEmbedAction::SetEmbedMode { mode } => {
+                    if let Some(embed_mode) = WebEmbedMode::from_query_value(&mode) {
+                        app.embed_mode = embed_mode;
                     }
-                    SimPendulumControllerKind::Mpc => {
-                        crate::simulator::pendulum::ControllerKind::Mpc
+                }
+                WebEmbedAction::SetTheme { theme } => {
+                    if let Some(theme_mode) = WebThemeMode::from_str(&theme) {
+                        app.theme_mode = theme_mode.ui_theme();
                     }
-                    SimPendulumControllerKind::Policy => {
-                        crate::simulator::pendulum::ControllerKind::Policy
-                    }
-                },
-            );
-        }
-        if let Some((pendulum_id, patch)) = bridge.pending_pendulum_patch.take() {
-            app.sim.patch_pendulum(pendulum_id, patch);
-        }
-        if let Some(pendulum_id) = bridge.pending_remove_pendulum.take() {
-            app.sim.remove_pendulum(pendulum_id);
-        }
-        if bridge.add_pendulum_requested {
-            app.sim.add_active_simulation();
-            bridge.add_pendulum_requested = false;
-        }
-        if bridge.restart_requested {
-            app.sim.restart();
-            bridge.restart_requested = false;
+                }
+                WebEmbedAction::SetShowGraph { show_graph } => app.sim.set_show_graph(show_graph),
+                WebEmbedAction::SetSimSpeed { sim_speed } => app.sim.set_sim_speed(sim_speed),
+                WebEmbedAction::SetPendulumNoiseEnabled { enabled } => {
+                    app.sim.set_pendulum_noise_enabled(enabled);
+                }
+                WebEmbedAction::SetPendulumNoiseScale { scale } => {
+                    app.sim.set_pendulum_noise_scale(scale);
+                }
+                WebEmbedAction::AddActiveSimulation => app.sim.add_active_simulation(),
+                WebEmbedAction::RemoveLocalizationVehicle { vehicle_id } => {
+                    app.sim.remove_localization_vehicle(vehicle_id);
+                }
+                WebEmbedAction::SetLocalizationDriveMode {
+                    vehicle_id,
+                    drive_mode,
+                } => {
+                    app.sim.set_localization_drive_mode(vehicle_id, drive_mode);
+                }
+                WebEmbedAction::PatchLocalizationVehicle { vehicle_id, patch } => {
+                    app.sim.patch_localization_vehicle(vehicle_id, patch);
+                }
+                WebEmbedAction::AddPendulum => app.sim.add_active_simulation(),
+                WebEmbedAction::RemovePendulum { pendulum_id } => {
+                    app.sim.remove_pendulum(pendulum_id);
+                }
+                WebEmbedAction::SetPendulumController {
+                    pendulum_id,
+                    controller,
+                } => {
+                    app.sim
+                        .set_pendulum_controller_kind(pendulum_id, controller);
+                }
+                WebEmbedAction::PatchPendulum { pendulum_id, patch } => {
+                    app.sim.patch_pendulum(pendulum_id, patch);
+                }
+                WebEmbedAction::SetPathPlanningEnvMode { mode } => {
+                    app.sim.set_path_planning_env_mode(mode);
+                }
+                WebEmbedAction::SetPathPlanningContinuousObstacleRadius { radius } => {
+                    app.sim.set_path_planning_continuous_obstacle_radius(radius);
+                }
+                WebEmbedAction::RemovePathPlanner { planner_id } => {
+                    app.sim.remove_path_planner(planner_id);
+                }
+                WebEmbedAction::SetPathPlannerAlgorithm {
+                    planner_id,
+                    algorithm,
+                } => {
+                    app.sim.set_path_planner_algorithm(planner_id, algorithm);
+                }
+                WebEmbedAction::SetPathPlannerShowVisited {
+                    planner_id,
+                    show_visited,
+                } => {
+                    app.sim
+                        .set_path_planner_show_visited(planner_id, show_visited);
+                }
+                WebEmbedAction::PatchPathPlanner { planner_id, patch } => {
+                    app.sim.patch_path_planner(planner_id, patch);
+                }
+            }
         }
     });
 }
@@ -287,19 +400,43 @@ fn apply_web_test_commands(app: &mut App) {
 #[cfg(target_arch = "wasm32")]
 fn publish_web_test_state(sim: &Simulator) {
     WEB_TEST_BRIDGE.with(|bridge| {
+        let vehicles = sim.localization_ui_state();
         let pendulums = sim.pendulum_ui_state();
+        let planners = sim.path_planning_ui_state();
 
         let mut bridge = bridge.borrow_mut();
-        bridge.state = Some(WebTestState {
+        bridge.state = Some(WebEmbedState {
             mode: sim.mode().test_id(),
             paused: sim.paused(),
             time: sim.time(),
-            show_graph: sim.show_graph(),
-            sim_speed: sim.sim_speed(),
-            pendulum_noise_enabled: sim.pendulum_noise_enabled(),
-            pendulum_noise_scale: sim.pendulum_noise_scale(),
-            pendulum_count: sim.pendulum_count(),
-            pendulums,
+            toolbar: WebEmbedToolbarState {
+                sim_speed: sim.sim_speed(),
+            },
+            view: WebEmbedViewState {
+                show_graph: sim.show_graph(),
+            },
+            payload: if sim.mode() == crate::simulator::SimMode::Localization {
+                WebEmbedPayload::Localization {
+                    vehicle_count: vehicles.len(),
+                    vehicles,
+                }
+            } else if sim.mode() == crate::simulator::SimMode::InvertedPendulum {
+                WebEmbedPayload::Pendulum {
+                    noise_enabled: sim.pendulum_noise_enabled(),
+                    noise_scale: sim.pendulum_noise_scale(),
+                    pendulum_count: sim.pendulum_count(),
+                    pendulums,
+                }
+            } else if sim.mode() == crate::simulator::SimMode::PathPlanning {
+                WebEmbedPayload::PathPlanning {
+                    env_mode: sim.path_planning_env_mode(),
+                    continuous_obstacle_radius: sim.path_planning_continuous_obstacle_radius(),
+                    planner_count: planners.len(),
+                    planners,
+                }
+            } else {
+                WebEmbedPayload::Unsupported
+            },
         });
     });
 }
@@ -314,7 +451,12 @@ fn publish_embed_height(ctx: &egui::Context, sim: &Simulator, embed_mode: WebEmb
     // reports total document height from `docs/index.html`. If the wasm app
     // also posts its scene-only height, the parent iframe can be shrunk back
     // down and crop the DOM controls.
-    if sim.mode() == crate::simulator::SimMode::InvertedPendulum {
+    if matches!(
+        sim.mode(),
+        crate::simulator::SimMode::Localization
+            | crate::simulator::SimMode::InvertedPendulum
+            | crate::simulator::SimMode::PathPlanning
+    ) {
         return;
     }
 
@@ -359,100 +501,101 @@ fn publish_embed_height(ctx: &egui::Context, sim: &Simulator, embed_mode: WebEmb
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn web_test_state() -> Option<WebTestState> {
+pub(crate) fn web_embed_state() -> Option<WebEmbedState> {
     WEB_TEST_BRIDGE.with(|bridge| bridge.borrow().state.clone())
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn web_test_set_mode(mode: SimMode) {
+pub(crate) fn web_embed_dispatch(action: WebEmbedAction) {
     WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_mode = Some(mode);
+        bridge.borrow_mut().pending_actions.push(action);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn web_test_state() -> Option<WebEmbedState> {
+    web_embed_state()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn web_test_set_mode(mode: SimMode) {
+    web_embed_dispatch(WebEmbedAction::SetMode {
+        mode: mode.test_id().to_owned(),
     });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_set_paused(paused: bool) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_paused = Some(paused);
-    });
+    web_embed_dispatch(WebEmbedAction::SetPaused { paused });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_restart() {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().restart_requested = true;
-    });
+    web_embed_dispatch(WebEmbedAction::Restart);
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_set_embed_mode(mode: WebEmbedMode) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_embed_mode = Some(mode);
+    web_embed_dispatch(WebEmbedAction::SetEmbedMode {
+        mode: match mode {
+            WebEmbedMode::FullApp => "full".to_owned(),
+            WebEmbedMode::FocusedMainContent => "focused".to_owned(),
+        },
     });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_set_theme_mode(mode: WebThemeMode) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_theme = Some(mode);
+    web_embed_dispatch(WebEmbedAction::SetTheme {
+        theme: match mode {
+            WebThemeMode::Light => "light".to_owned(),
+            WebThemeMode::Dark => "dark".to_owned(),
+        },
     });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_set_show_graph(show_graph: bool) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_show_graph = Some(show_graph);
-    });
+    web_embed_dispatch(WebEmbedAction::SetShowGraph { show_graph });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_set_sim_speed(sim_speed: usize) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_sim_speed = Some(sim_speed);
-    });
+    web_embed_dispatch(WebEmbedAction::SetSimSpeed { sim_speed });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_set_pendulum_noise_enabled(enabled: bool) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_pendulum_noise_enabled = Some(enabled);
-    });
+    web_embed_dispatch(WebEmbedAction::SetPendulumNoiseEnabled { enabled });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_set_pendulum_noise_scale(scale: f32) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_pendulum_noise_scale = Some(scale);
-    });
+    web_embed_dispatch(WebEmbedAction::SetPendulumNoiseScale { scale });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_add_pendulum() {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().add_pendulum_requested = true;
-    });
+    web_embed_dispatch(WebEmbedAction::AddPendulum);
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_set_pendulum_controller(
     pendulum_id: usize,
-    kind: SimPendulumControllerKind,
+    kind: crate::simulator::pendulum::ControllerKind,
 ) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_pendulum_controller = Some((pendulum_id, kind));
+    web_embed_dispatch(WebEmbedAction::SetPendulumController {
+        pendulum_id,
+        controller: kind,
     });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_remove_pendulum(pendulum_id: usize) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_remove_pendulum = Some(pendulum_id);
-    });
+    web_embed_dispatch(WebEmbedAction::RemovePendulum { pendulum_id });
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn web_test_patch_pendulum(pendulum_id: usize, patch: PendulumPatch) {
-    WEB_TEST_BRIDGE.with(|bridge| {
-        bridge.borrow_mut().pending_pendulum_patch = Some((pendulum_id, patch));
-    });
+    web_embed_dispatch(WebEmbedAction::PatchPendulum { pendulum_id, patch });
 }

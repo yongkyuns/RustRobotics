@@ -6,19 +6,22 @@ use rust_robotics_algo::path_planning::{
     AStarPlanner, CircleObstacle, DijkstraPlanner, Grid, RrtConfig, RrtNode, RrtPlanner,
     ThetaStarPlanner,
 };
+use serde::{Deserialize, Serialize};
 use web_time::Instant;
 
 use super::{Draw, Simulate};
 
 /// Environment mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EnvironmentMode {
     Grid,
     Continuous,
 }
 
 /// Available path planning algorithms
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Algorithm {
     AStar,
     ThetaStar,
@@ -35,6 +38,39 @@ impl Algorithm {
             Algorithm::Rrt => "RRT",
         }
     }
+}
+
+/// Compact result summary exposed to the docs/tutorial web embed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PathPlannerResultSummary {
+    pub success: bool,
+    pub iterations: usize,
+    pub path_length: Option<f32>,
+    pub optimality_ratio: Option<f32>,
+    pub plan_time_ms: f32,
+}
+
+/// Read-only card state for one externally exposed planner comparison panel.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PathPlannerCardState {
+    pub id: usize,
+    pub algorithm: Algorithm,
+    pub show_visited: bool,
+    pub show_visited_label: String,
+    pub color_hex: String,
+    pub status: String,
+    pub rrt_expand_dist: f32,
+    pub rrt_goal_sample_rate: f32,
+    pub rrt_max_iter: usize,
+    pub result: Option<PathPlannerResultSummary>,
+}
+
+/// Partial update payload for the primary planner settings shown in the web embed.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PathPlannerPatch {
+    pub rrt_expand_dist: Option<f32>,
+    pub rrt_goal_sample_rate: Option<f32>,
+    pub rrt_max_iter: Option<usize>,
 }
 
 /// State of the path planning process
@@ -96,6 +132,25 @@ impl PlannerInstance {
             show_visited: false,
             color,
         }
+    }
+
+    fn show_visited_label(&self) -> &'static str {
+        if self.algorithm == Algorithm::Rrt {
+            "Show Tree"
+        } else {
+            "Show Visited"
+        }
+    }
+
+    fn result_summary(&self) -> Option<PathPlannerResultSummary> {
+        self.result.as_ref().map(|result| PathPlannerResultSummary {
+            success: result.success,
+            iterations: result.iterations,
+            path_length: result.success.then_some(result.path_length),
+            optimality_ratio: (result.success && result.euclidean_distance > 0.0)
+                .then_some(result.path_length / result.euclidean_distance),
+            plan_time_ms: result.plan_time.as_secs_f32() * 1000.0,
+        })
     }
 }
 
@@ -174,6 +229,130 @@ impl PathPlanning {
 
     pub fn id(&self) -> usize {
         self.id
+    }
+
+    fn default_algorithm_for_mode(mode: EnvironmentMode) -> Algorithm {
+        match mode {
+            EnvironmentMode::Grid => Algorithm::AStar,
+            EnvironmentMode::Continuous => Algorithm::Rrt,
+        }
+    }
+
+    fn algorithm_supported_in_mode(mode: EnvironmentMode, algorithm: Algorithm) -> bool {
+        match mode {
+            EnvironmentMode::Grid => {
+                matches!(
+                    algorithm,
+                    Algorithm::AStar | Algorithm::ThetaStar | Algorithm::Dijkstra
+                )
+            }
+            EnvironmentMode::Continuous => {
+                matches!(algorithm, Algorithm::Rrt | Algorithm::ThetaStar)
+            }
+        }
+    }
+
+    fn ensure_primary_planner(&mut self) -> &mut PlannerInstance {
+        if self.planners.is_empty() {
+            let default_algo = Self::default_algorithm_for_mode(self.mode);
+            self.add_planner(default_algo);
+        }
+        &mut self.planners[0]
+    }
+
+    fn primary_planner(&self) -> Option<&PlannerInstance> {
+        self.planners.first()
+    }
+
+    fn reset_visualization(&mut self) {
+        self.animation_progress = 0.0;
+        self.animation_complete = false;
+    }
+
+    fn rerun_primary_if_ready(&mut self) {
+        self.reset_visualization();
+        if self.start.is_some() && self.goal.is_some() {
+            self.run_single_planner(0);
+            self.state = PlanningState::ShowingResult;
+        } else {
+            self.pending_replan = false;
+        }
+    }
+
+    fn status_text(&self) -> String {
+        match self.state {
+            PlanningState::WaitingForStart => "Click in the scene to set the start".to_owned(),
+            PlanningState::WaitingForGoal => "Click in the scene to set the goal".to_owned(),
+            PlanningState::ShowingResult => match self
+                .primary_planner()
+                .and_then(|planner| planner.result.as_ref())
+            {
+                Some(result) if result.success => "Plan ready".to_owned(),
+                Some(_) => "No path found".to_owned(),
+                None => "Scene changed, waiting to replan".to_owned(),
+            },
+        }
+    }
+
+    pub fn card_state(&self) -> PathPlannerCardState {
+        let planner = self.primary_planner();
+        let color = planner
+            .map(|planner| planner.color)
+            .unwrap_or(Color32::from_gray(140));
+        PathPlannerCardState {
+            id: self.id,
+            algorithm: planner
+                .map(|planner| planner.algorithm)
+                .unwrap_or(Self::default_algorithm_for_mode(self.mode)),
+            show_visited: planner.map(|planner| planner.show_visited).unwrap_or(false),
+            show_visited_label: planner
+                .map(|planner| planner.show_visited_label().to_owned())
+                .unwrap_or_else(|| "Show Visited".to_owned()),
+            color_hex: format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b()),
+            status: self.status_text(),
+            rrt_expand_dist: planner
+                .map(|planner| planner.rrt_expand_dist)
+                .unwrap_or(1.0),
+            rrt_goal_sample_rate: planner
+                .map(|planner| planner.rrt_goal_sample_rate)
+                .unwrap_or(0.1),
+            rrt_max_iter: planner.map(|planner| planner.rrt_max_iter).unwrap_or(500),
+            result: planner.and_then(PlannerInstance::result_summary),
+        }
+    }
+
+    pub fn set_primary_algorithm(&mut self, algorithm: Algorithm) {
+        if !Self::algorithm_supported_in_mode(self.mode, algorithm) {
+            return;
+        }
+
+        let planner = self.ensure_primary_planner();
+        if planner.algorithm == algorithm {
+            return;
+        }
+
+        planner.algorithm = algorithm;
+        planner.result = None;
+        self.rerun_primary_if_ready();
+    }
+
+    pub fn set_primary_show_visited(&mut self, show_visited: bool) {
+        let planner = self.ensure_primary_planner();
+        planner.show_visited = show_visited;
+    }
+
+    pub fn apply_primary_patch(&mut self, patch: PathPlannerPatch) {
+        let planner = self.ensure_primary_planner();
+        if let Some(expand) = patch.rrt_expand_dist {
+            planner.rrt_expand_dist = expand.clamp(0.1, 5.0);
+        }
+        if let Some(goal_bias) = patch.rrt_goal_sample_rate {
+            planner.rrt_goal_sample_rate = goal_bias.clamp(0.0, 1.0);
+        }
+        if let Some(max_iter) = patch.rrt_max_iter {
+            planner.rrt_max_iter = max_iter.clamp(100, 5000);
+        }
+        self.rerun_primary_if_ready();
     }
 
     fn get_color(sim_id: usize, planner_id: usize) -> Color32 {
@@ -416,11 +595,7 @@ impl PathPlanning {
         // Preserve this panel's own planner configuration so different algorithms
         // can be compared side-by-side while sharing the same environment.
         if self.planners.is_empty() {
-            let default_algo = if self.mode == EnvironmentMode::Grid {
-                Algorithm::AStar
-            } else {
-                Algorithm::Rrt
-            };
+            let default_algo = Self::default_algorithm_for_mode(self.mode);
             self.add_planner(default_algo);
         }
 
@@ -481,10 +656,7 @@ impl PathPlanning {
             self.mode = mode;
             // Reset planners to defaults suitable for new mode
             self.planners.clear();
-            match self.mode {
-                EnvironmentMode::Grid => self.add_planner(Algorithm::AStar),
-                EnvironmentMode::Continuous => self.add_planner(Algorithm::Rrt),
-            }
+            self.add_planner(Self::default_algorithm_for_mode(self.mode));
             self.clear();
         }
     }

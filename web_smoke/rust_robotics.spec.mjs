@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-async function bootApp(page, baseURL) {
+async function bootApp(page, url) {
   const consoleErrors = [];
   const pageErrors = [];
 
@@ -13,7 +13,7 @@ async function bootApp(page, baseURL) {
     pageErrors.push(error.message);
   });
 
-  const response = await page.goto(baseURL, { waitUntil: "domcontentloaded" });
+  const response = await page.goto(url, { waitUntil: "domcontentloaded" });
   expect(response?.ok()).toBeTruthy();
   await expect(page).toHaveTitle(/Rust Robotics/);
   await expect(page.locator("#the_canvas_id")).toBeVisible();
@@ -135,6 +135,83 @@ test("browser test hooks can switch mode pause and restart deterministically", a
     paused: true,
     time: 0,
   });
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("focused path-planning embed boots with DOM controls and responds to planner actions", async ({
+  page,
+  baseURL,
+}) => {
+  const url = `${baseURL}/?mode=path_planning&embed=focused&ui=smoke_path_planning`;
+  const { consoleErrors, pageErrors } = await bootApp(page, url);
+
+  await page.waitForFunction(() => {
+    const state = window.rustRoboticsEmbedGetState?.();
+    return state?.mode === "path_planning" && state?.payload?.kind === "path_planning";
+  });
+
+  await expect(page.locator("#embed_path_toolbar")).toBeVisible();
+  await expect(page.locator("#embed_path_planner_cards .planner-dom-card")).toHaveCount(1);
+  await expect(page.locator("#path_toolbar_env_mode")).toHaveValue("grid");
+
+  await page.selectOption(".planner-algorithm-select", "theta_star");
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return state.payload.planners[0].algorithm;
+  }).toBe("theta_star");
+
+  await page.selectOption("#path_toolbar_env_mode", "continuous");
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return state.payload.env_mode;
+  }).toBe("continuous");
+
+  await expect(page.locator("#path_toolbar_radius_wrap")).toBeVisible();
+  await page.locator("#path_toolbar_add_planner_button").click();
+  await expect(page.locator("#embed_path_planner_cards .planner-dom-card")).toHaveCount(2);
+
+  const plannerCount = await page.locator("#path_toolbar_planner_count").textContent();
+  expect(plannerCount).toContain("2 planner");
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("focused localization embed boots with DOM controls and responds to vehicle actions", async ({
+  page,
+  baseURL,
+}) => {
+  const url = `${baseURL}/?mode=localization&embed=focused&ui=smoke_localization`;
+  const { consoleErrors, pageErrors } = await bootApp(page, url);
+
+  await page.waitForFunction(() => {
+    const state = window.rustRoboticsEmbedGetState?.();
+    return state?.mode === "localization" && state?.payload?.kind === "localization";
+  });
+
+  await expect(page.locator("#embed_localization_toolbar")).toBeVisible();
+  await expect(page.locator("#embed_localization_cards .localization-dom-card")).toHaveCount(1);
+  await expect(page.locator(".localization-drive-mode")).toHaveValue("kinematic");
+
+  await page.locator(".localization-motion-details summary").click();
+  await page.locator(".localization-velocity").fill("7.5");
+  await page.locator(".localization-velocity").blur();
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return Number(state.payload.vehicles[0].velocity).toFixed(1);
+  }).toBe("7.5");
+
+  await page.selectOption(".localization-drive-mode", "dynamic");
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return state.payload.vehicles[0].drive_mode;
+  }).toBe("dynamic");
+
+  await page.locator("#localization_toolbar_add_vehicle_button").click();
+  await expect(page.locator("#embed_localization_cards .localization-dom-card")).toHaveCount(2);
+
+  const vehicleCount = await page.locator("#localization_toolbar_vehicle_count").textContent();
+  expect(vehicleCount).toContain("2 vehicle");
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
 });

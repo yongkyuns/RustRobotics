@@ -7,6 +7,7 @@ use rb::control::vehicle::{BicycleModel, TireModel, TireParams, VehicleParams, V
 use rb::localization::{particle_filter::*, StateVector};
 use rb::prelude::*;
 use rust_robotics_algo as rb;
+use serde::{Deserialize, Serialize};
 
 pub type State = rb::Vector4;
 
@@ -22,7 +23,8 @@ const MARKERS: [rb::Vector2; 4] = [
 ];
 
 /// Drive mode for vehicle control
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DriveMode {
     /// Kinematic mode: specify velocity and yaw rate directly
     Kinematic,
@@ -37,6 +39,32 @@ impl DriveMode {
             DriveMode::Dynamic => "User Control",
         }
     }
+}
+
+/// Compact read-only state exposed for a localization card in the web tutorial embed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LocalizationCardState {
+    pub id: usize,
+    pub drive_mode: DriveMode,
+    pub drive_mode_label: String,
+    pub status: String,
+    pub velocity: f32,
+    pub yaw_rate: f32,
+    pub max_range: f32,
+    pub obs_noise: f32,
+    pub motion_noise_v: f32,
+    pub motion_noise_yaw: f32,
+}
+
+/// Partial update payload for the subset of localization parameters curated for docs embeds.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LocalizationPatch {
+    pub velocity: Option<f32>,
+    pub yaw_rate: Option<f32>,
+    pub max_range: Option<f32>,
+    pub obs_noise: Option<f32>,
+    pub motion_noise_v: Option<f32>,
+    pub motion_noise_yaw: Option<f32>,
 }
 
 /// Configurable parameters for particle filter
@@ -198,6 +226,73 @@ impl ParticleFilter {
 
     pub fn id(&self) -> usize {
         self.id
+    }
+
+    fn enter_drive_mode(&mut self, drive_mode: DriveMode) {
+        self.config.drive_mode = drive_mode;
+        if drive_mode == DriveMode::Dynamic {
+            self.vehicle_state.x = self.x_true.x();
+            self.vehicle_state.y = self.x_true.y();
+            self.vehicle_state.yaw = self.x_true[2];
+            self.vehicle_state.vx = self.config.velocity.max(1.0);
+            self.bicycle_model.vx = self.vehicle_state.vx;
+        }
+    }
+
+    fn status_text(&self) -> String {
+        match self.config.drive_mode {
+            DriveMode::Kinematic => format!(
+                "Fixed input at {:.1} m/s and {:.2} rad/s",
+                self.config.velocity, self.config.yaw_rate
+            ),
+            DriveMode::Dynamic => format!(
+                "Keyboard drive · steer {:.0}° · vx {:.1} m/s",
+                self.keyboard.steering.to_degrees(),
+                self.vehicle_state.vx
+            ),
+        }
+    }
+
+    pub(crate) fn card_state(&self) -> LocalizationCardState {
+        LocalizationCardState {
+            id: self.id,
+            drive_mode: self.config.drive_mode,
+            drive_mode_label: self.config.drive_mode.label().to_owned(),
+            status: self.status_text(),
+            velocity: self.config.velocity,
+            yaw_rate: self.config.yaw_rate,
+            max_range: self.config.max_range,
+            obs_noise: self.config.obs_noise,
+            motion_noise_v: self.config.motion_noise_v,
+            motion_noise_yaw: self.config.motion_noise_yaw,
+        }
+    }
+
+    pub(crate) fn set_drive_mode(&mut self, drive_mode: DriveMode) {
+        if self.config.drive_mode != drive_mode {
+            self.enter_drive_mode(drive_mode);
+        }
+    }
+
+    pub(crate) fn apply_patch(&mut self, patch: LocalizationPatch) {
+        if let Some(velocity) = patch.velocity {
+            self.config.velocity = velocity.clamp(0.0, 30.0);
+        }
+        if let Some(yaw_rate) = patch.yaw_rate {
+            self.config.yaw_rate = yaw_rate.clamp(-1.0, 1.0);
+        }
+        if let Some(max_range) = patch.max_range {
+            self.config.max_range = max_range.clamp(5.0, 100.0);
+        }
+        if let Some(obs_noise) = patch.obs_noise {
+            self.config.obs_noise = obs_noise.clamp(0.1, 5.0);
+        }
+        if let Some(motion_noise_v) = patch.motion_noise_v {
+            self.config.motion_noise_v = motion_noise_v.clamp(0.5, 10.0);
+        }
+        if let Some(motion_noise_yaw) = patch.motion_noise_yaw {
+            self.config.motion_noise_yaw = motion_noise_yaw.clamp(1.0, 90.0);
+        }
     }
 
     fn update_history(&mut self) {
@@ -502,15 +597,7 @@ impl Draw for ParticleFilter {
                             .selectable_label(self.config.drive_mode == mode, mode.label())
                             .clicked()
                         {
-                            self.config.drive_mode = mode;
-                            if mode == DriveMode::Dynamic {
-                                // Initialize vehicle state from current position
-                                self.vehicle_state.x = self.x_true.x();
-                                self.vehicle_state.y = self.x_true.y();
-                                self.vehicle_state.yaw = self.x_true[2];
-                                self.vehicle_state.vx = self.config.velocity.max(1.0);
-                                self.bicycle_model.vx = self.vehicle_state.vx;
-                            }
+                            self.enter_drive_mode(mode);
                         }
                     }
                 });
