@@ -14,6 +14,7 @@ use rb::slam::{
     Landmark2D, Observation, Pose2D, RobustKernelType,
 };
 use rust_robotics_algo as rb;
+use serde::{Deserialize, Serialize};
 use web_time::Instant;
 
 /// Maximum history length for trajectory visualization
@@ -30,8 +31,9 @@ const EKF_COLOR: Color32 = Color32::from_rgb(66, 135, 245); // Blue
 const GRAPH_COLOR: Color32 = Color32::from_rgb(156, 39, 176); // Purple
 
 /// Drive mode for the SLAM vehicle
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DriveMode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DriveMode {
     /// Automatic circular motion with fixed velocity and yaw rate
     Auto,
     /// Manual keyboard control
@@ -45,6 +47,35 @@ impl DriveMode {
             DriveMode::Manual => "Manual",
         }
     }
+}
+
+/// Compact read-only card state for the SLAM tutorial embed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct SlamCardState {
+    pub(crate) id: usize,
+    pub(crate) drive_mode: DriveMode,
+    pub(crate) status: String,
+    pub(crate) ekf_enabled: bool,
+    pub(crate) graph_enabled: bool,
+    pub(crate) velocity: f32,
+    pub(crate) yaw_rate: f32,
+    pub(crate) n_landmarks: usize,
+    pub(crate) show_covariance: bool,
+    pub(crate) show_observations: bool,
+    pub(crate) show_dr: bool,
+    pub(crate) show_true_landmarks: bool,
+}
+
+/// Partial update payload for the curated SLAM tutorial controls.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct SlamPatch {
+    pub(crate) velocity: Option<f32>,
+    pub(crate) yaw_rate: Option<f32>,
+    pub(crate) n_landmarks: Option<usize>,
+    pub(crate) show_covariance: Option<bool>,
+    pub(crate) show_observations: Option<bool>,
+    pub(crate) show_dr: Option<bool>,
+    pub(crate) show_true_landmarks: Option<bool>,
 }
 
 /// Keyboard input state for manual control
@@ -469,6 +500,95 @@ impl SlamDemo {
 
     pub fn id(&self) -> usize {
         self.id
+    }
+
+    fn reset_algorithm_state(&mut self) {
+        self.x_true = rb::Vector3::zeros();
+        self.x_dr = rb::Vector3::zeros();
+        self.h_true = vec![rb::Vector3::zeros()];
+        self.h_dr = vec![rb::Vector3::zeros()];
+        self.current_observations.clear();
+        self.step_count = 0;
+        self.ekf.reset();
+        self.graph.reset(self.n_landmarks);
+    }
+
+    fn status_text(&self) -> String {
+        match self.drive_mode {
+            DriveMode::Auto => format!(
+                "Auto motion at {:.2} m/s, {:.2} rad/s",
+                self.velocity, self.yaw_rate
+            ),
+            DriveMode::Manual => format!(
+                "Manual drive · v {:.1} m/s · ω {:.2} rad/s",
+                self.keyboard.velocity, self.keyboard.yaw_rate
+            ),
+        }
+    }
+
+    pub(crate) fn card_state(&self) -> SlamCardState {
+        SlamCardState {
+            id: self.id,
+            drive_mode: self.drive_mode,
+            status: self.status_text(),
+            ekf_enabled: self.ekf.enabled,
+            graph_enabled: self.graph.enabled,
+            velocity: self.velocity,
+            yaw_rate: self.yaw_rate,
+            n_landmarks: self.n_landmarks,
+            show_covariance: self.show_covariance,
+            show_observations: self.show_observations,
+            show_dr: self.show_dr,
+            show_true_landmarks: self.show_true_landmarks,
+        }
+    }
+
+    pub(crate) fn set_drive_mode(&mut self, drive_mode: DriveMode) {
+        self.drive_mode = drive_mode;
+    }
+
+    pub(crate) fn set_ekf_enabled(&mut self, enabled: bool) {
+        let needs_reset = enabled && !self.ekf.enabled;
+        self.ekf.enabled = enabled;
+        if needs_reset {
+            self.reset_algorithm_state();
+        }
+    }
+
+    pub(crate) fn set_graph_enabled(&mut self, enabled: bool) {
+        let needs_reset = enabled && !self.graph.enabled;
+        self.graph.enabled = enabled;
+        if needs_reset {
+            self.reset_algorithm_state();
+        }
+    }
+
+    pub(crate) fn apply_patch(&mut self, patch: SlamPatch) {
+        if let Some(velocity) = patch.velocity {
+            self.velocity = velocity.clamp(0.1, 3.0);
+        }
+        if let Some(yaw_rate) = patch.yaw_rate {
+            self.yaw_rate = yaw_rate.clamp(-0.5, 0.5);
+        }
+        if let Some(n_landmarks) = patch.n_landmarks {
+            let n_landmarks = n_landmarks.clamp(1, 50);
+            if self.n_landmarks != n_landmarks {
+                self.n_landmarks = n_landmarks;
+                self.regenerate_landmarks();
+            }
+        }
+        if let Some(show_covariance) = patch.show_covariance {
+            self.show_covariance = show_covariance;
+        }
+        if let Some(show_observations) = patch.show_observations {
+            self.show_observations = show_observations;
+        }
+        if let Some(show_dr) = patch.show_dr {
+            self.show_dr = show_dr;
+        }
+        if let Some(show_true_landmarks) = patch.show_true_landmarks {
+            self.show_true_landmarks = show_true_landmarks;
+        }
     }
 
     /// Handle keyboard input for manual mode
@@ -1107,14 +1227,7 @@ impl Draw for SlamDemo {
                     });
                     // Reset simulation when algorithm is enabled mid-run
                     if needs_reset {
-                        self.x_true = rb::Vector3::zeros();
-                        self.x_dr = rb::Vector3::zeros();
-                        self.h_true = vec![rb::Vector3::zeros()];
-                        self.h_dr = vec![rb::Vector3::zeros()];
-                        self.current_observations.clear();
-                        self.step_count = 0;
-                        self.ekf.reset();
-                        self.graph.reset(self.n_landmarks);
+                        self.reset_algorithm_state();
                     }
                 });
             });

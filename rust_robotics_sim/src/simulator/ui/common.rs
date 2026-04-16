@@ -284,6 +284,19 @@ impl Simulator {
             return;
         }
 
+        if self.mode == SimMode::Slam {
+            let scene_height = ui.available_height().max(spec.scene_height);
+            ui.allocate_ui_with_layout(
+                vec2(total_width, scene_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.add_space(spec.scene_margin as f32);
+                    self.show_scene_pane(ui, frame, true);
+                },
+            );
+            return;
+        }
+
         let controls_response =
             egui::Frame::NONE
                 .inner_margin(spec.controls_margin)

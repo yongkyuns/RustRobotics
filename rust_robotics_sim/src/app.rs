@@ -1,7 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 use crate::simulator::{
     LocalizationDriveMode, LocalizationPatch, PathPlannerPatch, PathPlanningAlgorithm,
-    PendulumPatch,
+    PendulumPatch, SlamDriveMode, SlamPatch,
 };
 use crate::{simulator::Simulator, theme};
 
@@ -109,6 +109,10 @@ pub(crate) enum WebEmbedPayload {
         vehicle_count: usize,
         vehicles: Vec<crate::simulator::LocalizationCardState>,
     },
+    Slam {
+        slam_count: usize,
+        demos: Vec<crate::simulator::SlamCardState>,
+    },
     Pendulum {
         noise_enabled: bool,
         noise_scale: f32,
@@ -164,6 +168,25 @@ pub(crate) enum WebEmbedAction {
     PatchLocalizationVehicle {
         vehicle_id: usize,
         patch: LocalizationPatch,
+    },
+    SetSlamDriveMode {
+        slam_id: usize,
+        drive_mode: SlamDriveMode,
+    },
+    RemoveSlamDemo {
+        slam_id: usize,
+    },
+    SetSlamEkfEnabled {
+        slam_id: usize,
+        enabled: bool,
+    },
+    SetSlamGraphEnabled {
+        slam_id: usize,
+        enabled: bool,
+    },
+    PatchSlam {
+        slam_id: usize,
+        patch: SlamPatch,
     },
     AddPendulum,
     RemovePendulum {
@@ -353,6 +376,24 @@ fn apply_web_test_commands(app: &mut App) {
                 WebEmbedAction::PatchLocalizationVehicle { vehicle_id, patch } => {
                     app.sim.patch_localization_vehicle(vehicle_id, patch);
                 }
+                WebEmbedAction::SetSlamDriveMode {
+                    slam_id,
+                    drive_mode,
+                } => {
+                    app.sim.set_slam_drive_mode(slam_id, drive_mode);
+                }
+                WebEmbedAction::RemoveSlamDemo { slam_id } => {
+                    app.sim.remove_slam_demo(slam_id);
+                }
+                WebEmbedAction::SetSlamEkfEnabled { slam_id, enabled } => {
+                    app.sim.set_slam_ekf_enabled(slam_id, enabled);
+                }
+                WebEmbedAction::SetSlamGraphEnabled { slam_id, enabled } => {
+                    app.sim.set_slam_graph_enabled(slam_id, enabled);
+                }
+                WebEmbedAction::PatchSlam { slam_id, patch } => {
+                    app.sim.patch_slam(slam_id, patch);
+                }
                 WebEmbedAction::AddPendulum => app.sim.add_active_simulation(),
                 WebEmbedAction::RemovePendulum { pendulum_id } => {
                     app.sim.remove_pendulum(pendulum_id);
@@ -401,6 +442,7 @@ fn apply_web_test_commands(app: &mut App) {
 fn publish_web_test_state(sim: &Simulator) {
     WEB_TEST_BRIDGE.with(|bridge| {
         let vehicles = sim.localization_ui_state();
+        let slam_demos = sim.slam_ui_state();
         let pendulums = sim.pendulum_ui_state();
         let planners = sim.path_planning_ui_state();
 
@@ -419,6 +461,11 @@ fn publish_web_test_state(sim: &Simulator) {
                 WebEmbedPayload::Localization {
                     vehicle_count: vehicles.len(),
                     vehicles,
+                }
+            } else if sim.mode() == crate::simulator::SimMode::Slam {
+                WebEmbedPayload::Slam {
+                    slam_count: slam_demos.len(),
+                    demos: slam_demos,
                 }
             } else if sim.mode() == crate::simulator::SimMode::InvertedPendulum {
                 WebEmbedPayload::Pendulum {
@@ -456,6 +503,7 @@ fn publish_embed_height(ctx: &egui::Context, sim: &Simulator, embed_mode: WebEmb
         crate::simulator::SimMode::Localization
             | crate::simulator::SimMode::InvertedPendulum
             | crate::simulator::SimMode::PathPlanning
+            | crate::simulator::SimMode::Slam
     ) {
         return;
     }

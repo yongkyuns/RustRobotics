@@ -38,6 +38,8 @@ use pendulum::{InvertedPendulum, NoiseConfig as PendulumNoiseConfig, PENDULUM_FI
 #[cfg(target_arch = "wasm32")]
 pub(crate) use pendulum::{PendulumCardState, PendulumPatch};
 use slam::SlamDemo;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use slam::{DriveMode as SlamDriveMode, SlamCardState, SlamPatch};
 use ui::PendulumPlotTab;
 
 use egui::*;
@@ -499,7 +501,10 @@ impl Simulator {
     pub fn embedded_content_height(&self) -> Option<f32> {
         if matches!(
             self.mode,
-            SimMode::Localization | SimMode::InvertedPendulum | SimMode::PathPlanning
+            SimMode::Localization
+                | SimMode::InvertedPendulum
+                | SimMode::PathPlanning
+                | SimMode::Slam
         ) {
             let width = self
                 .help_state

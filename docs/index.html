@@ -43,8 +43,8 @@
         background: #11151c;
       }
 
-      html.embedded-focused:not(.embedded-pendulum-dom):not(.embedded-path-planning-dom):not(.embedded-localization-dom),
-      html.embedded-focused:not(.embedded-pendulum-dom):not(.embedded-path-planning-dom):not(.embedded-localization-dom) body {
+      html.embedded-focused:not(.embedded-pendulum-dom):not(.embedded-path-planning-dom):not(.embedded-localization-dom):not(.embedded-slam-dom),
+      html.embedded-focused:not(.embedded-pendulum-dom):not(.embedded-path-planning-dom):not(.embedded-localization-dom):not(.embedded-slam-dom) body {
         background: transparent;
       }
 
@@ -53,13 +53,16 @@
       html.embedded-path-planning-dom,
       html.embedded-path-planning-dom body,
       html.embedded-localization-dom,
-      html.embedded-localization-dom body {
+      html.embedded-localization-dom body,
+      html.embedded-slam-dom,
+      html.embedded-slam-dom body {
         overflow: visible;
       }
 
       html.embedded-pendulum-dom body,
       html.embedded-path-planning-dom body,
-      html.embedded-localization-dom body {
+      html.embedded-localization-dom body,
+      html.embedded-slam-dom body {
         --embed-accent: #e67a4c;
         --embed-accent-soft: #c6613b;
         --embed-panel: #11151c;
@@ -80,7 +83,8 @@
 
       html.embedded-theme-light.embedded-pendulum-dom body,
       html.embedded-theme-light.embedded-path-planning-dom body,
-      html.embedded-theme-light.embedded-localization-dom body {
+      html.embedded-theme-light.embedded-localization-dom body,
+      html.embedded-theme-light.embedded-slam-dom body {
         --embed-accent: #e67a4c;
         --embed-accent-soft: #c6613b;
         --embed-panel: #f7f4f0;
@@ -128,7 +132,8 @@
 
       html.embedded-pendulum-dom .canvas-shell,
       html.embedded-path-planning-dom .canvas-shell,
-      html.embedded-localization-dom .canvas-shell {
+      html.embedded-localization-dom .canvas-shell,
+      html.embedded-slam-dom .canvas-shell {
         position: relative;
         order: 1;
         flex: 0 0 auto;
@@ -156,6 +161,12 @@
         max-height: 560px;
       }
 
+      html.embedded-slam-dom .canvas-shell {
+        aspect-ratio: 1 / 1;
+        min-height: 360px;
+        max-height: 620px;
+      }
+
       html.embedded-pendulum-dom.embedded-pendulum-graph .canvas-shell {
         aspect-ratio: auto;
         height: clamp(700px, 82vw, 900px);
@@ -165,7 +176,8 @@
 
       html.embedded-pendulum-dom .canvas-shell > canvas,
       html.embedded-path-planning-dom .canvas-shell > canvas,
-      html.embedded-localization-dom .canvas-shell > canvas {
+      html.embedded-localization-dom .canvas-shell > canvas,
+      html.embedded-slam-dom .canvas-shell > canvas {
         position: relative;
         inset: auto;
         width: 100%;
@@ -188,7 +200,8 @@
 
       html.embedded-pendulum-dom .embed-dom-toolbar#embed_toolbar,
       html.embedded-path-planning-dom .embed-dom-toolbar#embed_path_toolbar,
-      html.embedded-localization-dom .embed-dom-toolbar#embed_localization_toolbar {
+      html.embedded-localization-dom .embed-dom-toolbar#embed_localization_toolbar,
+      html.embedded-slam-dom .embed-dom-toolbar#embed_slam_toolbar {
         display: flex;
         order: 2;
       }
@@ -267,6 +280,17 @@
         order: 3;
       }
 
+      .embed-dom-slam {
+        display: none;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      html.embedded-slam-dom .embed-dom-slam {
+        display: flex;
+        order: 3;
+      }
+
       .pendulum-dom-card {
         min-width: 220px;
         max-width: 260px;
@@ -302,7 +326,8 @@
       }
 
       .pendulum-dom-card .card-remove,
-      .planner-dom-card .card-remove {
+      .planner-dom-card .card-remove,
+      .slam-dom-card .card-remove {
         border: 1px solid var(--embed-border);
         background: color-mix(in srgb, var(--embed-panel-strong) 94%, transparent);
         color: inherit;
@@ -377,7 +402,8 @@
 
       .pendulum-trainer-actions button:hover:not(:disabled),
       .pendulum-dom-card .card-remove:hover,
-      .planner-dom-card .card-remove:hover {
+      .planner-dom-card .card-remove:hover,
+      .slam-dom-card .card-remove:hover {
         background: var(--embed-panel-hover);
         border-color: var(--embed-accent);
       }
@@ -559,6 +585,92 @@
         font: inherit;
       }
 
+      .slam-dom-card {
+        min-width: 220px;
+        max-width: 280px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--embed-border);
+        background: color-mix(in srgb, var(--embed-panel-alt) 88%, transparent);
+        color: var(--embed-text);
+        font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .slam-dom-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-bottom: 0.45rem;
+      }
+
+      .slam-dom-card-title {
+        font-weight: 700;
+      }
+
+      .slam-status {
+        margin-bottom: 0.7rem;
+        color: var(--embed-text-muted);
+      }
+
+      .slam-toggle-row,
+      .slam-toggle-grid {
+        display: grid;
+        gap: 0.45rem;
+      }
+
+      .slam-toggle-row {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-bottom: 0.7rem;
+      }
+
+      .slam-toggle-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-top: 0.55rem;
+      }
+
+      .slam-dom-card details {
+        margin-top: 0.65rem;
+        border-top: 1px solid color-mix(in srgb, var(--embed-border) 55%, transparent);
+        padding-top: 0.55rem;
+      }
+
+      .slam-dom-card summary {
+        cursor: pointer;
+        color: var(--embed-text-muted);
+        font-weight: 600;
+      }
+
+      .slam-param-fields {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.5rem;
+        margin-top: 0.6rem;
+      }
+
+      .slam-param-field {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0.25rem;
+      }
+
+      .slam-param-field label {
+        color: var(--embed-text-muted);
+        font-size: 0.92em;
+      }
+
+      .slam-param-field input,
+      .slam-param-field select {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.35rem 0.5rem;
+        border-radius: 10px;
+        border: 1px solid var(--embed-border);
+        background: var(--embed-panel-strong);
+        color: inherit;
+        font: inherit;
+      }
+
       .centered {
         margin-right: auto;
         margin-left: auto;
@@ -680,6 +792,18 @@
       <span class="toolbar-readout" id="localization_toolbar_vehicle_count">1 vehicle</span>
     </div>
     <div class="embed-dom-localization" id="embed_localization_cards" hidden></div>
+    <div class="embed-dom-toolbar" id="embed_slam_toolbar" hidden>
+      <button id="slam_toolbar_pause_button" type="button">Pause</button>
+      <button id="slam_toolbar_restart_button" type="button">Restart</button>
+      <button id="slam_toolbar_add_demo_button" type="button">Add Demo</button>
+      <label>
+        <span>Speed</span>
+        <input id="slam_toolbar_speed_input" type="range" min="1" max="20" step="1" value="1" />
+        <span class="toolbar-readout" id="slam_toolbar_speed_value">1x</span>
+      </label>
+      <span class="toolbar-readout" id="slam_toolbar_count">1 demo</span>
+    </div>
+    <div class="embed-dom-slam" id="embed_slam_cards" hidden></div>
     <div class="canvas-shell" id="canvas_shell">
       <!-- The WASM code will resize the canvas dynamically -->
       <canvas id="the_canvas_id"></canvas>
@@ -778,6 +902,7 @@
       import { setupLocalizationEmbed } from "./embeds/localization.js";
       import { setupPathPlanningEmbed } from "./embeds/path_planning.js";
       import { setupPendulumEmbed } from "./embeds/pendulum.js";
+      import { setupSlamEmbed } from "./embeds/slam.js";
       import * as ppoBridge from "./ppo_trainer_bridge.js";
 
       globalThis.wasm_bindgen = wasm_bindgen;
@@ -838,6 +963,10 @@
         getEmbedState,
         dispatchEmbedAction,
       });
+      const slamEmbed = setupSlamEmbed({
+        getEmbedState,
+        dispatchEmbedAction,
+      });
 
       function detectLocalThemePreference() {
         const params = new URLSearchParams(window.location.search);
@@ -895,6 +1024,11 @@
         if (embed === "focused" && mode === "path_planning") {
           document.documentElement.classList.add("embedded-path-planning-dom");
           pathPlanningEmbed.init();
+        }
+
+        if (embed === "focused" && mode === "slam") {
+          document.documentElement.classList.add("embedded-slam-dom");
+          slamEmbed.init();
         }
 
         applyEmbedTheme(detectLocalThemePreference());

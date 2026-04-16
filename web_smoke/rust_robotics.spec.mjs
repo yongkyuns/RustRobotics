@@ -215,3 +215,57 @@ test("focused localization embed boots with DOM controls and responds to vehicle
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
 });
+
+test("focused slam embed boots with DOM controls and responds to demo actions", async ({
+  page,
+  baseURL,
+}) => {
+  const url = `${baseURL}/?mode=slam&embed=focused&ui=smoke_slam`;
+  const { consoleErrors, pageErrors } = await bootApp(page, url);
+
+  await page.waitForFunction(() => {
+    const state = window.rustRoboticsEmbedGetState?.();
+    return state?.mode === "slam" && state?.payload?.kind === "slam";
+  });
+
+  await expect(page.locator("#embed_slam_toolbar")).toBeVisible();
+  await expect(page.locator("#embed_slam_cards .slam-dom-card")).toHaveCount(1);
+  await expect(page.locator(".slam-drive-mode")).toHaveValue("auto");
+
+  await page.locator(".slam-ekf").uncheck();
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return state.payload.demos[0].ekf_enabled;
+  }).toBe(false);
+
+  await page.selectOption(".slam-drive-mode", "manual");
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return state.payload.demos[0].drive_mode;
+  }).toBe("manual");
+
+  await page
+    .locator("#embed_slam_cards .slam-dom-card")
+    .first()
+    .locator("details")
+    .nth(2)
+    .locator("summary")
+    .click();
+  await page.locator(".slam-landmarks").fill("12");
+  await page.locator(".slam-landmarks").blur();
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return state.payload.demos[0].n_landmarks;
+  }).toBe(12);
+
+  await page.locator("#slam_toolbar_add_demo_button").click();
+  await expect(page.locator("#embed_slam_cards .slam-dom-card")).toHaveCount(2);
+
+  await page.locator("#embed_slam_cards .slam-dom-card").nth(1).locator(".card-remove").click();
+  await expect(page.locator("#embed_slam_cards .slam-dom-card")).toHaveCount(1);
+
+  const demoCount = await page.locator("#slam_toolbar_count").textContent();
+  expect(demoCount).toContain("1 demo");
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});

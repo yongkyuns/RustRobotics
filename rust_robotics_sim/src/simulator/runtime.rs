@@ -17,6 +17,7 @@ use super::{
         PathPlannerCardState, PathPlannerPatch,
     },
     pendulum::{ControllerKind, PendulumCardState, PendulumPatch},
+    slam::{DriveMode as SlamDriveMode, SlamCardState, SlamPatch},
     InvertedPendulum, ParticleFilter, PathPlanning, PendulumNoiseConfig, SimMode, Simulate,
     Simulator, SlamDemo, PENDULUM_FIXED_DT,
 };
@@ -265,6 +266,73 @@ impl Simulator {
             .find(|planner| planner.id() == planner_id)
         {
             planner.apply_primary_patch(patch);
+        }
+    }
+
+    /// Returns the serialized DOM-card state for each active SLAM demo.
+    pub(crate) fn slam_ui_state(&self) -> Vec<SlamCardState> {
+        self.simulations
+            .slam_demos
+            .iter()
+            .map(SlamDemo::card_state)
+            .collect()
+    }
+
+    /// Removes one SLAM demo by id while keeping at least one demo alive.
+    pub(crate) fn remove_slam_demo(&mut self, slam_id: usize) {
+        if self.simulations.slam_demos.len() <= 1 {
+            return;
+        }
+        self.simulations
+            .slam_demos
+            .retain(|slam| slam.id() != slam_id);
+    }
+
+    /// Sets the drive mode for one SLAM demo.
+    pub(crate) fn set_slam_drive_mode(&mut self, slam_id: usize, drive_mode: SlamDriveMode) {
+        if let Some(slam) = self
+            .simulations
+            .slam_demos
+            .iter_mut()
+            .find(|slam| slam.id() == slam_id)
+        {
+            slam.set_drive_mode(drive_mode);
+        }
+    }
+
+    /// Enables or disables EKF-SLAM for one demo.
+    pub(crate) fn set_slam_ekf_enabled(&mut self, slam_id: usize, enabled: bool) {
+        if let Some(slam) = self
+            .simulations
+            .slam_demos
+            .iter_mut()
+            .find(|slam| slam.id() == slam_id)
+        {
+            slam.set_ekf_enabled(enabled);
+        }
+    }
+
+    /// Enables or disables Graph-SLAM for one demo.
+    pub(crate) fn set_slam_graph_enabled(&mut self, slam_id: usize, enabled: bool) {
+        if let Some(slam) = self
+            .simulations
+            .slam_demos
+            .iter_mut()
+            .find(|slam| slam.id() == slam_id)
+        {
+            slam.set_graph_enabled(enabled);
+        }
+    }
+
+    /// Applies a partial configuration patch to one SLAM demo.
+    pub(crate) fn patch_slam(&mut self, slam_id: usize, patch: SlamPatch) {
+        if let Some(slam) = self
+            .simulations
+            .slam_demos
+            .iter_mut()
+            .find(|slam| slam.id() == slam_id)
+        {
+            slam.apply_patch(patch);
         }
     }
 
