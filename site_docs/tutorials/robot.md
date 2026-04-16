@@ -8,7 +8,7 @@ state, shared robot-framework logic, browser runtime glue, and policy execution.
   <iframe
     class="sim-embed-frame"
     data-sim-mode="robot"
-    src="http://127.0.0.1:3000/?mode=robot&embed=focused&ui=20260416a"
+    src="http://127.0.0.1:3000/?mode=robot&embed=focused&ui=20260416b"
     title="Rust Robotics robot runtime simulator"
     loading="lazy"
   ></iframe>

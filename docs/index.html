@@ -43,8 +43,8 @@
         background: #11151c;
       }
 
-      html.embedded-focused:not(.embedded-pendulum-dom):not(.embedded-path-planning-dom):not(.embedded-localization-dom):not(.embedded-slam-dom),
-      html.embedded-focused:not(.embedded-pendulum-dom):not(.embedded-path-planning-dom):not(.embedded-localization-dom):not(.embedded-slam-dom) body {
+      html.embedded-focused:not(.embedded-pendulum-dom):not(.embedded-path-planning-dom):not(.embedded-localization-dom):not(.embedded-slam-dom):not(.embedded-robot-dom),
+      html.embedded-focused:not(.embedded-pendulum-dom):not(.embedded-path-planning-dom):not(.embedded-localization-dom):not(.embedded-slam-dom):not(.embedded-robot-dom) body {
         background: transparent;
       }
 
@@ -55,14 +55,17 @@
       html.embedded-localization-dom,
       html.embedded-localization-dom body,
       html.embedded-slam-dom,
-      html.embedded-slam-dom body {
+      html.embedded-slam-dom body,
+      html.embedded-robot-dom,
+      html.embedded-robot-dom body {
         overflow: visible;
       }
 
       html.embedded-pendulum-dom body,
       html.embedded-path-planning-dom body,
       html.embedded-localization-dom body,
-      html.embedded-slam-dom body {
+      html.embedded-slam-dom body,
+      html.embedded-robot-dom body {
         --embed-accent: #e67a4c;
         --embed-accent-soft: #c6613b;
         --embed-panel: #11151c;
@@ -84,7 +87,8 @@
       html.embedded-theme-light.embedded-pendulum-dom body,
       html.embedded-theme-light.embedded-path-planning-dom body,
       html.embedded-theme-light.embedded-localization-dom body,
-      html.embedded-theme-light.embedded-slam-dom body {
+      html.embedded-theme-light.embedded-slam-dom body,
+      html.embedded-theme-light.embedded-robot-dom body {
         --embed-accent: #e67a4c;
         --embed-accent-soft: #c6613b;
         --embed-panel: #f7f4f0;
@@ -133,7 +137,8 @@
       html.embedded-pendulum-dom .canvas-shell,
       html.embedded-path-planning-dom .canvas-shell,
       html.embedded-localization-dom .canvas-shell,
-      html.embedded-slam-dom .canvas-shell {
+      html.embedded-slam-dom .canvas-shell,
+      html.embedded-robot-dom .canvas-shell {
         position: relative;
         order: 1;
         flex: 0 0 auto;
@@ -167,6 +172,12 @@
         max-height: 620px;
       }
 
+      html.embedded-robot-dom .canvas-shell {
+        aspect-ratio: 16 / 10;
+        min-height: 380px;
+        max-height: 680px;
+      }
+
       html.embedded-pendulum-dom.embedded-pendulum-graph .canvas-shell {
         aspect-ratio: auto;
         height: clamp(700px, 82vw, 900px);
@@ -177,7 +188,8 @@
       html.embedded-pendulum-dom .canvas-shell > canvas,
       html.embedded-path-planning-dom .canvas-shell > canvas,
       html.embedded-localization-dom .canvas-shell > canvas,
-      html.embedded-slam-dom .canvas-shell > canvas {
+      html.embedded-slam-dom .canvas-shell > canvas,
+      html.embedded-robot-dom .canvas-shell > canvas {
         position: relative;
         inset: auto;
         width: 100%;
@@ -201,7 +213,8 @@
       html.embedded-pendulum-dom .embed-dom-toolbar#embed_toolbar,
       html.embedded-path-planning-dom .embed-dom-toolbar#embed_path_toolbar,
       html.embedded-localization-dom .embed-dom-toolbar#embed_localization_toolbar,
-      html.embedded-slam-dom .embed-dom-toolbar#embed_slam_toolbar {
+      html.embedded-slam-dom .embed-dom-toolbar#embed_slam_toolbar,
+      html.embedded-robot-dom .embed-dom-toolbar#embed_robot_toolbar {
         display: flex;
         order: 2;
       }
@@ -287,6 +300,17 @@
       }
 
       html.embedded-slam-dom .embed-dom-slam {
+        display: flex;
+        order: 3;
+      }
+
+      .embed-dom-robot {
+        display: none;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      html.embedded-robot-dom .embed-dom-robot {
         display: flex;
         order: 3;
       }
@@ -671,6 +695,27 @@
         font: inherit;
       }
 
+      .robot-dom-card {
+        flex: 1 1 260px;
+        min-width: 240px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--embed-border);
+        background: color-mix(in srgb, var(--embed-panel-alt) 88%, transparent);
+        color: var(--embed-text);
+        font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .robot-dom-card-title {
+        font-weight: 700;
+        margin-bottom: 0.45rem;
+      }
+
+      .robot-status {
+        color: var(--embed-text-muted);
+        white-space: pre-line;
+      }
+
       .centered {
         margin-right: auto;
         margin-left: auto;
@@ -804,6 +849,29 @@
       <span class="toolbar-readout" id="slam_toolbar_count">1 demo</span>
     </div>
     <div class="embed-dom-slam" id="embed_slam_cards" hidden></div>
+    <div class="embed-dom-toolbar" id="embed_robot_toolbar" hidden>
+      <button id="robot_toolbar_pause_button" type="button">Pause</button>
+      <button id="robot_toolbar_restart_button" type="button">Restart</button>
+      <button id="robot_toolbar_reset_view_button" type="button">Reset View</button>
+      <label>
+        <span>Speed</span>
+        <input id="robot_toolbar_speed_input" type="range" min="1" max="20" step="1" value="1" />
+        <span class="toolbar-readout" id="robot_toolbar_speed_value">1x</span>
+      </label>
+      <label>
+        <span>Robot</span>
+        <select id="robot_toolbar_robot_select">
+          <option value="go2">Go2</option>
+          <option value="open_duck_mini">Open Duck Mini</option>
+        </select>
+      </label>
+    </div>
+    <div class="embed-dom-robot" id="embed_robot_cards" hidden>
+      <section class="robot-dom-card">
+        <div class="robot-dom-card-title">Robot Runtime</div>
+        <div class="robot-status" id="robot_status_text">Loading robot runtime...</div>
+      </section>
+    </div>
     <div class="canvas-shell" id="canvas_shell">
       <!-- The WASM code will resize the canvas dynamically -->
       <canvas id="the_canvas_id"></canvas>
@@ -902,6 +970,7 @@
       import { setupLocalizationEmbed } from "./embeds/localization.js";
       import { setupPathPlanningEmbed } from "./embeds/path_planning.js";
       import { setupPendulumEmbed } from "./embeds/pendulum.js";
+      import { setupRobotEmbed } from "./embeds/robot.js";
       import { setupSlamEmbed } from "./embeds/slam.js";
       import * as ppoBridge from "./ppo_trainer_bridge.js";
 
@@ -960,6 +1029,10 @@
         dispatchEmbedAction,
       });
       const pathPlanningEmbed = setupPathPlanningEmbed({
+        getEmbedState,
+        dispatchEmbedAction,
+      });
+      const robotEmbed = setupRobotEmbed({
         getEmbedState,
         dispatchEmbedAction,
       });
@@ -1029,6 +1102,11 @@
         if (embed === "focused" && mode === "slam") {
           document.documentElement.classList.add("embedded-slam-dom");
           slamEmbed.init();
+        }
+
+        if (embed === "focused" && mode === "robot") {
+          document.documentElement.classList.add("embedded-robot-dom");
+          robotEmbed.init();
         }
 
         applyEmbedTheme(detectLocalThemePreference());

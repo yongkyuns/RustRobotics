@@ -10,6 +10,8 @@
 //!
 //! Separating this logic from the UI modules keeps update semantics readable and
 //! makes it easier to test the simulator state machine without involving `egui`.
+#[cfg(target_arch = "wasm32")]
+use super::mujoco::MujocoEmbedState;
 use super::{
     localization::{DriveMode as LocalizationDriveMode, LocalizationCardState, LocalizationPatch},
     path_planning::{
@@ -334,6 +336,24 @@ impl Simulator {
         {
             slam.apply_patch(patch);
         }
+    }
+
+    /// Returns the compact state used by the focused MuJoCo web embed.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn mujoco_embed_state(&self) -> MujocoEmbedState {
+        self.simulations.mujoco_panel.embed_state()
+    }
+
+    /// Sets the selected robot preset for the focused MuJoCo web embed.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_mujoco_embed_robot(&mut self, robot: &str) {
+        self.simulations.mujoco_panel.set_embed_robot(robot);
+    }
+
+    /// Resets the focused MuJoCo viewport camera.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn reset_mujoco_embed_view(&mut self) {
+        self.simulations.mujoco_panel.reset_embed_view();
     }
 
     /// Sets the paused state without mutating any other simulator state.

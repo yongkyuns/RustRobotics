@@ -9,10 +9,10 @@ use super::render_scene::{
     display_geom_color as shared_display_geom_color, geom_model_matrix as shared_geom_model_matrix,
     GlVertex, SharedGeomSnapshot, GEOM_MESH,
 };
-use super::shared_layout::show_stacked_layout;
 use super::shared_panel::show_shared_panel;
 #[cfg(feature = "web_wgpu_viewport")]
 use super::viewport_interaction::gather_viewport_interaction;
+use super::{shared_layout::show_stacked_layout, MujocoEmbedState};
 use crate::data::{IntoValues, TimeTable};
 use eframe::emath::GuiRounding;
 #[cfg(feature = "web_wgpu_viewport")]
@@ -113,6 +113,35 @@ enum BrowserRobotPreset {
 }
 
 impl BrowserRobotPreset {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Go2 => "go2",
+            Self::OpenDuckMini => "open_duck_mini",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Go2 => "Go2",
+            Self::OpenDuckMini => "Open Duck Mini",
+        }
+    }
+
+    fn policy_label(self) -> &'static str {
+        match self {
+            Self::Go2 => "facet",
+            Self::OpenDuckMini => "BEST_WALK_ONNX",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "go2" => Some(Self::Go2),
+            "open_duck_mini" => Some(Self::OpenDuckMini),
+            _ => None,
+        }
+    }
+
     fn asset_base_path(self) -> &'static str {
         match self {
             Self::Go2 => "assets/mujoco/go2/",
@@ -1060,6 +1089,14 @@ impl WasmMujocoBackend {
     }
 
     pub fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
+        if self.active {
+            self.ensure_browser_assets_started();
+            if let Some(bundle) = self.browser_assets_ready() {
+                self.ensure_ort_smoke_test_started(bundle.as_ref());
+                self.ensure_mujoco_runtime_started(bundle.as_ref());
+            }
+        }
+
         let rect = aligned_viewport_rect(ui);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let state_binding = self.mujoco_state.borrow();
@@ -1206,6 +1243,39 @@ impl WasmMujocoBackend {
             FontId::monospace(12.0),
             Color32::from_gray(210),
         );
+    }
+
+    pub(crate) fn embed_state(&self) -> MujocoEmbedState {
+        let status = self
+            .browser_panel_status_message()
+            .map(|message| match message {
+                BrowserPanelStatus::Info(text) | BrowserPanelStatus::Error(text) => text,
+            })
+            .unwrap_or_else(|| "Robot runtime ready".to_string());
+
+        MujocoEmbedState {
+            selected_robot: self.selected_robot.key().to_string(),
+            robot_label: self.selected_robot.label().to_string(),
+            policy_label: self.selected_robot.policy_label().to_string(),
+            status,
+            ready: matches!(*self.mujoco_state.borrow(), BrowserMujocoState::Ready(_)),
+        }
+    }
+
+    pub(crate) fn set_embed_robot(&mut self, robot: &str) {
+        let Some(selected_robot) = BrowserRobotPreset::from_key(robot) else {
+            return;
+        };
+        if self.selected_robot == selected_robot {
+            return;
+        }
+        self.selected_robot = selected_robot;
+        self.reset_selected_robot_state();
+    }
+
+    pub(crate) fn reset_embed_view(&mut self) {
+        self.camera = BrowserOrbitCamera::default();
+        self.camera_initialized = false;
     }
 
     #[cfg(feature = "web_wgpu_viewport")]

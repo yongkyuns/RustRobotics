@@ -1,5 +1,7 @@
 use egui::{Rect, Ui};
 use egui_plot::PlotUi;
+#[cfg(target_arch = "wasm32")]
+use serde::Serialize;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -17,6 +19,16 @@ use wasm::WasmMujocoBackend as Backend;
 
 pub struct MujocoPanel {
     backend: Backend,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct MujocoEmbedState {
+    pub(crate) selected_robot: String,
+    pub(crate) robot_label: String,
+    pub(crate) policy_label: String,
+    pub(crate) status: String,
+    pub(crate) ready: bool,
 }
 
 impl Default for MujocoPanel {
@@ -75,5 +87,20 @@ impl MujocoPanel {
 
     pub fn set_overlay_occlusions(&mut self, rects: &[Rect], interactive: bool) {
         self.backend.set_overlay_occlusions(rects, interactive);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn embed_state(&self) -> MujocoEmbedState {
+        self.backend.embed_state()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_embed_robot(&mut self, robot: &str) {
+        self.backend.set_embed_robot(robot);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn reset_embed_view(&mut self) {
+        self.backend.reset_embed_view();
     }
 }

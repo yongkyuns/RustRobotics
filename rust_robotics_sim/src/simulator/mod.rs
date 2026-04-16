@@ -28,6 +28,8 @@ use localization::ParticleFilter;
 pub(crate) use localization::{
     DriveMode as LocalizationDriveMode, LocalizationCardState, LocalizationPatch,
 };
+#[cfg(target_arch = "wasm32")]
+pub(crate) use mujoco::MujocoEmbedState;
 use mujoco::MujocoPanel;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use path_planning::{

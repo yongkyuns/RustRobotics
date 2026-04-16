@@ -269,3 +269,35 @@ test("focused slam embed boots with DOM controls and responds to demo actions", 
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
 });
+
+test("focused robot embed boots with DOM controls and responds to robot selection", async ({
+  page,
+  baseURL,
+}) => {
+  const url = `${baseURL}/?mode=robot&embed=focused&ui=smoke_robot`;
+  const { consoleErrors, pageErrors } = await bootApp(page, url);
+
+  await page.waitForFunction(() => {
+    const state = window.rustRoboticsEmbedGetState?.();
+    return state?.mode === "robot" && state?.payload?.kind === "robot";
+  });
+
+  await expect(page.locator("#embed_robot_toolbar")).toBeVisible();
+  await expect(page.locator("#robot_toolbar_robot_select")).toHaveValue("go2");
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return state.payload.robot.selected_robot;
+  }).toBe("go2");
+
+  await page.selectOption("#robot_toolbar_robot_select", "open_duck_mini");
+  await expect.poll(async () => {
+    const state = await page.evaluate(() => window.rustRoboticsEmbedGetState());
+    return state.payload.robot.selected_robot;
+  }).toBe("open_duck_mini");
+
+  await page.locator("#robot_toolbar_reset_view_button").click();
+  await expect(page.locator("#robot_status_text")).not.toHaveText("");
+
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+});

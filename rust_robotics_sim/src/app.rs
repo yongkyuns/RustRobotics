@@ -125,6 +125,9 @@ pub(crate) enum WebEmbedPayload {
         planner_count: usize,
         planners: Vec<crate::simulator::PathPlannerCardState>,
     },
+    Robot {
+        robot: crate::simulator::MujocoEmbedState,
+    },
     Unsupported,
 }
 
@@ -221,6 +224,10 @@ pub(crate) enum WebEmbedAction {
         planner_id: usize,
         patch: PathPlannerPatch,
     },
+    SetMujocoRobot {
+        robot: String,
+    },
+    ResetMujocoView,
 }
 
 pub struct App {
@@ -433,6 +440,12 @@ fn apply_web_test_commands(app: &mut App) {
                 WebEmbedAction::PatchPathPlanner { planner_id, patch } => {
                     app.sim.patch_path_planner(planner_id, patch);
                 }
+                WebEmbedAction::SetMujocoRobot { robot } => {
+                    app.sim.set_mujoco_embed_robot(&robot);
+                }
+                WebEmbedAction::ResetMujocoView => {
+                    app.sim.reset_mujoco_embed_view();
+                }
             }
         }
     });
@@ -445,6 +458,7 @@ fn publish_web_test_state(sim: &Simulator) {
         let slam_demos = sim.slam_ui_state();
         let pendulums = sim.pendulum_ui_state();
         let planners = sim.path_planning_ui_state();
+        let robot = sim.mujoco_embed_state();
 
         let mut bridge = bridge.borrow_mut();
         bridge.state = Some(WebEmbedState {
@@ -481,6 +495,8 @@ fn publish_web_test_state(sim: &Simulator) {
                     planner_count: planners.len(),
                     planners,
                 }
+            } else if sim.mode() == crate::simulator::SimMode::Mujoco {
+                WebEmbedPayload::Robot { robot }
             } else {
                 WebEmbedPayload::Unsupported
             },
@@ -504,6 +520,7 @@ fn publish_embed_height(ctx: &egui::Context, sim: &Simulator, embed_mode: WebEmb
             | crate::simulator::SimMode::InvertedPendulum
             | crate::simulator::SimMode::PathPlanning
             | crate::simulator::SimMode::Slam
+            | crate::simulator::SimMode::Mujoco
     ) {
         return;
     }
