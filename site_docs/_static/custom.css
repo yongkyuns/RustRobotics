@@ -6,7 +6,69 @@
 body {
   background:
     radial-gradient(circle at top left, rgba(15, 118, 110, 0.08), transparent 30%),
-    radial-gradient(circle at top right, rgba(30, 64, 175, 0.06), transparent 24%);
+    radial-gradient(circle at top right, rgba(30, 64, 175, 0.06), transparent 24%),
+    var(--color-background-primary);
+}
+
+.page,
+.main,
+.content,
+.article-container {
+  background-color: transparent;
+}
+
+html[data-theme="light"] body,
+body[data-theme="light"] {
+  background:
+    radial-gradient(circle at top left, rgba(15, 118, 110, 0.08), transparent 30%),
+    radial-gradient(circle at top right, rgba(30, 64, 175, 0.06), transparent 24%),
+    var(--color-background-primary);
+}
+
+html[data-theme="light"] .page,
+html[data-theme="light"] .main,
+html[data-theme="light"] .content,
+html[data-theme="light"] .article-container,
+body[data-theme="light"] .page,
+body[data-theme="light"] .main,
+body[data-theme="light"] .content,
+body[data-theme="light"] .article-container {
+  background-color: transparent;
+}
+
+html[data-theme="dark"] body,
+body[data-theme="dark"] {
+  background:
+    radial-gradient(circle at top left, rgba(230, 122, 76, 0.09), transparent 30%),
+    radial-gradient(circle at top right, rgba(120, 188, 255, 0.08), transparent 24%),
+    var(--color-background-primary);
+}
+
+html[data-theme="dark"] .page,
+html[data-theme="dark"] .main,
+html[data-theme="dark"] .content,
+html[data-theme="dark"] .article-container,
+body[data-theme="dark"] .page,
+body[data-theme="dark"] .main,
+body[data-theme="dark"] .content,
+body[data-theme="dark"] .article-container {
+  background-color: transparent;
+}
+
+@media (prefers-color-scheme: dark) {
+  body:not([data-theme="light"]) {
+    background:
+      radial-gradient(circle at top left, rgba(230, 122, 76, 0.09), transparent 30%),
+      radial-gradient(circle at top right, rgba(120, 188, 255, 0.08), transparent 24%),
+      var(--color-background-primary);
+  }
+
+  body:not([data-theme="light"]) .page,
+  body:not([data-theme="light"]) .main,
+  body:not([data-theme="light"]) .content,
+  body:not([data-theme="light"]) .article-container {
+    background-color: transparent;
+  }
 }
 
 .hero-band {
@@ -139,12 +201,14 @@ body {
 }
 
 .sim-embed-frame {
+  display: block;
   width: 100%;
   height: clamp(680px, 78vh, 920px);
   min-height: 0;
-  border: 0;
-  border-radius: 0;
-  background: #1f2937;
+  border: 1px solid var(--color-background-border);
+  border-radius: 18px;
+  background: #11151c;
+  overflow: hidden;
 }
 
 .math-wrapper,

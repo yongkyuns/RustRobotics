@@ -45,11 +45,32 @@ function updateEmbedFrame(frame) {
   frame.style.height = `${preferredEmbedHeight(width, mode)}px`;
 }
 
+function seedFrameTheme(frame) {
+  if (frame.dataset.themeSeeded === "1") {
+    return;
+  }
+
+  const src = frame.getAttribute("src");
+  if (!src) {
+    return;
+  }
+
+  try {
+    const url = new URL(src, window.location.href);
+    url.searchParams.set("theme", resolvedHostTheme());
+    frame.dataset.themeSeeded = "1";
+    frame.setAttribute("src", url.toString());
+  } catch (_error) {
+    // Ignore malformed or non-standard iframe src values.
+  }
+}
+
 function bindEmbedFrame(frame) {
   const update = () => updateEmbedFrame(frame);
   frame.dataset.heightReported = "";
-  frame.dataset.maxReportedHeight = "";
+  seedFrameTheme(frame);
   update();
+  frame.addEventListener("load", () => postThemeToFrame(frame));
 
   if (typeof ResizeObserver !== "undefined") {
     const target = frame.parentElement || frame;
@@ -60,23 +81,95 @@ function bindEmbedFrame(frame) {
   window.addEventListener("resize", update, { passive: true });
 }
 
+function resolvedHostTheme() {
+  const candidates = [
+    document.documentElement?.dataset?.theme,
+    document.body?.dataset?.theme,
+    document.documentElement?.getAttribute("data-theme"),
+    document.body?.getAttribute("data-theme"),
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === "light" || candidate === "dark") {
+      return candidate;
+    }
+  }
+
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+    ? "light"
+    : "dark";
+}
+
+function postThemeToFrame(frame) {
+  try {
+    frame.contentWindow?.postMessage(
+      {
+        type: "rust-robotics-theme",
+        theme: resolvedHostTheme(),
+      },
+      "*",
+    );
+  } catch (_error) {
+    // Ignore transient cross-document startup races.
+  }
+}
+
+function postThemeToAllFrames() {
+  document.querySelectorAll(".sim-embed-frame").forEach(postThemeToFrame);
+}
+
 window.addEventListener("message", (event) => {
   const data = event.data;
   if (!data || data.type !== "rust-robotics-embed-size" || typeof data.height !== "number") {
     return;
   }
 
-  for (const frame of document.querySelectorAll(".sim-embed-frame")) {
-    const reportedHeight = Math.round(clamp(data.height, 480, 1600));
-    const previousReportedHeight =
-      Number.parseFloat(frame.dataset.maxReportedHeight || "0") || 0;
-    const height = Math.max(previousReportedHeight, reportedHeight);
-    frame.dataset.maxReportedHeight = `${height}`;
+  const frames = [...document.querySelectorAll(".sim-embed-frame")];
+  const targetFrames = frames.filter((frame) => {
+    try {
+      return frame.contentWindow === event.source;
+    } catch (_error) {
+      return false;
+    }
+  });
+  const framesToUpdate = targetFrames.length > 0 ? targetFrames : frames;
+
+  for (const frame of framesToUpdate) {
+    const reportedHeight = Math.round(clamp(data.height, 480, 2000));
     frame.dataset.heightReported = "1";
-    frame.style.height = `${height}px`;
+    frame.style.height = `${reportedHeight}px`;
   }
 });
 
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".sim-embed-frame").forEach(bindEmbedFrame);
+  postThemeToAllFrames();
+
+  if (typeof MutationObserver !== "undefined") {
+    const observer = new MutationObserver(() => {
+      postThemeToAllFrames();
+    });
+    if (document.documentElement) {
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme", "class"],
+      });
+    }
+    if (document.body) {
+      observer.observe(document.body, {
+        attributes: true,
+        attributeFilter: ["data-theme", "class"],
+      });
+    }
+  }
+
+  if (window.matchMedia) {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const listener = () => postThemeToAllFrames();
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", listener);
+    } else if (typeof media.addListener === "function") {
+      media.addListener(listener);
+    }
+  }
 });

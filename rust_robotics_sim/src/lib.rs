@@ -98,9 +98,87 @@ pub fn rust_robotics_test_restart() {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+pub fn rust_robotics_test_set_sim_speed(sim_speed: usize) {
+    app::web_test_set_sim_speed(sim_speed);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_set_pendulum_noise_enabled(enabled: bool) {
+    app::web_test_set_pendulum_noise_enabled(enabled);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_set_pendulum_noise_scale(scale: f32) {
+    app::web_test_set_pendulum_noise_scale(scale);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_add_pendulum() {
+    app::web_test_add_pendulum();
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_set_pendulum_controller(
+    pendulum_id: usize,
+    controller: &str,
+) -> Result<(), JsValue> {
+    let kind = match controller {
+        "lqr" => app::SimPendulumControllerKind::Lqr,
+        "pid" => app::SimPendulumControllerKind::Pid,
+        "mpc" => app::SimPendulumControllerKind::Mpc,
+        "policy" => app::SimPendulumControllerKind::Policy,
+        _ => {
+            return Err(js_err(format!(
+                "unsupported pendulum controller: {controller}"
+            )))
+        }
+    };
+    app::web_test_set_pendulum_controller(pendulum_id, kind);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_remove_pendulum(pendulum_id: usize) {
+    app::web_test_remove_pendulum(pendulum_id);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_patch_pendulum(
+    pendulum_id: usize,
+    patch_json: &str,
+) -> Result<(), JsValue> {
+    let patch: simulator::PendulumPatch =
+        serde_json::from_str(patch_json).map_err(|err| js_err(err.to_string()))?;
+    app::web_test_patch_pendulum(pendulum_id, patch);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 pub fn rust_robotics_set_embed_mode(mode: &str) -> Result<(), JsValue> {
     let mode = app::WebEmbedMode::from_query_value(mode)
         .ok_or_else(|| js_err(format!("unsupported embed mode: {mode}")))?;
     app::web_test_set_embed_mode(mode);
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_set_show_graph(show_graph: bool) {
+    app::web_test_set_show_graph(show_graph);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn rust_robotics_test_set_theme(theme: &str) -> Result<(), JsValue> {
+    let theme = app::WebThemeMode::from_str(theme)
+        .ok_or_else(|| js_err(format!("unsupported web theme: {theme}")))?;
+    app::web_test_set_theme_mode(theme);
     Ok(())
 }

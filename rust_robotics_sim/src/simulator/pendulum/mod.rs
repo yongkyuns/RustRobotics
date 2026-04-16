@@ -15,3 +15,4 @@ mod training;
 mod ui;
 
 pub use domain::{Controller, InvertedPendulum, NoiseConfig, State, PENDULUM_FIXED_DT};
+pub(crate) use domain::{ControllerKind, PendulumCardState, PendulumPatch};

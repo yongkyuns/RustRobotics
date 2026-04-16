@@ -34,17 +34,16 @@ fn disabled_noise_is_a_noop() {
         enabled: false,
         scale: 1.0,
     };
-    let mut sim = InvertedPendulum::default();
-    sim.state = vector![0.1, -0.2, 0.05, 0.3];
-    let expected = {
-        let (a, b) = sim.model.model(0.01);
-        let u = sim.controller.control(sim.state, 0.01);
-        a * sim.state + b * u
-    };
+    let initial_state = vector![0.1, -0.2, 0.05, 0.3];
+    let mut sim_with_noise_api = InvertedPendulum::default();
+    sim_with_noise_api.state = initial_state;
+    let mut sim_plain = InvertedPendulum::default();
+    sim_plain.state = initial_state;
 
-    sim.step_with_noise(0.01, config);
+    sim_with_noise_api.step_with_noise(0.01, config);
+    sim_plain.step(0.01);
 
-    assert_eq!(sim.state, expected);
+    assert_eq!(sim_with_noise_api.state, sim_plain.state);
 }
 
 #[test]
@@ -139,4 +138,17 @@ fn lqr_controller_reduces_known_initial_error_over_fixed_rollout() {
     );
     assert!(sim.state[2].abs() < 0.05, "final_state={:?}", sim.state);
     assert!(sim.state[3].abs() < 0.02, "final_state={:?}", sim.state);
+}
+
+#[test]
+fn nonlinear_plant_falls_farther_from_upright_without_control() {
+    let mut sim = InvertedPendulum::default();
+    sim.state = vector![0.0, 0.0, 1.0, 0.0];
+    sim.controller = Controller::policy(policy_snapshot(0.0));
+
+    let initial_angle = sim.state[2];
+    sim.step(PENDULUM_FIXED_DT);
+
+    assert!(sim.state[2] > initial_angle, "final_state={:?}", sim.state);
+    assert!(sim.state[3] > 0.0, "final_state={:?}", sim.state);
 }

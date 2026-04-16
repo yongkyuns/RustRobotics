@@ -27,6 +27,7 @@ use localization::ParticleFilter;
 use mujoco::MujocoPanel;
 use path_planning::{EnvironmentMode, PathPlanning};
 use pendulum::{InvertedPendulum, NoiseConfig as PendulumNoiseConfig, PENDULUM_FIXED_DT};
+pub(crate) use pendulum::{PendulumCardState, PendulumPatch};
 use slam::SlamDemo;
 use ui::PendulumPlotTab;
 
@@ -141,6 +142,153 @@ impl SimMode {
             "path_planning" => Some(Self::PathPlanning),
             "slam" => Some(Self::Slam),
             _ => None,
+        }
+    }
+}
+
+/// Width-driven layout contract for documentation/tutorial embeds.
+///
+/// The full desktop app is allowed to be viewport-driven because it owns the
+/// whole window. The focused docs embed is different: the article owns the
+/// width, while the simulator should expose a natural intrinsic height for a
+/// compact "teaching widget". This spec captures those per-mode defaults.
+#[derive(Clone, Copy)]
+pub(crate) struct EmbedLayoutSpec {
+    pub(crate) controls_max_height: f32,
+    pub(crate) scene_height: f32,
+    pub(crate) controls_margin: Margin,
+    pub(crate) controls_gap: f32,
+    pub(crate) scene_gap: f32,
+    pub(crate) scene_margin: i8,
+    pub(crate) cards_vertical: bool,
+    pub(crate) collapse_keyboard_controls: bool,
+    pub(crate) collapse_instructions: bool,
+}
+
+impl SimMode {
+    pub(crate) fn embed_layout_spec(self, width: f32) -> EmbedLayoutSpec {
+        let is_narrow = width < 900.0;
+        match self {
+            SimMode::InvertedPendulum => EmbedLayoutSpec {
+                controls_max_height: if is_narrow {
+                    (width * 0.22).clamp(130.0, 180.0)
+                } else {
+                    (width * 0.12).clamp(120.0, 160.0)
+                },
+                scene_height: if is_narrow {
+                    (width * 0.34).clamp(220.0, 320.0)
+                } else {
+                    (width * 0.22).clamp(200.0, 280.0)
+                },
+                controls_margin: Margin {
+                    left: 8,
+                    right: 8,
+                    top: 12,
+                    bottom: 8,
+                },
+                controls_gap: 6.0,
+                scene_gap: 4.0,
+                scene_margin: 6,
+                cards_vertical: true,
+                collapse_keyboard_controls: true,
+                collapse_instructions: true,
+            },
+            SimMode::Localization => EmbedLayoutSpec {
+                controls_max_height: if is_narrow {
+                    (width * 0.24).clamp(150.0, 220.0)
+                } else {
+                    (width * 0.14).clamp(130.0, 190.0)
+                },
+                scene_height: if is_narrow {
+                    (width * 0.58).clamp(260.0, 360.0)
+                } else {
+                    (width * 0.38).clamp(260.0, 340.0)
+                },
+                controls_margin: Margin {
+                    left: 8,
+                    right: 8,
+                    top: 12,
+                    bottom: 8,
+                },
+                controls_gap: 6.0,
+                scene_gap: 6.0,
+                scene_margin: 6,
+                cards_vertical: true,
+                collapse_keyboard_controls: true,
+                collapse_instructions: true,
+            },
+            SimMode::PathPlanning => EmbedLayoutSpec {
+                controls_max_height: if is_narrow {
+                    (width * 0.30).clamp(170.0, 250.0)
+                } else {
+                    (width * 0.18).clamp(150.0, 220.0)
+                },
+                scene_height: if is_narrow {
+                    (width * 0.70).clamp(300.0, 420.0)
+                } else {
+                    (width * 0.46).clamp(300.0, 400.0)
+                },
+                controls_margin: Margin {
+                    left: 8,
+                    right: 8,
+                    top: 12,
+                    bottom: 8,
+                },
+                controls_gap: 8.0,
+                scene_gap: 8.0,
+                scene_margin: 6,
+                cards_vertical: false,
+                collapse_keyboard_controls: true,
+                collapse_instructions: true,
+            },
+            SimMode::Slam => EmbedLayoutSpec {
+                controls_max_height: if is_narrow {
+                    (width * 0.28).clamp(160.0, 240.0)
+                } else {
+                    (width * 0.18).clamp(150.0, 220.0)
+                },
+                scene_height: if is_narrow {
+                    (width * 0.72).clamp(300.0, 430.0)
+                } else {
+                    (width * 0.48).clamp(300.0, 410.0)
+                },
+                controls_margin: Margin {
+                    left: 8,
+                    right: 8,
+                    top: 12,
+                    bottom: 8,
+                },
+                controls_gap: 8.0,
+                scene_gap: 8.0,
+                scene_margin: 6,
+                cards_vertical: true,
+                collapse_keyboard_controls: true,
+                collapse_instructions: true,
+            },
+            SimMode::Mujoco => EmbedLayoutSpec {
+                controls_max_height: if is_narrow {
+                    (width * 0.40).clamp(220.0, 340.0)
+                } else {
+                    (width * 0.24).clamp(200.0, 300.0)
+                },
+                scene_height: if is_narrow {
+                    (width * 0.90).clamp(360.0, 560.0)
+                } else {
+                    (width * 0.58).clamp(360.0, 520.0)
+                },
+                controls_margin: Margin {
+                    left: 10,
+                    right: 10,
+                    top: 12,
+                    bottom: 8,
+                },
+                controls_gap: 8.0,
+                scene_gap: 8.0,
+                scene_margin: 6,
+                cards_vertical: false,
+                collapse_keyboard_controls: true,
+                collapse_instructions: true,
+            },
         }
     }
 }
@@ -340,6 +488,17 @@ impl Simulator {
     /// This is used by the docs iframe host to size the embed from actual egui
     /// layout measurements instead of a heuristic guess.
     pub fn embedded_content_height(&self) -> Option<f32> {
+        if self.mode == SimMode::InvertedPendulum {
+            let width = self
+                .help_state
+                .help_scene_rect
+                .map(|rect| rect.width())
+                .unwrap_or(640.0)
+                .max(320.0);
+            let spec = self.mode.embed_layout_spec(width);
+            return Some(spec.scene_margin as f32 + spec.scene_height + 20.0);
+        }
+
         let mut bottom = 0.0_f32;
         let mut saw_rect = false;
 

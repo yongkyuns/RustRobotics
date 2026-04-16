@@ -8,7 +8,7 @@
 //! - playback / reset / comparison controls
 //! - responsive sidebar + scene layout
 //! - graph window orchestration
-use super::super::{SimMode, Simulator};
+use super::super::{EmbedLayoutSpec, SimMode, Simulator};
 use egui::*;
 use egui_plot::{Corner, Legend, Plot};
 
@@ -219,86 +219,108 @@ impl Simulator {
         display_fps: f32,
     ) {
         let total_width = ui.available_width();
-        let is_narrow = total_width < 900.0;
-        let controls_max_height = match self.mode {
-            SimMode::Mujoco => {
-                if is_narrow {
-                    (total_width * 0.42).clamp(220.0, 360.0)
-                } else {
-                    (total_width * 0.24).clamp(200.0, 300.0)
-                }
-            }
-            SimMode::PathPlanning | SimMode::Slam => {
-                if is_narrow {
-                    (total_width * 0.36).clamp(190.0, 280.0)
-                } else {
-                    (total_width * 0.2).clamp(170.0, 240.0)
-                }
-            }
-            SimMode::InvertedPendulum | SimMode::Localization => {
-                if is_narrow {
-                    (total_width * 0.22).clamp(130.0, 180.0)
-                } else {
-                    (total_width * 0.12).clamp(120.0, 160.0)
-                }
-            }
-        };
-        let scene_height = match self.mode {
-            SimMode::Mujoco => {
-                if is_narrow {
-                    (total_width * 0.9).clamp(360.0, 580.0)
-                } else {
-                    (total_width * 0.58).clamp(360.0, 520.0)
-                }
-            }
-            SimMode::InvertedPendulum => {
-                if is_narrow {
-                    (total_width * 0.28).clamp(180.0, 240.0)
-                } else {
-                    (total_width * 0.18).clamp(160.0, 220.0)
-                }
-            }
-            SimMode::Localization | SimMode::PathPlanning | SimMode::Slam => {
-                if is_narrow {
-                    (total_width * 0.72).clamp(320.0, 460.0)
-                } else {
-                    (total_width * 0.48).clamp(320.0, 420.0)
-                }
-            }
-        };
+        let spec = self.mode.embed_layout_spec(total_width);
 
-        let controls_response = egui::Frame::NONE
-            .inner_margin(Margin {
-                left: 8,
-                right: 8,
-                top: 12,
-                bottom: 8,
-            })
-            .show(ui, |ui| {
-                self.show_embedded_shared_controls_row(ui, display_fps);
-                ui.add_space(6.0);
+        if self.mode == SimMode::InvertedPendulum {
+            let total_height = ui.available_height().max(spec.scene_height);
+            let plot_gap = if self.ui_state.show_graph { 10.0 } else { 0.0 };
+            let plot_height = if self.ui_state.show_graph { 236.0 } else { 0.0 };
+            let scene_height = if self.ui_state.show_graph {
+                (total_height - plot_height - plot_gap).max(spec.scene_height.max(280.0))
+            } else {
+                total_height.max(spec.scene_height)
+            };
 
-                ScrollArea::vertical()
-                    .max_height((controls_max_height - 48.0).max(120.0))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.show_embedded_controls_panel(ui))
-            });
+            ui.allocate_ui_with_layout(
+                vec2(total_width, scene_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.add_space(spec.scene_margin as f32);
+                    self.show_scene_pane(ui, frame, true);
+                },
+            );
+
+            if self.ui_state.show_graph {
+                ui.add_space(plot_gap);
+                egui::Frame::group(ui.style())
+                    .inner_margin(Margin {
+                        left: 10,
+                        right: 10,
+                        top: 10,
+                        bottom: 18,
+                    })
+                    .show(ui, |ui| {
+                        ui.set_min_height(plot_height);
+                        ui.set_max_height(plot_height);
+                        self.pendulum_plot_ui(ui);
+                    });
+            }
+            return;
+        }
+
+        let controls_response =
+            egui::Frame::NONE
+                .inner_margin(spec.controls_margin)
+                .show(ui, |ui| {
+                    self.show_embedded_shared_controls_row(ui, display_fps);
+                    ui.add_space(spec.controls_gap);
+
+                    ScrollArea::vertical()
+                        .max_height((spec.controls_max_height - 48.0).max(120.0))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.show_embedded_controls_panel(ui, spec))
+                });
         self.help_state.help_options_rect = Some(controls_response.response.rect);
 
-        ui.add_space(4.0);
+        ui.add_space(spec.scene_gap);
 
+        let available_scene_height = ui.available_height();
+        let scene_height = if self.mode == SimMode::InvertedPendulum {
+            available_scene_height.clamp(spec.scene_height, spec.scene_height + 80.0)
+        } else {
+            spec.scene_height.max(available_scene_height)
+        };
         ui.allocate_ui_with_layout(
             vec2(total_width, scene_height),
             Layout::top_down(Align::Min),
             |ui| {
-                egui::Frame::group(ui.style())
-                    .inner_margin(Margin::same(6))
-                    .show(ui, |ui| self.show_scene_pane(ui, frame, true));
+                ui.add_space(spec.scene_margin as f32);
+                self.show_scene_pane(ui, frame, true);
             },
         );
     }
 
     fn show_embedded_shared_controls_row(&mut self, ui: &mut Ui, display_fps: f32) {
+        if self.mode == SimMode::InvertedPendulum {
+            ui.horizontal_wrapped(|ui| {
+                let btn_text = if self.paused { "Play" } else { "Pause" };
+                if ui.button(btn_text).clicked() {
+                    self.paused = !self.paused;
+                }
+                if ui.button("Restart").clicked() {
+                    self.restart();
+                }
+                ui.separator();
+                ui.label("Speed:");
+                ui.add(Slider::new(&mut self.sim_speed, 1..=20).show_value(true));
+                ui.separator();
+                ui.checkbox(&mut self.pendulum_noise_enabled, "Noise");
+                ui.add_enabled(
+                    self.pendulum_noise_enabled,
+                    Slider::new(&mut self.pendulum_noise_scale, 0.0..=3.0)
+                        .text("Magnitude")
+                        .show_value(true),
+                );
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("FPS: {:.1}", display_fps))
+                        .strong()
+                        .color(Color32::from_rgb(238, 243, 249)),
+                );
+            });
+            return;
+        }
+
         ui.horizontal_wrapped(|ui| {
             let btn_text = if self.paused { "Play" } else { "Pause" };
             if ui.button(btn_text).clicked() {
@@ -361,12 +383,65 @@ impl Simulator {
         });
     }
 
-    fn show_embedded_controls_panel(&mut self, ui: &mut Ui) {
-        let use_vertical_cards = matches!(
-            self.mode,
-            SimMode::InvertedPendulum | SimMode::Localization | SimMode::Slam
-        );
-        self.show_option_cards(ui, use_vertical_cards);
+    fn show_embedded_controls_panel(&mut self, ui: &mut Ui, spec: EmbedLayoutSpec) {
+        if self.mode == SimMode::InvertedPendulum {
+            ui.vertical(|ui| {
+                let full_width = ui.available_width();
+                let card_width = full_width.min(420.0);
+                let button_width = 112.0;
+                let mut add_requested = false;
+                let mut kept = Vec::with_capacity(self.simulations.pendulums.len());
+
+                for (index, mut sim) in self.simulations.pendulums.drain(..).enumerate() {
+                    let keep = ui
+                        .horizontal_top(|ui| {
+                            let content_width =
+                                card_width + if index == 0 { button_width + 12.0 } else { 0.0 };
+                            let side_space = ((full_width - content_width) * 0.5).max(0.0);
+                            if side_space > 0.0 {
+                                ui.add_space(side_space);
+                            }
+
+                            let keep = ui
+                                .allocate_ui_with_layout(
+                                    vec2(card_width, ui.available_height()),
+                                    Layout::top_down(Align::Min),
+                                    |ui| sim.compact_options_with_policy(ui),
+                                )
+                                .inner;
+
+                            if index == 0 {
+                                ui.add_space(12.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(8.0);
+                                    let add =
+                                        Button::new(RichText::new("Add New Pendulum").strong())
+                                            .small()
+                                            .frame(true);
+                                    if ui.add_sized([132.0, 28.0], add).clicked() {
+                                        add_requested = true;
+                                    }
+                                });
+                            }
+
+                            keep
+                        })
+                        .inner;
+
+                    if keep {
+                        kept.push(sim);
+                    }
+                }
+
+                self.simulations.pendulums = kept;
+                if add_requested {
+                    self.add_simulation();
+                }
+            });
+            return;
+        } else {
+            self.show_option_cards(ui, spec.cards_vertical);
+        }
 
         let show_keyboard_controls = (self.mode == SimMode::Localization
             && self
@@ -383,31 +458,35 @@ impl Simulator {
 
         if show_keyboard_controls {
             ui.add_space(6.0);
-            ui.collapsing("Keyboard Controls", |ui| match self.mode {
-                SimMode::Localization => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("← → : Steering");
-                        ui.label("↑ ↓ : Accelerate / Brake");
-                        ui.label("Space : Pause");
-                        ui.label("Enter : Restart");
-                    });
-                }
-                SimMode::Slam => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("← → : Turn Left / Right");
-                        ui.label("↑ ↓ : Speed Up / Slow Down");
-                        ui.label("Space : Pause");
-                        ui.label("Enter : Restart");
-                    });
-                }
-                _ => {}
-            });
+            CollapsingHeader::new("Keyboard Controls")
+                .default_open(!spec.collapse_keyboard_controls)
+                .show(ui, |ui| match self.mode {
+                    SimMode::Localization => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("← → : Steering");
+                            ui.label("↑ ↓ : Accelerate / Brake");
+                            ui.label("Space : Pause");
+                            ui.label("Enter : Restart");
+                        });
+                    }
+                    SimMode::Slam => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("← → : Turn Left / Right");
+                            ui.label("↑ ↓ : Speed Up / Slow Down");
+                            ui.label("Space : Pause");
+                            ui.label("Enter : Restart");
+                        });
+                    }
+                    _ => {}
+                });
         }
 
         ui.add_space(6.0);
-        ui.collapsing("Instructions", |ui| {
-            self.show_mode_instructions(ui);
-        });
+        CollapsingHeader::new("Instructions")
+            .default_open(!spec.collapse_instructions)
+            .show(ui, |ui| {
+                self.show_mode_instructions(ui);
+            });
     }
 
     /// Renders the sidebar containing option cards, contextual keyboard help,

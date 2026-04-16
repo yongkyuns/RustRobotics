@@ -49,13 +49,26 @@ impl Simulator {
             }
         });
         ui.separator();
-        Plot::new("PendulumPlot")
-            .legend(Legend::default().position(Corner::RightTop))
-            .show(ui, |plot_ui| {
-                self.simulations.pendulums.iter().for_each(|sim| {
-                    sim.plot_signal(plot_ui, self.ui_state.pendulum_plot_tab.signal_index());
-                });
-            });
+        let plot_area_height = ui.available_height().max(140.0);
+        let plot_height = (plot_area_height - 18.0).max(120.0);
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), plot_area_height),
+            Layout::top_down(Align::Min),
+            |ui| {
+                Plot::new("PendulumPlot")
+                    .height(plot_height)
+                    .legend(Legend::default().position(Corner::RightTop))
+                    .show(ui, |plot_ui| {
+                        self.simulations.pendulums.iter().for_each(|sim| {
+                            sim.plot_signal(
+                                plot_ui,
+                                self.ui_state.pendulum_plot_tab.signal_index(),
+                            );
+                        });
+                    });
+            },
+        );
+        ui.add_space(10.0);
     }
 
     fn pendulum_color(index: usize) -> Color32 {
@@ -97,10 +110,11 @@ impl Simulator {
         let pad = if embedded { 10.0 } else { 12.0 };
         let painter = painter.with_clip_rect(plot_rect);
 
-        painter.rect_filled(plot_rect, 2.0, visuals.extreme_bg_color);
+        let scene_corner_radius = if embedded { 12.0 } else { 14.0 };
+        painter.rect_filled(plot_rect, scene_corner_radius, visuals.extreme_bg_color);
         painter.rect_stroke(
             plot_rect,
-            2.0,
+            scene_corner_radius,
             Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
             StrokeKind::Inside,
         );

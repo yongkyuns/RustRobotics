@@ -67,19 +67,16 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let umin = -50.0_f64;
     let umax = 50.0_f64;
 
-    // Stage cost weights. Position is penalized so the cart does not drift
-    // while stabilizing the rod angle.
-    let Q = diag![1.0_f32, 1., 10., 1.]; // [pos, vel, angle, angular_vel]
-    let R = model.R; // Use model's R matrix
-
-    // Create a modified model with our Q for computing terminal cost
-    let mut mpc_model = model;
-    mpc_model.Q = Q;
+    // Stage cost weights and control penalty come directly from the pendulum
+    // model so the UI can expose MPC tuning using the same quadratic form as
+    // the solver.
+    let Q = model.Q;
+    let R = model.R;
 
     // Terminal cost: use the infinite-horizon LQR value function approximation
     // from the Riccati equation. This is the standard MPC trick for better
     // finite-horizon stability.
-    let QN = mpc_model.solve_DARE(Ad, Bd);
+    let QN = model.solve_DARE(Ad, Bd);
 
     // Initial state (from input) and reference state
     let x0_vec: [f64; NX] = [x[0] as f64, x[1] as f64, x[2] as f64, x[3] as f64];

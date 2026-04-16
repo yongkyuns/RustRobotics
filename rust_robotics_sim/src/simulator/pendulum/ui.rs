@@ -5,7 +5,7 @@
 //! each pendulum instance.
 use super::super::ppo_trainer::PpoReplicaStatus;
 use super::domain::{Controller, ControllerKind, InvertedPendulum, PENDULUM_FIXED_DT};
-use egui::{ComboBox, DragValue, Grid, Ui};
+use egui::{CollapsingHeader, ComboBox, DragValue, Grid, RichText, Ui};
 use rust_robotics_core::PolicySnapshot;
 
 impl Controller {
@@ -127,11 +127,12 @@ impl Controller {
             }
             Self::MPC(model) => {
                 ui.label("MPC Parameters");
-                ui.horizontal_wrapped(|ui| {
-                    Grid::new("mpc_param_grid")
-                        .num_columns(4)
+                ui.columns(2, |columns| {
+                    columns[0].label("Model");
+                    Grid::new("mpc_model_grid")
+                        .num_columns(2)
                         .spacing([8.0, 6.0])
-                        .show(ui, |ui| {
+                        .show(&mut columns[0], |ui| {
                             ui.label("Beam");
                             ui.add(
                                 DragValue::new(&mut model.l_bar)
@@ -139,6 +140,8 @@ impl Controller {
                                     .range(0.1_f32..=10.0)
                                     .suffix(" m"),
                             );
+                            ui.end_row();
+
                             ui.label("Cart");
                             ui.add(
                                 DragValue::new(&mut model.m_cart)
@@ -155,6 +158,53 @@ impl Controller {
                                     .range(0.1_f32..=10.0)
                                     .suffix(" kg"),
                             );
+                            ui.end_row();
+                        });
+
+                    columns[1].label("Weights");
+                    Grid::new("mpc_weight_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(&mut columns[1], |ui| {
+                            ui.label("Pos");
+                            ui.add(
+                                DragValue::new(model.Q.get_mut(0).unwrap())
+                                    .speed(0.01)
+                                    .range(0.0_f32..=100.0),
+                            );
+                            ui.end_row();
+
+                            ui.label("Vel");
+                            ui.add(
+                                DragValue::new(model.Q.get_mut(5).unwrap())
+                                    .speed(0.01)
+                                    .range(0.0_f32..=100.0),
+                            );
+                            ui.end_row();
+
+                            ui.label("Angle");
+                            ui.add(
+                                DragValue::new(model.Q.get_mut(10).unwrap())
+                                    .speed(0.01)
+                                    .range(0.0_f32..=100.0),
+                            );
+                            ui.end_row();
+
+                            ui.label("Ang Vel");
+                            ui.add(
+                                DragValue::new(model.Q.get_mut(15).unwrap())
+                                    .speed(0.01)
+                                    .range(0.0_f32..=100.0),
+                            );
+                            ui.end_row();
+
+                            ui.label("Input");
+                            ui.add(
+                                DragValue::new(model.R.get_mut(0).unwrap())
+                                    .speed(0.01)
+                                    .range(0.0_f32..=100.0),
+                            );
+                            ui.end_row();
                         });
                 });
                 #[cfg(not(target_arch = "wasm32"))]
@@ -195,6 +245,215 @@ impl Controller {
 }
 
 impl InvertedPendulum {
+    fn show_cart_compact(&mut self, ui: &mut Ui) {
+        Grid::new(("cart_compact_grid", self.id))
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Beam");
+                ui.add(
+                    DragValue::new(&mut self.model.l_bar)
+                        .speed(0.01)
+                        .range(0.1_f32..=10.0)
+                        .suffix(" m"),
+                );
+                ui.end_row();
+
+                ui.label("Cart");
+                ui.add(
+                    DragValue::new(&mut self.model.m_cart)
+                        .speed(0.01)
+                        .range(0.1_f32..=3.0)
+                        .suffix(" kg"),
+                );
+                ui.end_row();
+
+                ui.label("Ball");
+                ui.add(
+                    DragValue::new(&mut self.model.m_ball)
+                        .speed(0.01)
+                        .range(0.1_f32..=10.0)
+                        .suffix(" kg"),
+                );
+                ui.end_row();
+            });
+    }
+
+    fn show_controller_summary(&self, ui: &mut Ui, available_policy: Option<&PolicySnapshot>) {
+        match &self.controller {
+            Controller::LQR(model) => {
+                ui.label(format!(
+                    "LQR: Qθ {:.1}, Qx {:.1}, R {:.1}",
+                    model.Q[10], model.Q[0], model.R[0]
+                ));
+            }
+            Controller::PID(pid) => {
+                ui.label(format!(
+                    "PID: P {:.2}, I {:.2}, D {:.2}",
+                    pid.P, pid.I, pid.D
+                ));
+            }
+            Controller::MPC(_) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                ui.label("MPC: horizon 12, tunable Q/R");
+                #[cfg(target_arch = "wasm32")]
+                ui.label("MPC: web path falls back to LQR");
+            }
+            Controller::Policy(policy) => {
+                if available_policy.is_some() {
+                    ui.label(format!("Policy: action std {:.3}", policy.action_std()));
+                } else {
+                    ui.label("Policy: waiting for trainer snapshot");
+                }
+            }
+        }
+    }
+
+    fn show_compact_controller_panel(
+        &mut self,
+        ui: &mut Ui,
+        available_policy: Option<&PolicySnapshot>,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Controller").strong());
+            let mut selected = self.controller_selection;
+            ui.push_id(("compact_controller", self.id), |ui| {
+                ComboBox::from_id_salt("controller_select")
+                    .width(150.0)
+                    .selected_text(selected.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, ControllerKind::Lqr, "LQR");
+                        ui.selectable_value(&mut selected, ControllerKind::Pid, "PID");
+                        ui.selectable_value(&mut selected, ControllerKind::Mpc, "MPC");
+                        ui.selectable_value(&mut selected, ControllerKind::Policy, "PPO Policy");
+                    });
+            });
+            if selected != self.controller_selection {
+                self.select_controller_kind(selected);
+            }
+        });
+
+        self.show_controller_summary(ui, available_policy);
+
+        if self.controller_selection == ControllerKind::Policy {
+            if self.controller.kind() == ControllerKind::Policy {
+                self.controller.options(ui, available_policy);
+            } else {
+                ui.label("No snapshot yet.");
+            }
+        } else {
+            self.controller.options(ui, available_policy);
+        }
+    }
+
+    fn show_compact_policy_trainer(&mut self, ui: &mut Ui) {
+        let PpoReplicaStatus { total, ready, busy } = self.trainer_backend.status();
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button(if self.training_active {
+                    "Stop"
+                } else {
+                    "Train"
+                })
+                .clicked()
+            {
+                if self.training_active {
+                    self.stop_training();
+                } else {
+                    self.start_training();
+                }
+            }
+            if ui.button("Reset").clicked() {
+                let was_training = self.training_active;
+                self.reset_trainer();
+                if was_training {
+                    self.start_training();
+                }
+            }
+            if ui.button("Use").clicked() {
+                if let Some(snapshot) = self.trainer_backend.snapshot().cloned() {
+                    self.set_policy_controller(&snapshot);
+                }
+            }
+        });
+
+        if let Some(metrics) = self.trainer_backend.metrics() {
+            ui.label(format!(
+                "Upd {}  Ep {}  Ret {:.2}",
+                metrics.total_updates, metrics.total_episodes, metrics.mean_episode_return
+            ));
+            if total > 0 {
+                ui.label(format!("Replicas {total}/{ready}/{busy}"));
+            }
+        } else {
+            ui.label("Trainer not initialized.");
+        }
+
+        CollapsingHeader::new("Trainer settings")
+            .default_open(false)
+            .show(ui, |ui| {
+                #[cfg(target_arch = "wasm32")]
+                ui.label("Web: CPU workers.");
+
+                Grid::new(("ppo_trainer_compact_grid", self.id))
+                    .num_columns(4)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Parallel");
+                        ui.add(
+                            DragValue::new(&mut self.parallel_trainers)
+                                .range(1..=32)
+                                .speed(1),
+                        );
+                        ui.label("Upd/tick");
+                        ui.add(
+                            DragValue::new(&mut self.training_updates_per_tick)
+                                .range(1..=32)
+                                .speed(1),
+                        );
+                        ui.end_row();
+
+                        ui.label("Rollout");
+                        ui.add(
+                            DragValue::new(&mut self.trainer_config.ppo.rollout_steps)
+                                .range(32..=8192)
+                                .speed(16),
+                        );
+                        ui.label("Epochs");
+                        ui.add(
+                            DragValue::new(&mut self.trainer_config.ppo.epochs_per_update)
+                                .range(1..=16)
+                                .speed(1),
+                        );
+                        ui.end_row();
+
+                        ui.label("LR");
+                        ui.add(
+                            DragValue::new(&mut self.trainer_config.ppo.learning_rate)
+                                .range(1e-5..=1e-2)
+                                .speed(1e-4),
+                        );
+                        ui.label("Action std");
+                        ui.add(
+                            DragValue::new(&mut self.trainer_config.action_std)
+                                .range(0.05..=10.0)
+                                .speed(0.05),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.label(format!("dt = sim step ({:.3}s)", PENDULUM_FIXED_DT));
+                ui.label("Changes apply after `Reset`.");
+                if self.training_active && self.trainer_backend.busy() {
+                    ui.label("Training...");
+                }
+                if let Some(error) = self.trainer_backend.last_error() {
+                    ui.label(format!("Trainer error: {error}"));
+                }
+            });
+    }
+
     fn show_cart_parameters(&mut self, ui: &mut Ui) {
         ui.label("Cart:");
         ui.add(
@@ -444,6 +703,55 @@ impl InvertedPendulum {
                 }
             });
         });
+        keep
+    }
+
+    /// Draws a compact pendulum control card for documentation/tutorial embeds.
+    ///
+    /// The compact card keeps only the main teaching controls always visible and
+    /// moves full controller tuning and PPO trainer settings behind collapsible
+    /// sections so the embed has a stable, natural height.
+    pub fn compact_options_with_policy(&mut self, ui: &mut Ui) -> bool {
+        let mut keep = true;
+        if self.controller_selection == ControllerKind::Policy
+            || self.trainer_backend.is_initialized()
+        {
+            self.sync_policy_selection();
+        }
+
+        ui.group(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Pendulum {}", self.id)).strong());
+                    if ui.small_button("🗙").clicked() {
+                        keep = false;
+                    }
+                });
+
+                let available_policy = self.trainer_backend.snapshot().cloned();
+                ui.label(
+                    RichText::new(format!("Controller: {}", self.controller_selection.label()))
+                        .color(ui.visuals().weak_text_color()),
+                );
+
+                CollapsingHeader::new("Cart settings")
+                    .default_open(false)
+                    .show(ui, |ui| self.show_cart_compact(ui));
+
+                CollapsingHeader::new("Controller settings")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        self.show_compact_controller_panel(ui, available_policy.as_ref())
+                    });
+
+                if self.controller_selection == ControllerKind::Policy {
+                    CollapsingHeader::new("PPO Trainer")
+                        .default_open(false)
+                        .show(ui, |ui| self.show_compact_policy_trainer(ui));
+                }
+            });
+        });
+
         keep
     }
 }

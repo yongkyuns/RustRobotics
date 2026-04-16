@@ -11,6 +11,7 @@
 //! Separating this logic from the UI modules keeps update semantics readable and
 //! makes it easier to test the simulator state machine without involving `egui`.
 use super::{
+    pendulum::{ControllerKind, PendulumCardState, PendulumPatch},
     InvertedPendulum, ParticleFilter, PathPlanning, PendulumNoiseConfig, SimMode, Simulate,
     Simulator, SlamDemo, PENDULUM_FIXED_DT,
 };
@@ -30,6 +31,98 @@ impl Simulator {
     /// Returns the current simulation time in seconds.
     pub fn time(&self) -> f32 {
         self.time
+    }
+
+    /// Returns the current global simulation speed multiplier.
+    pub fn sim_speed(&self) -> usize {
+        self.sim_speed
+    }
+
+    /// Returns whether the shared graph panel is enabled.
+    pub fn show_graph(&self) -> bool {
+        self.ui_state.show_graph
+    }
+
+    /// Enables or disables the shared graph panel.
+    pub fn set_show_graph(&mut self, show_graph: bool) {
+        self.ui_state.show_graph = show_graph;
+    }
+
+    /// Sets the global simulation speed multiplier.
+    pub fn set_sim_speed(&mut self, sim_speed: usize) {
+        self.sim_speed = sim_speed.clamp(1, 20);
+    }
+
+    /// Returns whether pendulum measurement/action noise is enabled.
+    pub fn pendulum_noise_enabled(&self) -> bool {
+        self.pendulum_noise_enabled
+    }
+
+    /// Enables or disables pendulum noise in the active simulator.
+    pub fn set_pendulum_noise_enabled(&mut self, enabled: bool) {
+        self.pendulum_noise_enabled = enabled;
+    }
+
+    /// Returns the current pendulum noise scale.
+    pub fn pendulum_noise_scale(&self) -> f32 {
+        self.pendulum_noise_scale
+    }
+
+    /// Sets the pendulum noise scale.
+    pub fn set_pendulum_noise_scale(&mut self, scale: f32) {
+        self.pendulum_noise_scale = scale.clamp(0.0, 3.0);
+    }
+
+    /// Returns the number of active pendulum instances.
+    pub fn pendulum_count(&self) -> usize {
+        self.simulations.pendulums.len()
+    }
+
+    /// Returns the serialized DOM-card state for each active pendulum.
+    pub(crate) fn pendulum_ui_state(&self) -> Vec<PendulumCardState> {
+        self.simulations
+            .pendulums
+            .iter()
+            .map(InvertedPendulum::card_state)
+            .collect()
+    }
+
+    /// Sets the selected controller kind for the pendulum with the matching id.
+    pub(crate) fn set_pendulum_controller_kind(
+        &mut self,
+        pendulum_id: usize,
+        kind: ControllerKind,
+    ) {
+        if let Some(pendulum) = self
+            .simulations
+            .pendulums
+            .iter_mut()
+            .find(|pendulum| pendulum.id() == pendulum_id)
+        {
+            pendulum.select_controller_kind(kind);
+        }
+    }
+
+    /// Removes a pendulum instance by id, keeping at least one pendulum alive.
+    pub(crate) fn remove_pendulum(&mut self, pendulum_id: usize) {
+        if self.simulations.pendulums.len() <= 1 {
+            return;
+        }
+        self.simulations
+            .pendulums
+            .retain(|pendulum| pendulum.id() != pendulum_id);
+    }
+
+    /// Applies a partial configuration patch to one pendulum instance.
+    pub(crate) fn patch_pendulum(&mut self, pendulum_id: usize, patch: PendulumPatch) {
+        if let Some(pendulum) = self
+            .simulations
+            .pendulums
+            .iter_mut()
+            .find(|pendulum| pendulum.id() == pendulum_id)
+        {
+            pendulum.apply_patch(patch);
+        }
     }
 
     /// Sets the paused state without mutating any other simulator state.
@@ -311,5 +404,11 @@ impl Simulator {
                     .push(SlamDemo::new(id, self.time));
             }
         }
+    }
+
+    /// Public wrapper used by web/native UI bridges to add a simulation for
+    /// the currently active mode.
+    pub fn add_active_simulation(&mut self) {
+        self.add_simulation();
     }
 }

@@ -119,7 +119,7 @@ pub struct ValueSnapshot {
 ///
 /// These fields are designed to let the simulator explain "what just happened"
 /// during training, rather than to replace a full experiment-tracking system.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PpoMetrics {
     pub total_updates: usize,
     pub total_env_steps: usize,
