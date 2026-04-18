@@ -100,6 +100,28 @@ if [[ ! -f "site_docs/_build/html/index.html" ]]; then
   exit 1
 fi
 
+publish_tutorial_dir="$(mktemp -d)"
+cleanup() {
+  rm -rf "${publish_tutorial_dir}"
+}
+trap cleanup EXIT
+
+rsync -a --delete "site_docs/_build/html/" "${publish_tutorial_dir}/"
+
+# Jekyll-backed GitHub Pages sites ignore underscore-prefixed static asset
+# directories. Rewrite the Sphinx output into a publish-safe layout while
+# leaving the local build untouched.
+if [[ -d "${publish_tutorial_dir}/_static" ]]; then
+  mv "${publish_tutorial_dir}/_static" "${publish_tutorial_dir}/static"
+fi
+
+while IFS= read -r -d '' html_file; do
+  perl -0pi -e 's#([\"'\''(])(?:\.\./|\.?/)?_static/#${1}static/#g; s#([\"'\''(])/_static/#${1}static/#g' "${html_file}"
+done < <(find "${publish_tutorial_dir}" -type f -name '*.html' -print0)
+
+# These are build internals and should not be published.
+rm -rf "${publish_tutorial_dir}/.doctrees"
+
 sim_target="${pages_repo}/${sim_dir}"
 tutorial_target="${pages_repo}/${tutorial_dir}"
 
@@ -119,7 +141,7 @@ echo
 echo "Publishing tutorial site:"
 echo "  from: ${repo_root}/site_docs/_build/html/"
 echo "  to:   ${tutorial_target}/"
-rsync "${rsync_args[@]}" "site_docs/_build/html/" "${tutorial_target}/"
+rsync "${rsync_args[@]}" "${publish_tutorial_dir}/" "${tutorial_target}/"
 
 echo
 echo "Done."
