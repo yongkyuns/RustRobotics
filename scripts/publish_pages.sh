@@ -128,7 +128,7 @@ def prefix_for(html_path: Path) -> str:
     depth = len(rel_parent.parts)
     return "" if depth == 0 else "../" * depth
 
-pattern = re.compile(r'(?P<prefix>["\'(])(?P<path>(?:\.\./|\.?/)?_static/)')
+pattern = re.compile(r'(?P<prefix>["\'(])(?P<path>(?:(?:\.\./)+|\.?/)?_static/)')
 
 for html_path in root.rglob("*.html"):
     prefix = prefix_for(html_path)
