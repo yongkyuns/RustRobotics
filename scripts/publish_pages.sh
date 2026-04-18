@@ -115,9 +115,31 @@ if [[ -d "${publish_tutorial_dir}/_static" ]]; then
   mv "${publish_tutorial_dir}/_static" "${publish_tutorial_dir}/static"
 fi
 
-while IFS= read -r -d '' html_file; do
-  perl -0pi -e 's#([\"'\''(])(?:\.\./|\.?/)?_static/#${1}static/#g; s#([\"'\''(])/_static/#${1}static/#g' "${html_file}"
-done < <(find "${publish_tutorial_dir}" -type f -name '*.html' -print0)
+python3 - "${publish_tutorial_dir}" <<'PY'
+from pathlib import Path
+import os
+import re
+import sys
+
+root = Path(sys.argv[1]).resolve()
+
+def prefix_for(html_path: Path) -> str:
+    rel_parent = html_path.parent.relative_to(root)
+    depth = len(rel_parent.parts)
+    return "" if depth == 0 else "../" * depth
+
+pattern = re.compile(r'(?P<prefix>["\'(])(?P<path>(?:\.\./|\.?/)?_static/)')
+
+for html_path in root.rglob("*.html"):
+    prefix = prefix_for(html_path)
+    text = html_path.read_text()
+
+    def repl(match):
+        return f"{match.group('prefix')}{prefix}static/"
+
+    rewritten = pattern.sub(repl, text)
+    html_path.write_text(rewritten)
+PY
 
 # These are build internals and should not be published.
 rm -rf "${publish_tutorial_dir}/.doctrees"
