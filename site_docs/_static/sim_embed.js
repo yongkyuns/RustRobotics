@@ -2,6 +2,41 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function resolvedSimBase() {
+  const params = new URLSearchParams(window.location.search);
+  const explicit = params.get("sim_base");
+  if (explicit) {
+    return explicit;
+  }
+
+  const host = window.location.hostname;
+  if (host === "127.0.0.1" || host === "localhost") {
+    return "http://127.0.0.1:3000/";
+  }
+
+  return "/sim/";
+}
+
+function ensureFrameSrc(frame) {
+  if (frame.dataset.srcInitialized === "1") {
+    return;
+  }
+
+  const simPath = frame.dataset.simPath;
+  if (!simPath) {
+    frame.dataset.srcInitialized = "1";
+    return;
+  }
+
+  try {
+    const url = new URL(simPath, resolvedSimBase());
+    frame.setAttribute("src", url.toString());
+    frame.dataset.srcInitialized = "1";
+  } catch (_error) {
+    // Ignore malformed runtime embed paths.
+  }
+}
+
 function preferredEmbedHeight(width, mode) {
   const viewportHeight = window.innerHeight || 900;
   const modeFloor = {
@@ -50,6 +85,7 @@ function seedFrameTheme(frame) {
     return;
   }
 
+  ensureFrameSrc(frame);
   const src = frame.getAttribute("src");
   if (!src) {
     return;
@@ -68,6 +104,7 @@ function seedFrameTheme(frame) {
 function bindEmbedFrame(frame) {
   const update = () => updateEmbedFrame(frame);
   frame.dataset.heightReported = "";
+  ensureFrameSrc(frame);
   seedFrameTheme(frame);
   update();
   frame.addEventListener("load", () => postThemeToFrame(frame));
@@ -141,7 +178,7 @@ window.addEventListener("message", (event) => {
   }
 });
 
-document.addEventListener("DOMContentLoaded", () => {
+function initializeEmbedFrames() {
   document.querySelectorAll(".sim-embed-frame").forEach(bindEmbedFrame);
   postThemeToAllFrames();
 
@@ -172,4 +209,10 @@ document.addEventListener("DOMContentLoaded", () => {
       media.addListener(listener);
     }
   }
-});
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initializeEmbedFrames, { once: true });
+} else {
+  initializeEmbedFrames();
+}

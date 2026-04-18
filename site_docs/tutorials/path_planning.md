@@ -8,7 +8,7 @@ different environments and algorithm assumptions.
   <iframe
     class="sim-embed-frame"
     data-sim-mode="path_planning"
-    src="http://127.0.0.1:3000/?mode=path_planning&embed=focused&ui=20260416b"
+    data-sim-path="?mode=path_planning&embed=focused&ui=20260416b"
     title="Rust Robotics path planning simulator"
     loading="lazy"
   ></iframe>

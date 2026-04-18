@@ -195,6 +195,47 @@ The web server must provide:
 - `Cross-Origin-Embedder-Policy: require-corp`
 - `Cross-Origin-Resource-Policy: same-origin`
 
+### Publishing To GitHub Pages
+
+The simulator bundle and tutorial site are built separately:
+
+- full simulator bundle: `docs/`
+- tutorial site: `site_docs/_build/html/`
+
+The tutorial embeds now resolve their simulator base at runtime:
+
+- local preview on `localhost` / `127.0.0.1`: `http://127.0.0.1:3000/`
+- hosted pages: `/sim/`
+
+So a same-origin Pages layout works well, for example:
+
+- simulator: `/sim/`
+- tutorial: `/sim-tutorial/`
+
+Helper script:
+
+```bash
+./scripts/publish_pages.sh --build
+```
+
+Default sync target:
+
+- `~/Dev/me/blog/yongkyuns.github.io`
+
+Default subdirectories:
+
+- `sim/`
+- `sim-tutorial/`
+
+You can override those with:
+
+```bash
+./scripts/publish_pages.sh \
+  --repo ~/Dev/me/blog/yongkyuns.github.io \
+  --sim-dir sim \
+  --tutorial-dir sim-tutorial
+```
+
 ## Testing Strategy
 
 The repo now uses several layers of protection against regressions:

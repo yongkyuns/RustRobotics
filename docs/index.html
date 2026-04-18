@@ -173,8 +173,8 @@
       }
 
       html.embedded-robot-dom .canvas-shell {
-        aspect-ratio: 16 / 10;
-        min-height: 380px;
+        aspect-ratio: 23 / 10;
+        min-height: 480px;
         max-height: 680px;
       }
 
@@ -1073,11 +1073,9 @@
         applyEmbedTheme(data.theme);
       });
 
-      function applyInitialSimulatorStateFromQuery() {
+      function primeEmbedLayoutFromQuery() {
         const params = new URLSearchParams(window.location.search);
         const mode = params.get("mode");
-        const paused = params.get("paused");
-        const restart = params.get("restart");
         const embed = params.get("embed");
 
         if (embed === "focused") {
@@ -1110,6 +1108,14 @@
         }
 
         applyEmbedTheme(detectLocalThemePreference());
+      }
+
+      function applyInitialSimulatorStateFromQuery() {
+        const params = new URLSearchParams(window.location.search);
+        const mode = params.get("mode");
+        const embed = params.get("embed");
+        const paused = params.get("paused");
+        const restart = params.get("restart");
 
         if (mode && typeof globalThis.rustRoboticsTestSetMode === "function") {
           try {
@@ -1160,7 +1166,7 @@
 
         try {
           console.log("=== STARTING APP ===");
-          applyEmbedTheme(detectLocalThemePreference());
+          primeEmbedLayoutFromQuery();
           await wasm_bindgen.start("the_canvas_id");
           console.log("=== APP STARTED ===");
           console.log("Canvas after start:", canvas.width, "x", canvas.height);

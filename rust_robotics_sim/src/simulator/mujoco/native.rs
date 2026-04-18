@@ -85,6 +85,10 @@ const MJ_GEOM_MESH: i32 = mjtGeom__mjGEOM_MESH as i32;
 #[cfg(not(target_arch = "wasm32"))]
 const MJ_GEOM_LINE: i32 = mjtGeom__mjGEOM_LINE as i32;
 
+const COMMAND_SETPOINT_RADIUS: f32 = 0.05;
+const COMMAND_SETPOINT_HEIGHT: f32 = COMMAND_SETPOINT_RADIUS;
+const COMMAND_SETPOINT_DRAG_PLANE_Z: f32 = COMMAND_SETPOINT_HEIGHT;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeRobotPreset {
     Go2,
@@ -686,7 +690,7 @@ impl MujocoRuntime {
 
         let initial_setpoint = {
             let raw = sim.read_raw_state();
-            Some([raw.base_pos[0], raw.base_pos[1], 0.05])
+            Some([raw.base_pos[0], raw.base_pos[1], COMMAND_SETPOINT_HEIGHT])
         };
 
         Ok(Self {
@@ -803,6 +807,9 @@ impl MujocoRuntime {
             FontId::monospace(12.0),
             Color32::from_gray(210),
         );
+        let overlay_camera =
+            SoftwareCamera::from_gl(&self.scene.camera[0], response.rect.aspect_ratio());
+        self.draw_setpoint_screen_marker(ui.painter(), response.rect, overlay_camera.as_ref());
 
         if let Ok(renderer) = self.wgpu_renderer.lock() {
             self.diagnostics.last_render_ms = renderer.last_render_ms_ms;
@@ -852,6 +859,7 @@ impl MujocoRuntime {
             FontId::monospace(12.0),
             Color32::from_gray(210),
         );
+        self.draw_setpoint_screen_marker(&painter, response.rect, camera.as_ref());
 
         self.diagnostics.last_render_ms = started.elapsed().as_secs_f32() * 1000.0;
         self.diagnostics.frame_count += 1;
@@ -868,7 +876,9 @@ impl MujocoRuntime {
         };
         if let Some(camera) = camera {
             if let Some((setpoint_pos, _)) = camera.project(rect, setpoint) {
-                let radius = camera.project_radius(rect, setpoint, 0.05).clamp(6.0, 18.0);
+                let radius = camera
+                    .project_radius(rect, setpoint, COMMAND_SETPOINT_RADIUS)
+                    .clamp(6.0, 18.0);
                 painter.circle_filled(setpoint_pos, radius, Color32::from_rgb(220, 70, 70));
                 painter.circle_stroke(
                     setpoint_pos,
@@ -877,6 +887,42 @@ impl MujocoRuntime {
                 );
             }
         }
+    }
+
+    fn draw_setpoint_screen_marker(
+        &self,
+        painter: &Painter,
+        rect: Rect,
+        camera: Option<&SoftwareCamera>,
+    ) {
+        let Some(setpoint) = self.command.setpoint_world else {
+            return;
+        };
+        let Some(camera) = camera else {
+            return;
+        };
+        let Some((projected, _)) = camera.project(rect, setpoint) else {
+            return;
+        };
+
+        painter.circle_stroke(
+            projected,
+            7.0,
+            Stroke::new(2.0, Color32::from_rgb(255, 245, 245)),
+        );
+        painter.circle_stroke(
+            projected,
+            11.0,
+            Stroke::new(1.5, Color32::from_rgba_unmultiplied(220, 70, 70, 220)),
+        );
+        painter.line_segment(
+            [projected + vec2(-5.0, 0.0), projected + vec2(5.0, 0.0)],
+            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+        );
+        painter.line_segment(
+            [projected + vec2(0.0, -5.0), projected + vec2(0.0, 5.0)],
+            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+        );
     }
 
     fn update_visual_scene(&mut self) {
@@ -900,16 +946,24 @@ impl MujocoRuntime {
             gather_viewport_interaction(self.robot.uses_setpoint_ball(), ui, response, |pointer| {
                 software_camera
                     .as_ref()
-                    .and_then(|camera| camera.intersect_plane_z(response.rect, pointer, 0.05))
+                    .and_then(|camera| {
+                        camera.align_setpoint_to_pointer(
+                            response.rect,
+                            pointer,
+                            COMMAND_SETPOINT_DRAG_PLANE_Z,
+                            COMMAND_SETPOINT_HEIGHT,
+                        )
+                    })
             });
 
         if interaction.reset_view {
             self.reset_camera();
         }
         if let Some(world) = interaction.setpoint_world {
-            self.command.setpoint_world = Some(world);
-            self.command.vel_x = world[0] - self.sim.read_raw_state().base_pos[0];
-            self.command.vel_y = world[1] - self.sim.read_raw_state().base_pos[1];
+            let setpoint = [world[0], world[1], COMMAND_SETPOINT_HEIGHT];
+            self.command.setpoint_world = Some(setpoint);
+            self.command.vel_x = setpoint[0] - self.sim.read_raw_state().base_pos[0];
+            self.command.vel_y = setpoint[1] - self.sim.read_raw_state().base_pos[1];
         }
         if let Some(delta) = interaction.primary_orbit_delta {
             self.cam.azimuth -= delta.x as f64 * 0.25;
@@ -1222,7 +1276,7 @@ impl MujocoRuntime {
             let start = [raw.base_pos[0], raw.base_pos[1], setpoint[2]];
             depth_points.push(start);
             depth_points.push(setpoint);
-            let marker_radius = 0.05;
+            let marker_radius = COMMAND_SETPOINT_RADIUS;
             for sx in [-marker_radius, marker_radius] {
                 for sy in [-marker_radius, marker_radius] {
                     for sz in [-marker_radius, marker_radius] {
@@ -1242,12 +1296,18 @@ impl MujocoRuntime {
     fn append_command_setpoint_scene(
         &self,
         triangles: &mut Vec<GlVertex>,
-        _lines: &mut Vec<GlVertex>,
+        lines: &mut Vec<GlVertex>,
     ) {
+        let _ = lines;
         let Some(setpoint) = self.command.setpoint_world else {
             return;
         };
-        append_shared_world_sphere(triangles, setpoint, 0.05, [0.92, 0.24, 0.24, 1.0]);
+        append_shared_world_sphere(
+            triangles,
+            setpoint,
+            COMMAND_SETPOINT_RADIUS,
+            [0.92, 0.24, 0.24, 1.0],
+        );
     }
 
     fn model_geom_instance(&self, geom_id: usize) -> Option<mjvGeom> {
@@ -2255,28 +2315,12 @@ impl SoftwareCamera {
         if depth <= 1e-4 {
             return None;
         }
-
-        let x = dot3(rel, self.right);
-        let y = dot3(rel, self.up);
-        let near_x = if self.orthographic {
-            x
-        } else {
-            x * self.frustum_near / depth
-        };
-        let near_y = if self.orthographic {
-            y
-        } else {
-            y * self.frustum_near / depth
-        };
-
-        let half_height = ((self.frustum_top - self.frustum_bottom) * 0.5)
-            .abs()
-            .max(1e-4);
-        let aspect = (rect.width() / rect.height()).max(0.1);
-        let half_width = (half_height * aspect).max(1e-4);
-        let center_y = (self.frustum_top + self.frustum_bottom) * 0.5;
-        let ndc_x = (near_x - self.frustum_center) / half_width;
-        let ndc_y = (near_y - center_y) / half_height;
+        let clip = transform_vec4_mat4(self.view_projection_matrix(), [point[0], point[1], point[2], 1.0]);
+        if clip[3].abs() <= 1e-6 {
+            return None;
+        }
+        let ndc_x = clip[0] / clip[3];
+        let ndc_y = clip[1] / clip[3];
 
         Some((
             pos2(
@@ -2338,6 +2382,47 @@ impl SoftwareCamera {
             return None;
         }
         Some(add3(origin, scale3(dir, t)))
+    }
+
+    fn align_setpoint_to_pointer(
+        &self,
+        rect: Rect,
+        pointer: Pos2,
+        drag_plane_z: f32,
+        marker_center_z: f32,
+    ) -> Option<[f32; 3]> {
+        let mut world = self.intersect_plane_z(rect, pointer, drag_plane_z)?;
+        world[2] = marker_center_z;
+        let step = 0.01;
+
+        for _ in 0..2 {
+            let (screen, _) = self.project(rect, world)?;
+            let error = pointer - screen;
+            if error.length_sq() <= 0.25 {
+                break;
+            }
+
+            let (screen_x, _) = self.project(rect, [world[0] + step, world[1], marker_center_z])?;
+            let (screen_y, _) = self.project(rect, [world[0], world[1] + step, marker_center_z])?;
+            let jacobian = [
+                [(screen_x.x - screen.x) / step, (screen_y.x - screen.x) / step],
+                [(screen_x.y - screen.y) / step, (screen_y.y - screen.y) / step],
+            ];
+            let det = jacobian[0][0] * jacobian[1][1] - jacobian[0][1] * jacobian[1][0];
+            if det.abs() <= 1e-6 {
+                break;
+            }
+
+            let inv_det = 1.0 / det;
+            let delta_x =
+                (jacobian[1][1] * error.x - jacobian[0][1] * error.y) * inv_det;
+            let delta_y =
+                (-jacobian[1][0] * error.x + jacobian[0][0] * error.y) * inv_det;
+            world[0] += delta_x;
+            world[1] += delta_y;
+        }
+
+        Some(world)
     }
 
     fn view_projection_matrix(&self) -> [f32; 16] {
@@ -2457,6 +2542,16 @@ fn mul_mat4(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
         }
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn transform_vec4_mat4(matrix: [f32; 16], vector: [f32; 4]) -> [f32; 4] {
+    [
+        matrix[0] * vector[0] + matrix[4] * vector[1] + matrix[8] * vector[2] + matrix[12] * vector[3],
+        matrix[1] * vector[0] + matrix[5] * vector[1] + matrix[9] * vector[2] + matrix[13] * vector[3],
+        matrix[2] * vector[0] + matrix[6] * vector[1] + matrix[10] * vector[2] + matrix[14] * vector[3],
+        matrix[3] * vector[0] + matrix[7] * vector[1] + matrix[11] * vector[2] + matrix[15] * vector[3],
+    ]
 }
 
 #[cfg(not(target_arch = "wasm32"))]

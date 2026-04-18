@@ -17,7 +17,7 @@ use crate::data::{IntoValues, TimeTable};
 use eframe::emath::GuiRounding;
 #[cfg(feature = "web_wgpu_viewport")]
 use eframe::wgpu;
-use egui::{vec2, Align2, Color32, FontId, Rect, Sense, Ui};
+use egui::{vec2, Align2, Color32, FontId, Painter, Rect, Sense, Stroke, Ui};
 use egui_plot::{Line, PlotUi};
 #[cfg(feature = "web_wgpu_viewport")]
 use egui_wgpu;
@@ -106,6 +106,10 @@ const OPEN_DUCK_MINI_ASSET_FILES: &[&str] = &[
     "assets/wj-wk00-0124bottomcase_45.stl",
 ];
 
+const COMMAND_SETPOINT_RADIUS: f32 = 0.05;
+const COMMAND_SETPOINT_HEIGHT: f32 = COMMAND_SETPOINT_RADIUS;
+const COMMAND_SETPOINT_DRAG_PLANE_Z: f32 = COMMAND_SETPOINT_HEIGHT;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BrowserRobotPreset {
     Go2,
@@ -173,6 +177,7 @@ impl BrowserRobotPreset {
 
 pub(super) struct WasmMujocoBackend {
     active: bool,
+    focused_embed: bool,
     selected_robot: BrowserRobotPreset,
     generation: Rc<RefCell<u64>>,
     asset_state: Rc<RefCell<BrowserAssetState>>,
@@ -200,6 +205,7 @@ impl Default for WasmMujocoBackend {
     fn default() -> Self {
         Self {
             active: false,
+            focused_embed: is_focused_embed_query(),
             selected_robot: BrowserRobotPreset::Go2,
             generation: Rc::new(RefCell::new(0)),
             asset_state: Rc::new(RefCell::new(BrowserAssetState::Idle)),
@@ -622,6 +628,14 @@ impl Default for BrowserOrbitCamera {
 }
 
 impl WasmMujocoBackend {
+    fn command_setpoint_visual_radius(&self) -> f32 {
+        if self.focused_embed {
+            0.032
+        } else {
+            COMMAND_SETPOINT_RADIUS
+        }
+    }
+
     pub fn update(&mut self, sim_speed: usize, paused: bool) {
         if !self.active {
             return;
@@ -1243,6 +1257,7 @@ impl WasmMujocoBackend {
             FontId::monospace(12.0),
             Color32::from_gray(210),
         );
+        self.draw_setpoint_screen_marker(ui.painter(), &report, response.rect);
     }
 
     pub(crate) fn embed_state(&self) -> MujocoEmbedState {
@@ -1346,12 +1361,12 @@ impl WasmMujocoBackend {
             }
         }
 
-        self.append_command_setpoint_scene(&mut frame.triangles, report);
+        self.append_command_setpoint_scene(&mut frame.triangles, &mut frame.lines, report);
 
         depth_points.extend(frame.triangles.iter().map(|v| v.position));
         depth_points.extend(frame.lines.iter().map(|v| v.position));
         if let Some(setpoint) = report_setpoint(report) {
-            let marker_radius = 0.05;
+            let marker_radius = self.command_setpoint_visual_radius();
             for sx in [-marker_radius, marker_radius] {
                 for sy in [-marker_radius, marker_radius] {
                     for sz in [-marker_radius, marker_radius] {
@@ -1374,15 +1389,17 @@ impl WasmMujocoBackend {
     fn append_command_setpoint_scene(
         &self,
         triangles: &mut Vec<GlVertex>,
+        lines: &mut Vec<GlVertex>,
         report: &BrowserMujocoReport,
     ) {
+        let _ = lines;
         let Some(setpoint) = report_setpoint(report) else {
             return;
         };
         super::render_scene::append_world_sphere(
             triangles,
             setpoint,
-            0.05,
+            self.command_setpoint_visual_radius(),
             [0.92, 0.24, 0.24, 1.0],
         );
     }
@@ -1391,7 +1408,12 @@ impl WasmMujocoBackend {
     fn update_camera(&mut self, ui: &Ui, response: &egui::Response, report: &BrowserMujocoReport) {
         let interaction =
             gather_viewport_interaction(report.use_setpoint_ball, ui, response, |pointer| {
-                self.camera.intersect_plane_z(response.rect, pointer, 0.05)
+                self.camera.align_setpoint_to_pointer(
+                    response.rect,
+                    pointer,
+                    COMMAND_SETPOINT_DRAG_PLANE_Z,
+                    COMMAND_SETPOINT_HEIGHT,
+                )
             });
 
         if interaction.reset_view {
@@ -1420,10 +1442,11 @@ impl WasmMujocoBackend {
 
     #[cfg(feature = "web_wgpu_viewport")]
     fn set_command_setpoint(&mut self, world: [f32; 3]) {
+        let setpoint = [world[0], world[1], COMMAND_SETPOINT_HEIGHT];
         if let BrowserMujocoState::Ready(report) = &mut *self.mujoco_state.borrow_mut() {
-            report.setpoint_preview = vec![world[0], world[1], world[2]];
+            report.setpoint_preview = vec![setpoint[0], setpoint[1], setpoint[2]];
         }
-        self.set_browser_command_setpoint(world);
+        self.set_browser_command_setpoint(setpoint);
     }
 
     #[cfg(feature = "web_wgpu_viewport")]
@@ -1496,6 +1519,40 @@ impl WasmMujocoBackend {
             return;
         };
         let _ = function.call0(&JsValue::NULL);
+    }
+
+    #[cfg(feature = "web_wgpu_viewport")]
+    fn draw_setpoint_screen_marker(
+        &self,
+        painter: &Painter,
+        report: &BrowserMujocoReport,
+        rect: Rect,
+    ) {
+        let Some(setpoint) = report_setpoint(report) else {
+            return;
+        };
+        let Some((projected, _)) = self.camera.project(rect, setpoint) else {
+            return;
+        };
+
+        painter.circle_stroke(
+            projected,
+            7.0,
+            Stroke::new(2.0, Color32::from_rgb(255, 245, 245)),
+        );
+        painter.circle_stroke(
+            projected,
+            11.0,
+            Stroke::new(1.5, Color32::from_rgba_unmultiplied(220, 70, 70, 220)),
+        );
+        painter.line_segment(
+            [projected + vec2(-5.0, 0.0), projected + vec2(5.0, 0.0)],
+            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+        );
+        painter.line_segment(
+            [projected + vec2(0.0, -5.0), projected + vec2(0.0, 5.0)],
+            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+        );
     }
 }
 
@@ -1916,6 +1973,14 @@ fn aligned_viewport_rect(ui: &Ui) -> Rect {
 }
 
 #[cfg(feature = "web_wgpu_viewport")]
+fn is_focused_embed_query() -> bool {
+    web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .map(|search| search.contains("embed=focused"))
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "web_wgpu_viewport")]
 impl BrowserOrbitCamera {
     fn view_projection_matrix(&self, aspect: f32) -> [f32; 16] {
         mul_mat4(self.projection_matrix(aspect), self.view_matrix())
@@ -2011,6 +2076,30 @@ impl BrowserOrbitCamera {
         Some((near, far))
     }
 
+    fn project(&self, rect: Rect, point: [f32; 3]) -> Option<(egui::Pos2, f32)> {
+        let eye = self.eye();
+        let forward = normalize3(sub3(self.target, eye));
+        let depth = dot3(sub3(point, eye), forward);
+        if depth <= 1e-4 {
+            return None;
+        }
+        let aspect = (rect.width() / rect.height()).max(0.1);
+        let clip = transform_vec4_mat4(self.view_projection_matrix(aspect), [point[0], point[1], point[2], 1.0]);
+        if clip[3].abs() <= 1e-6 {
+            return None;
+        }
+        let ndc_x = clip[0] / clip[3];
+        let ndc_y = clip[1] / clip[3];
+
+        Some((
+            egui::pos2(
+                rect.center().x + ndc_x * rect.width() * 0.5,
+                rect.center().y - ndc_y * rect.height() * 0.5,
+            ),
+            depth,
+        ))
+    }
+
     fn intersect_plane_z(&self, rect: Rect, pointer: egui::Pos2, z: f32) -> Option<[f32; 3]> {
         let (origin, dir) = self.world_ray(rect, pointer)?;
         if dir[2].abs() <= 1e-6 {
@@ -2021,6 +2110,47 @@ impl BrowserOrbitCamera {
             return None;
         }
         Some(add3(origin, scale3(dir, t)))
+    }
+
+    fn align_setpoint_to_pointer(
+        &self,
+        rect: Rect,
+        pointer: egui::Pos2,
+        drag_plane_z: f32,
+        marker_center_z: f32,
+    ) -> Option<[f32; 3]> {
+        let mut world = self.intersect_plane_z(rect, pointer, drag_plane_z)?;
+        world[2] = marker_center_z;
+        let step = 0.01;
+
+        for _ in 0..2 {
+            let (screen, _) = self.project(rect, world)?;
+            let error = pointer - screen;
+            if error.length_sq() <= 0.25 {
+                break;
+            }
+
+            let (screen_x, _) = self.project(rect, [world[0] + step, world[1], marker_center_z])?;
+            let (screen_y, _) = self.project(rect, [world[0], world[1] + step, marker_center_z])?;
+            let jacobian = [
+                [(screen_x.x - screen.x) / step, (screen_y.x - screen.x) / step],
+                [(screen_x.y - screen.y) / step, (screen_y.y - screen.y) / step],
+            ];
+            let det = jacobian[0][0] * jacobian[1][1] - jacobian[0][1] * jacobian[1][0];
+            if det.abs() <= 1e-6 {
+                break;
+            }
+
+            let inv_det = 1.0 / det;
+            let delta_x =
+                (jacobian[1][1] * error.x - jacobian[0][1] * error.y) * inv_det;
+            let delta_y =
+                (-jacobian[1][0] * error.x + jacobian[0][0] * error.y) * inv_det;
+            world[0] += delta_x;
+            world[1] += delta_y;
+        }
+
+        Some(world)
     }
 
     fn world_ray(&self, rect: Rect, pointer: egui::Pos2) -> Option<([f32; 3], [f32; 3])> {
@@ -2689,6 +2819,16 @@ fn mul_mat4(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
         }
     }
     out
+}
+
+#[cfg(feature = "web_wgpu_viewport")]
+fn transform_vec4_mat4(matrix: [f32; 16], vector: [f32; 4]) -> [f32; 4] {
+    [
+        matrix[0] * vector[0] + matrix[4] * vector[1] + matrix[8] * vector[2] + matrix[12] * vector[3],
+        matrix[1] * vector[0] + matrix[5] * vector[1] + matrix[9] * vector[2] + matrix[13] * vector[3],
+        matrix[2] * vector[0] + matrix[6] * vector[1] + matrix[10] * vector[2] + matrix[14] * vector[3],
+        matrix[3] * vector[0] + matrix[7] * vector[1] + matrix[11] * vector[2] + matrix[15] * vector[3],
+    ]
 }
 
 #[cfg(feature = "web_wgpu_viewport")]

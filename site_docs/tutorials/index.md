@@ -6,7 +6,12 @@ theory, derivations, and implementation boundaries in the repo.
 ```{admonition} Running the live embeds
 :class: note-shell
 
-The embedded simulator frames expect the web app to be running locally at `http://127.0.0.1:3000/`.
+The embedded simulator frames resolve their base URL at runtime:
+
+- local preview on `localhost` / `127.0.0.1`: `http://127.0.0.1:3000/`
+- hosted pages: `/sim/`
+
+You can override that explicitly with `?sim_base=...` on the tutorial URL if needed.
 
 Typical local workflow:
 

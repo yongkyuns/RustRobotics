@@ -8,7 +8,7 @@ and particle-filter behavior without the extra complexity of full mapping.
   <iframe
     class="sim-embed-frame"
     data-sim-mode="localization"
-    src="http://127.0.0.1:3000/?mode=localization&embed=focused&ui=20260416b"
+    data-sim-path="?mode=localization&embed=focused&ui=20260416b"
     title="Rust Robotics localization simulator"
     loading="lazy"
   ></iframe>

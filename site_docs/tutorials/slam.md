@@ -8,7 +8,7 @@ own pose while also building or refining the map it uses.
   <iframe
     class="sim-embed-frame"
     data-sim-mode="slam"
-    src="http://127.0.0.1:3000/?mode=slam&embed=focused&ui=20260416c"
+    data-sim-path="?mode=slam&embed=focused&ui=20260416c"
     title="Rust Robotics SLAM simulator"
     loading="lazy"
   ></iframe>

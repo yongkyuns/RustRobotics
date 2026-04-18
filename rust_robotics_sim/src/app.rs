@@ -241,20 +241,72 @@ pub struct App {
 
 impl App {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let theme_mode = theme::UiTheme::Dark;
-        theme::install(&_cc.egui_ctx, theme::UiDensity::Comfortable, theme_mode);
+        let mut theme_mode = theme::UiTheme::Dark;
+        #[cfg(target_arch = "wasm32")]
+        let mut embed_mode = WebEmbedMode::FullApp;
+        let mut sim = Simulator::default();
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(search) = window.location().search() {
+                    if let Some(mode) = query_param(&search, "mode") {
+                        if let Some(mode) = SimMode::from_test_id(&mode) {
+                            sim.set_mode(mode);
+                        }
+                    }
+                    if let Some(embed) = query_param(&search, "embed") {
+                        if let Some(mode) = WebEmbedMode::from_query_value(&embed) {
+                            embed_mode = mode;
+                        }
+                    }
+                    if let Some(theme) = query_param(&search, "theme") {
+                        if let Some(mode) = WebThemeMode::from_str(&theme) {
+                            theme_mode = mode.ui_theme();
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let initial_density = if embed_mode == WebEmbedMode::FocusedMainContent {
+            theme::UiDensity::Compact
+        } else {
+            theme::UiDensity::Comfortable
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let initial_density = theme::UiDensity::Comfortable;
+        theme::install(
+            &_cc.egui_ctx,
+            initial_density,
+            theme_mode,
+        );
         let app = Self {
-            sim: Simulator::default(),
+            sim,
             last_frame_at: None,
             fps_ema: 0.0,
             theme_mode,
             #[cfg(target_arch = "wasm32")]
-            embed_mode: WebEmbedMode::FullApp,
+            embed_mode,
         };
         #[cfg(target_arch = "wasm32")]
         publish_web_test_state(&app.sim);
         app
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn query_param(search: &str, key: &str) -> Option<String> {
+    let search = search.strip_prefix('?').unwrap_or(search);
+    for pair in search.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let current_key = parts.next().unwrap_or_default();
+        if current_key != key {
+            continue;
+        }
+        let value = parts.next().unwrap_or_default().replace('+', " ");
+        return Some(value);
+    }
+    None
 }
 
 impl eframe::App for App {
@@ -278,7 +330,11 @@ impl eframe::App for App {
         self.sim.update();
 
         #[cfg(target_arch = "wasm32")]
-        let panel_margin = if self.embed_mode == WebEmbedMode::FocusedMainContent {
+        let panel_margin = if self.embed_mode == WebEmbedMode::FocusedMainContent
+            && self.sim.mode() == crate::simulator::SimMode::Mujoco
+        {
+            0
+        } else if self.embed_mode == WebEmbedMode::FocusedMainContent {
             12
         } else {
             14
@@ -300,7 +356,11 @@ impl eframe::App for App {
         let panel_fill = ctx.style().visuals.panel_fill;
         let panel_stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
         #[cfg(target_arch = "wasm32")]
-        let panel_frame = if self.embed_mode == WebEmbedMode::FocusedMainContent {
+        let panel_frame = if self.embed_mode == WebEmbedMode::FocusedMainContent
+            && self.sim.mode() == crate::simulator::SimMode::Mujoco
+        {
+            egui::Frame::NONE
+        } else if self.embed_mode == WebEmbedMode::FocusedMainContent {
             egui::Frame::group(ctx.style().as_ref())
                 .fill(panel_fill)
                 .corner_radius(CornerRadius::same(16))

@@ -9,7 +9,7 @@ controllers under one shared plant.
   <iframe
     class="sim-embed-frame"
     data-sim-mode="inverted_pendulum"
-    src="http://127.0.0.1:3000/?mode=inverted_pendulum&embed=focused&ui=20260416w"
+    data-sim-path="?mode=inverted_pendulum&embed=focused&ui=20260416w"
     title="Rust Robotics control systems simulator"
     loading="lazy"
   ></iframe>
