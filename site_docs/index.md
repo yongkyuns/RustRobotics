@@ -37,12 +37,11 @@ focus is:
 
 If you are new to the project, start with:
 
-1. {doc}`overview`
-2. {doc}`tutorials/pendulum`
-3. {doc}`tutorials/localization`
-4. {doc}`tutorials/path_planning`
-5. {doc}`tutorials/slam`
-6. {doc}`tutorials/robot`
+1. {doc}`quickstart`
+2. {doc}`getting_started`
+3. {doc}`overview`
+4. {doc}`core_concepts`
+5. {doc}`tutorials/pendulum`
 
 That order moves from smaller, easier-to-isolate algorithmic ideas toward a
 larger runtime loop.
@@ -52,13 +51,39 @@ larger runtime loop.
 ::::{grid} 1 1 2 2
 :gutter: 3
 
-:::{grid-item-card} Getting started
+:::{grid-item-card} Quickstart
 :class-card: landing-card
 
-Read the short overview first for the project goals, audience, and the intended
-way to use these notes.
+Read the shortest path through the project if you want to get useful value
+quickly.
+
+{doc}`quickstart`
+:::
+
+:::{grid-item-card} Learning paths
+:class-card: landing-card
+
+Use a structured reading path if you want to study by topic or by background.
+
+{doc}`getting_started`
+:::
+
+:::{grid-item-card} Overview
+:class-card: landing-card
+
+Read the short project overview for the main purpose of the library and the
+simulation layer.
 
 {doc}`overview`
+:::
+
+:::{grid-item-card} Core concepts
+:class-card: landing-card
+
+Read the main ideas behind the project: portability, interactivity, and how the
+documentation is intended to teach.
+
+{doc}`core_concepts`
 :::
 
 :::{grid-item-card} Tutorials
@@ -118,8 +143,26 @@ This site is the explanatory layer on top of that.
 ```{toctree}
 :maxdepth: 2
 :hidden:
+:caption: Resources
 
+quickstart
+getting_started
 overview
-blog/index
+core_concepts
+```
+
+```{toctree}
+:maxdepth: 2
+:hidden:
+:caption: Tutorials
+
 tutorials/index
+```
+
+```{toctree}
+:maxdepth: 2
+:hidden:
+:caption: Essays
+
+blog/index
 ```

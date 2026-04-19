@@ -1,220 +1,260 @@
 # Rust Robotics
 
 <p align="center">
-  <img src="./RustyRobot.png" alt="RustyRobot mascot" width="320" />
+  <img src="./RustyRobot.png" alt="RustyRobot mascot" width="340" />
 </p>
 
-Rust Robotics is a Rust workspace for two closely related goals:
+<p align="center">
+  <a href="https://yongkyuns.github.io/sim-tutorial/">
+    <img alt="Docs" src="https://img.shields.io/badge/docs-sim--tutorial-0f766e?style=flat-square">
+  </a>
+  <a href="https://yongkyuns.github.io/sim/">
+    <img alt="Simulator" src="https://img.shields.io/badge/live%20simulator-sim-e67a4c?style=flat-square">
+  </a>
+  <a href="https://github.com/yongkyuns/RustRobotics">
+    <img alt="Rust" src="https://img.shields.io/badge/language-Rust-000000?style=flat-square&logo=rust">
+  </a>
+  <img alt="Targets" src="https://img.shields.io/badge/targets-native%20%7C%20web-334155?style=flat-square">
+</p>
 
-1. implement robotics algorithms and reusable control / estimation components
-2. expose those systems through an interactive native and web simulator
+Rust Robotics is a project with two practical goals:
 
-The repository is intentionally split so that simulation, training, and reusable
-algorithm code can evolve independently without losing a shared vocabulary.
-The current architecture is especially centered on a MuJoCo-backed robot stack,
-an inverted-pendulum teaching example, and a growing set of localization, SLAM,
-and path-planning demos.
+1. build a reusable library of robotics algorithms
+2. build an interactive simulation layer for learning, testing, and demonstration
 
-## Workspace Layout
+The project is intentionally straightforward. It is not trying to be a large
+framework or a research platform with every possible feature. The focus is on
+clear implementations, portable runtime boundaries, and interactive experiences
+that make the underlying algorithms easier to understand.
+
+## Live Links
+
+- Documentation site: <https://yongkyuns.github.io/sim-tutorial/>
+- Full simulator: <https://yongkyuns.github.io/sim/>
+- Control tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/pendulum.html>
+- Localization tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/localization.html>
+- Path planning tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/path_planning.html>
+- SLAM tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/slam.html>
+- Robot tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/robot.html>
+
+## What This Repository Is For
+
+Rust Robotics is meant to be useful to both:
+
+- students who want clear explanations and interactive examples
+- engineers who want compact, readable implementations and practical tradeoff discussion
+
+The main themes of the project are:
+
+- control systems
+- localization
+- path planning
+- SLAM
+- robot runtime and policy execution
+
+The documentation is meant to explain:
+
+- what each algorithm is for
+- what assumptions it makes
+- where it is used
+- how it compares to alternatives
+- what it costs in compute and memory
+- and how to interpret its behavior in the simulator
+
+## Core Idea
+
+The project is built around two connected ideas.
+
+### Portable implementations
+
+Algorithms should not be trapped inside one simulator or one UI surface. The
+same core logic should be usable in:
+
+- native applications
+- web-based simulations
+- interactive educational material
+- and, where reasonable, more deployment-oriented contexts
+
+### Interactivity as a teaching tool
+
+Robotics concepts become much easier to learn when the behavior is visible. This
+repository uses simulation not just as a demo layer, but as part of the
+explanation:
+
+- control becomes easier to understand when overshoot and settling are visible
+- localization becomes easier to understand when uncertainty is visible
+- planning becomes easier to compare when search effort and path quality are visible
+- SLAM becomes easier to understand when drift and correction are visible
+
+## What You Can Study Here
+
+### Control systems
+
+The inverted pendulum tutorial compares:
+
+- PID
+- LQR
+- MPC
+- PPO policies
+
+This is the most compact place in the repo to compare classical and learned
+control methods under a shared plant.
+
+### Localization
+
+The localization tutorial focuses on noisy sensing, motion uncertainty, and
+particle-filter behavior. It is intended to make state estimation visible
+instead of purely abstract.
+
+### Path planning
+
+The planning tutorial compares:
+
+- Dijkstra
+- A*
+- Theta*
+- RRT
+
+This makes it easier to see the tradeoffs between graph search, heuristics,
+any-angle methods, and sampling-based planning.
+
+### SLAM
+
+The SLAM tutorial focuses on joint pose and map estimation, drift accumulation,
+and correction behavior. It is written to connect the math to what a reader can
+actually observe in a live demo.
+
+### Robot runtime
+
+The robot tutorial connects simulation, observations, policy execution, and
+actuation into a more realistic runtime loop. This is where the project moves
+from toy examples toward a richer robot-control stack.
+
+## Repository Layout
 
 ### `rust_robotics_algo`
 
 Reusable robotics logic:
 
-- control algorithms such as LQR, MPC, PID, and vehicle dynamics
-- localization and SLAM implementations
-- path-planning algorithms
-- shared robot-framework logic for Go2 and Open Duck Mini
-
-This crate should own robot semantics and algorithmic policy logic, not the
-simulation world or rendering backend.
+- control algorithms
+- localization and SLAM
+- planning methods
+- shared robot-framework logic
 
 ### `rust_robotics_core`
 
-Small shared crate for portable ML / policy data transfer objects:
-
-- `LinearSnapshot`
-- `PolicySnapshot`
-- `ValueSnapshot`
-- `PpoMetrics`
-- `PpoSharedState`
-
-This crate exists so the simulator can consume policy snapshots without taking
-a deep dependency on the training runtime itself.
+Small shared crate for portable data exchanged across the workspace, including
+policy snapshots and training metrics.
 
 ### `rust_robotics_train`
 
 Training-side runtime and PPO implementation:
 
-- pendulum environment used for PPO training
-- Burn-based actor / critic models
-- PPO update loop, rollout collection, and metrics
-- conversion between train-time networks and portable snapshots
-
-This crate owns optimization and training concerns. It should not own UI,
-rendering, or simulator orchestration.
+- rollout collection
+- optimization
+- model ownership
+- export into portable snapshots
 
 ### `rust_robotics_sim`
 
 Interactive application and world ownership:
 
-- `egui` / `eframe` application shell
 - native and web simulator runtime
-- MuJoCo world integration and viewport glue
-- mode-specific demos for pendulum, localization, SLAM, planning, and robot
-- browser smoke-test hooks for the web build
+- egui / eframe app shell
+- MuJoCo integration
+- pendulum, localization, planning, SLAM, and robot demos
 
-This crate owns the live world state, stepping, reset semantics, and UI flow.
+### `site_docs`
+
+Authored documentation source for the GitHub Pages tutorial site.
 
 ### `docs`
 
-Generated web bundle output. `build_web.sh` writes the publishable browser build
-here, and `start_server.sh` serves it locally with the required COOP / COEP /
-CORP headers for browser MuJoCo and wasm execution.
+Generated web bundle for the hosted simulator.
 
-## Architectural Overview
+## Getting Started Locally
 
-The most important boundary in the repository is:
+### Fastest route
 
-- `rust_robotics_sim` owns the world
-- `rust_robotics_algo` owns reusable robotics logic
-- `rust_robotics_train` owns policy optimization
-- `rust_robotics_core` owns portable shared snapshot formats
-
-That means:
-
-- MuJoCo model/data, stepping, reset, rendering, and UI belong in `sim`
-- command semantics, observations, recurrent/action state, and actuation decode
-  belong in `algo`
-- optimizer state, rollout collection, PPO losses, and Burn modules belong in
-  `train`
-- serializable policy/value representations that cross crate boundaries belong
-  in `core`
-
-This split is what allows the same pendulum policy to be:
-
-1. trained in `rust_robotics_train`
-2. serialized into `rust_robotics_core::PolicySnapshot`
-3. consumed in `rust_robotics_sim`
-4. executed in both native and web contexts
-
-## Simulator Structure
-
-`rust_robotics_sim::simulator` is the application coordinator. Its current
-internal layout is intentionally split by responsibility:
-
-- `simulator/mod.rs`
-  - public traits (`Simulate`, `Draw`, `SimulateEgui`)
-  - top-level `Simulator` state buckets
-  - mode selection and UI entrypoint
-- `simulator/runtime.rs`
-  - fixed-step time integration
-  - pause / restart / mode switching
-  - per-mode stepping and reset behavior
-- `simulator/help.rs`
-  - guided tutorial / highlight overlay state
-- `simulator/ui/`
-  - shared UI layout, sidebar, plots, and per-mode control cards
-- `simulator/pendulum/`
-  - `domain.rs`: plant, controller logic, state evolution
-  - `training.rs`: PPO synchronization and trainer wiring
-  - `ui.rs`: pendulum-specific control panels
-  - `tests.rs`: contract and regression coverage
-
-That split is deliberate: the simulator is easiest to maintain when world logic,
-training integration, and presentation are readable in isolation.
-
-## Inverted Pendulum Flow
-
-The pendulum demo is a good example of the repo's layering:
-
-1. `rust_robotics_algo::control::inverted_pendulum` provides the plant model
-   and classical controllers.
-2. `rust_robotics_train` can train a PPO policy against the same task.
-3. `rust_robotics_train` exports a `PolicySnapshot`.
-4. `rust_robotics_sim::simulator::pendulum` can run LQR, PID, MPC, or PPO
-   against the same state vector and plot the resulting trajectories.
-
-The discrete simulation step follows the standard linear update:
-
-`x_(k+1) = A(dt) x_k + B(dt) u_k`
-
-with optional measurement noise on the state seen by the controller and optional
-actuation noise on the force actually applied to the plant. This makes it easy
-to compare:
-
-- controller law differences
-- tuning differences
-- robustness under noise
-- learned policy behavior versus model-based control
-
-## PPO Flow
-
-The current PPO implementation is intentionally small and inspectable:
-
-1. collect a rollout from the pendulum environment
-2. compute returns and generalized advantage estimates (GAE)
-3. normalize advantages
-4. optimize the clipped PPO surrogate for the policy
-5. optimize mean-squared value loss for the critic
-6. snapshot actor / critic weights into portable DTOs
-
-The simulator's `PpoTrainerCoordinator` can run one or more trainer replicas and
-average their shared states. The simulator always consumes the exported
-snapshot, not a live Burn model, which keeps the runtime boundary much cleaner.
-
-## Native And Web Targets
-
-### Native
-
-Typical local checks:
+Build the web simulator:
 
 ```bash
-cargo check -p rust_robotics_algo
-MUJOCO_HOME=/path/to/mujoco cargo check -p rust_robotics_sim
-MUJOCO_HOME=/path/to/mujoco cargo run -p rust_robotics_sim --release
-```
-
-### Web
-
-Typical local checks:
-
-```bash
-cargo check -p rust_robotics_sim --target wasm32-unknown-unknown
-cargo check -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features
-node --check rust_robotics_sim/web/mujoco_runtime.js
 ./build_web.sh --fast
 ./start_server.sh
 ```
 
-Local URL:
+Then open:
 
-```text
-http://127.0.0.1:3000/
+- simulator: `http://127.0.0.1:3000/`
+
+If you also want the authored documentation site locally:
+
+```bash
+source /tmp/rust-robotics-docs-venv/bin/activate
+./scripts/build_docs_site.sh
 ```
 
-The web server must provide:
+Then open the built HTML under:
 
-- `Cross-Origin-Opener-Policy: same-origin`
-- `Cross-Origin-Embedder-Policy: require-corp`
-- `Cross-Origin-Resource-Policy: same-origin`
+- `site_docs/_build/html/`
 
-### Publishing To GitHub Pages
+### Useful reading order
 
-The simulator bundle and tutorial site are built separately:
+If you are new to the project:
 
-- full simulator bundle: `docs/`
+1. read the docs overview
+2. start with the control tutorial
+3. continue to localization
+4. continue to path planning
+5. then read SLAM
+6. finish with the robot runtime tutorial
+
+## Local Development Checks
+
+### Core checks
+
+```bash
+cargo check -p rust_robotics_core
+cargo check -p rust_robotics_algo
+```
+
+### Simulator checks
+
+```bash
+MUJOCO_HOME=/path/to/mujoco cargo check -p rust_robotics_sim
+MUJOCO_HOME=/path/to/mujoco cargo test -p rust_robotics_sim --lib
+```
+
+### Web checks
+
+```bash
+cargo check -p rust_robotics_sim --target wasm32-unknown-unknown
+node --check rust_robotics_sim/web/mujoco_runtime.js
+./build_web.sh --fast
+npm run test:web-smoke
+```
+
+## Native And Web Targets
+
+The project is intentionally usable in both native and browser environments.
+
+### Native
+
+Native mode is the easiest place to use the full interactive app and the richer
+MuJoCo-backed runtime.
+
+### Web
+
+The browser build exists for accessibility, education, and lightweight sharing.
+The GitHub Pages deployment is structured so the tutorial site can embed focused
+simulator views from the hosted simulator bundle.
+
+## Documentation And Publishing
+
+The simulator bundle and the tutorial site are built separately:
+
+- simulator bundle: `docs/`
 - tutorial site: `site_docs/_build/html/`
-
-The tutorial embeds now resolve their simulator base at runtime:
-
-- local preview on `localhost` / `127.0.0.1`: `http://127.0.0.1:3000/`
-- hosted pages: `/sim/`
-
-So a same-origin Pages layout works well, for example:
-
-- simulator: `/sim/`
-- tutorial: `/sim-tutorial/`
 
 Helper script:
 
@@ -226,62 +266,33 @@ Default sync target:
 
 - `~/Dev/me/blog/yongkyuns.github.io`
 
-Default subdirectories:
+Default publish subdirectories:
 
 - `sim/`
 - `sim-tutorial/`
 
-You can override those with:
+## Why Rust
 
-```bash
-./scripts/publish_pages.sh \
-  --repo ~/Dev/me/blog/yongkyuns.github.io \
-  --sim-dir sim \
-  --tutorial-dir sim-tutorial
-```
+Rust is useful here because the project wants explicit boundaries between:
 
-## Testing Strategy
+- reusable algorithms
+- training logic
+- portable shared model/state representations
+- interactive simulation runtime
 
-The repo now uses several layers of protection against regressions:
+It is also a good fit for a codebase that wants to stay close to runtime and
+deployment concerns rather than only producing notebooks or one-off demos.
 
-- unit tests in `algo`, `train`, and `sim`
-- contract tests around policy snapshot handoff and averaging
-- deterministic scenario tests for pendulum stabilization
-- real wasm bundle builds in CI
-- Playwright browser smoke tests for web startup and basic interaction
+## Current Direction
 
-Useful commands:
+The current documentation direction is:
 
-```bash
-cargo test --workspace
-MUJOCO_HOME=/path/to/mujoco cargo test -p rust_robotics_sim --lib
-./build_web.sh --fast
-npm run test:web-smoke
-```
+- learning-first tutorials
+- more explicit algorithm comparisons
+- more complexity and memory discussion
+- less focus on internal architecture for its own sake
 
-## Documentation Pointers
+If you want a place to start, use:
 
-High-value project docs:
-
-- [ARCH_REFACTOR_PLAN.md](./ARCH_REFACTOR_PLAN.md)
-- [rust_robotics_sim/MUJOCO_ARCHITECTURE.md](./rust_robotics_sim/MUJOCO_ARCHITECTURE.md)
-- [rust_robotics_sim/MUJOCO_REMAINING_WORK.md](./rust_robotics_sim/MUJOCO_REMAINING_WORK.md)
-- [docs/README.md](./docs/README.md)
-
-The source code itself now carries more detailed rustdoc in the shared core,
-trainer, simulator runtime, help, and pendulum modules. When in doubt, start at
-`rust_robotics_sim::simulator` and follow the module-level docs outward.
-
-## Design Rules
-
-Some boundaries are intentional and should be preserved:
-
-- do not move MuJoCo world ownership into `rust_robotics_algo`
-- do not reintroduce the removed native `glow` viewport path
-- keep browser and native rendering paths conceptually aligned, but do not
-  assume they are literally the same implementation
-- prefer portable snapshot DTOs over direct runtime coupling across crates
-
-## License
-
-This project is licensed under the MIT License.
+- docs homepage: <https://yongkyuns.github.io/sim-tutorial/>
+- simulator: <https://yongkyuns.github.io/sim/>
