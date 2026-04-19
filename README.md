@@ -1,5 +1,9 @@
 # Rust Robotics
 
+<p align="center">
+  <img src="./RustyRobot.png" alt="RustyRobot mascot" width="320" />
+</p>
+
 Rust Robotics is a Rust workspace for two closely related goals:
 
 1. implement robotics algorithms and reusable control / estimation components
