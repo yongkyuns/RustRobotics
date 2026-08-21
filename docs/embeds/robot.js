@@ -56,13 +56,14 @@ export function setupRobotEmbed({ getEmbedState, dispatchEmbedAction }) {
     });
   }
 
+  function dispatchRobotSelection(robot) {
+    dispatchEmbedAction({ type: "set_mujoco_robot", robot });
+  }
+
   function requestRobotSelection(ui) {
     const robot = ui.robot.value;
-    if (pendingRobotSelection === robot) {
-      return;
-    }
     pendingRobotSelection = robot;
-    dispatchEmbedAction({ type: "set_mujoco_robot", robot });
+    dispatchRobotSelection(robot);
   }
 
   function syncToolbar(state) {
@@ -73,6 +74,11 @@ export function setupRobotEmbed({ getEmbedState, dispatchEmbedAction }) {
 
     if (pendingRobotSelection === payload.robot.selected_robot) {
       pendingRobotSelection = null;
+    } else if (pendingRobotSelection !== null) {
+      // Robot loading is asynchronous. Keep the requested selection authoritative
+      // until the WASM state acknowledges it instead of treating one dispatched
+      // DOM event as reliable delivery.
+      dispatchRobotSelection(pendingRobotSelection);
     }
 
     const snapshot = JSON.stringify({
