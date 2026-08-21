@@ -1248,9 +1248,20 @@ impl GraphSlam {
     /// Dense optimization
     fn optimize_dense(&mut self) -> OptimizationResult {
         let initial_error = self.total_error();
+        if initial_error <= self.config.convergence_threshold {
+            return OptimizationResult {
+                iterations: 0,
+                initial_error,
+                final_error: initial_error,
+                converged: true,
+                outliers_detected: self.outlier_count(),
+            };
+        }
+
         let mut current_error = initial_error;
         let mut lambda = self.config.initial_lambda;
         let mut iterations = 0;
+        let mut converged = false;
 
         for iter in 0..self.config.max_iterations {
             iterations = iter + 1;
@@ -1281,11 +1292,16 @@ impl GraphSlam {
             let new_error = self.total_error();
 
             if new_error < current_error {
+                let previous_error = current_error;
                 current_error = new_error;
                 lambda *= self.config.lambda_down;
 
-                let improvement = (current_error - new_error).abs() / (current_error + 1e-10);
-                if improvement < self.config.convergence_threshold {
+                let improvement =
+                    (previous_error - current_error).abs() / previous_error.max(1e-10);
+                if current_error <= self.config.convergence_threshold
+                    || improvement < self.config.convergence_threshold
+                {
+                    converged = true;
                     break;
                 }
             } else {
@@ -1298,7 +1314,7 @@ impl GraphSlam {
             iterations,
             initial_error,
             final_error: current_error,
-            converged: current_error < initial_error || initial_error < 1e-6,
+            converged,
             outliers_detected: self.outlier_count(),
         }
     }
@@ -1306,9 +1322,20 @@ impl GraphSlam {
     /// Sparse optimization
     fn optimize_sparse(&mut self) -> OptimizationResult {
         let initial_error = self.total_error();
+        if initial_error <= self.config.convergence_threshold {
+            return OptimizationResult {
+                iterations: 0,
+                initial_error,
+                final_error: initial_error,
+                converged: true,
+                outliers_detected: self.outlier_count(),
+            };
+        }
+
         let mut current_error = initial_error;
         let mut lambda = self.config.initial_lambda;
         let mut iterations = 0;
+        let mut converged = false;
 
         let sparse_solver = SparseSlamSolver::new();
 
@@ -1337,11 +1364,16 @@ impl GraphSlam {
             let new_error = self.total_error();
 
             if new_error < current_error {
+                let previous_error = current_error;
                 current_error = new_error;
                 lambda *= self.config.lambda_down;
 
-                let improvement = (current_error - new_error).abs() / (current_error + 1e-10);
-                if improvement < self.config.convergence_threshold {
+                let improvement =
+                    (previous_error - current_error).abs() / previous_error.max(1e-10);
+                if current_error <= self.config.convergence_threshold
+                    || improvement < self.config.convergence_threshold
+                {
+                    converged = true;
                     break;
                 }
             } else {
@@ -1354,7 +1386,7 @@ impl GraphSlam {
             iterations,
             initial_error,
             final_error: current_error,
-            converged: current_error < initial_error || initial_error < 1e-6,
+            converged,
             outliers_detected: self.outlier_count(),
         }
     }
@@ -1390,6 +1422,69 @@ mod tests {
 
         let result = graph.optimize();
         assert!(result.converged);
+    }
+
+    fn nonlinear_loop_graph(use_sparse_solver: bool, max_iterations: usize) -> GraphSlam {
+        let mut graph = GraphSlam::new();
+        graph.config.enable_robust_kernel = false;
+        graph.config.enable_outlier_rejection = false;
+        graph.config.use_sparse_solver = use_sparse_solver;
+        graph.config.max_iterations = max_iterations;
+        graph.config.convergence_threshold = 1e-12;
+
+        graph.add_pose(Pose2D::new(0.0, 0.0, 0.0));
+        graph.add_pose(Pose2D::new(10.0, 0.5, PI / 2.0));
+        graph.add_pose(Pose2D::new(10.5, 10.0, PI));
+        graph.add_pose(Pose2D::new(0.5, 10.5, -PI / 2.0));
+        graph.add_pose(Pose2D::new(0.8, 0.8, 0.1));
+
+        let cov = Matrix3::from_diagonal(&Vector3::new(0.5, 0.5, 0.05));
+        graph.add_odometry(0, 1, Vector3::new(10.0, 0.0, PI / 2.0), &cov);
+        graph.add_odometry(1, 2, Vector3::new(10.0, 0.0, PI / 2.0), &cov);
+        graph.add_odometry(2, 3, Vector3::new(10.0, 0.0, PI / 2.0), &cov);
+        graph.add_odometry(3, 4, Vector3::new(10.0, 0.0, PI / 2.0), &cov);
+
+        let loop_cov = Matrix3::from_diagonal(&Vector3::new(0.1, 0.1, 0.01));
+        graph.add_odometry(4, 0, Vector3::new(0.0, 0.0, 0.0), &loop_cov);
+        graph
+    }
+
+    #[test]
+    fn test_single_substantial_step_is_not_convergence() {
+        for use_sparse in [false, true] {
+            let mut graph = nonlinear_loop_graph(use_sparse, 1);
+            let result = graph.optimize();
+
+            assert!(
+                result.final_error < result.initial_error,
+                "first LM step should improve the nonlinear fixture (sparse={use_sparse})"
+            );
+            assert!(
+                !result.converged,
+                "objective improvement alone is not convergence (sparse={use_sparse})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_optimizer_continues_beyond_first_accepted_step() {
+        for use_sparse in [false, true] {
+            let mut one_step = nonlinear_loop_graph(use_sparse, 1);
+            let one_step_result = one_step.optimize();
+            assert!(one_step_result.final_error < one_step_result.initial_error);
+
+            let mut full = nonlinear_loop_graph(use_sparse, 50);
+            let full_result = full.optimize();
+
+            assert!(
+                full_result.iterations > 1,
+                "nonlinear fixture should require more than one iteration (sparse={use_sparse})"
+            );
+            assert!(
+                full_result.final_error < one_step_result.final_error,
+                "continuing optimization must improve beyond the first accepted state (sparse={use_sparse})"
+            );
+        }
     }
 
     #[test]
