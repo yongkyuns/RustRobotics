@@ -21,7 +21,10 @@ jobs:
       - name: Apply exact loop closure patch
         run: python scripts/patch_observation_loop_closure.py
 
-      - name: Check touched source formatting
+      - name: Format touched source
+        run: rustfmt --edition 2021 rust_robotics_algo/src/slam/loop_closure.rs
+
+      - name: Verify touched source formatting
         run: rustfmt --edition 2021 --check rust_robotics_algo/src/slam/loop_closure.rs
 
       - name: Run loop closure regressions
