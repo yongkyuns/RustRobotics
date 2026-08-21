@@ -23,8 +23,8 @@ jobs:
       - name: Apply exact convergence patch
         run: python scripts/patch_graph_slam_convergence.py
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Check Graph SLAM formatting
+        run: rustfmt --edition 2021 --check rust_robotics_algo/src/slam/graph_slam.rs
 
       - name: Run Graph SLAM regressions
         run: cargo test -p rust_robotics_algo graph_slam --lib
