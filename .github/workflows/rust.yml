@@ -35,8 +35,8 @@ jobs:
       with:
         targets: ${{ matrix.target }}
 
-    # Ubuntu needs libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev for eframe/egui usually, 
-    # but since eframe 0.20+ it might be different. 
+    # Ubuntu needs libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev for eframe/egui usually,
+    # but since eframe 0.20+ it might be different.
     # Let's check eframe deps. It usually needs: libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
     # The default ubuntu runner has some, but maybe not all.
     # rust_robotics_sim uses eframe.
@@ -124,7 +124,7 @@ jobs:
         targets: wasm32-unknown-unknown
 
     - name: Install wasm-bindgen-cli
-      run: cargo install wasm-bindgen-cli --version 0.2.118 --locked
+      run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
 
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2

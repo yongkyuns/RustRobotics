@@ -7,6 +7,7 @@ import {
 
 export function setupRobotEmbed({ getEmbedState, dispatchEmbedAction }) {
   let lastToolbarStateJson = "";
+  let pendingRobotSelection = null;
 
   function elements() {
     return {
@@ -55,16 +56,30 @@ export function setupRobotEmbed({ getEmbedState, dispatchEmbedAction }) {
     });
   }
 
+  function requestRobotSelection(ui) {
+    const robot = ui.robot.value;
+    if (pendingRobotSelection === robot) {
+      return;
+    }
+    pendingRobotSelection = robot;
+    dispatchEmbedAction({ type: "set_mujoco_robot", robot });
+  }
+
   function syncToolbar(state) {
     const payload = state?.payload;
     if (!state || state.mode !== "robot" || !payload || payload.kind !== "robot") {
       return;
     }
 
+    if (pendingRobotSelection === payload.robot.selected_robot) {
+      pendingRobotSelection = null;
+    }
+
     const snapshot = JSON.stringify({
       paused: state.paused,
       sim_speed: state.toolbar.sim_speed,
       robot: payload.robot,
+      pending_robot: pendingRobotSelection,
     });
     if (snapshot === lastToolbarStateJson) {
       return;
@@ -76,7 +91,7 @@ export function setupRobotEmbed({ getEmbedState, dispatchEmbedAction }) {
     setInputValueIfIdle(ui.speed, state.toolbar.sim_speed);
     ui.speedValue.textContent = `${state.toolbar.sim_speed}x`;
     if (document.activeElement !== ui.robot) {
-      ui.robot.value = payload.robot.selected_robot;
+      ui.robot.value = pendingRobotSelection ?? payload.robot.selected_robot;
     }
     ui.status.textContent = `${payload.robot.robot_label}\nPolicy: ${payload.robot.policy_label}\n${payload.robot.status}`;
     window.requestAnimationFrame(postRobotHeight);
@@ -104,9 +119,8 @@ export function setupRobotEmbed({ getEmbedState, dispatchEmbedAction }) {
       ui.speedValue.textContent = `${value}x`;
       dispatchEmbedAction({ type: "set_sim_speed", sim_speed: value });
     });
-    ui.robot.addEventListener("change", () => {
-      dispatchEmbedAction({ type: "set_mujoco_robot", robot: ui.robot.value });
-    });
+    ui.robot.addEventListener("input", () => requestRobotSelection(ui));
+    ui.robot.addEventListener("change", () => requestRobotSelection(ui));
 
     bindRobotHeightObservers();
     poller.start();
