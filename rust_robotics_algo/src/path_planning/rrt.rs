@@ -8,7 +8,7 @@
 //! 2. finding the nearest existing tree node
 //! 3. stepping toward the sample by a fixed expansion distance
 //! 4. rejecting collisions
-//! 5. stopping once a node reaches the goal region
+//! 5. stopping once a node can connect collision-free to the goal region
 
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::StdRng;
@@ -61,7 +61,26 @@ impl CircleObstacle {
     fn contains(&self, px: f32, py: f32) -> bool {
         let dx = px - self.x;
         let dy = py - self.y;
-        (dx * dx + dy * dy).sqrt() <= self.radius
+        let radius = self.radius.max(0.0);
+        dx * dx + dy * dy <= radius * radius
+    }
+
+    /// Returns true when the closed line segment intersects this obstacle.
+    fn intersects_segment(&self, x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let length_sq = dx * dx + dy * dy;
+
+        if length_sq <= f32::EPSILON {
+            return self.contains(x1, y1);
+        }
+
+        let to_center_x = self.x - x1;
+        let to_center_y = self.y - y1;
+        let t = ((to_center_x * dx + to_center_y * dy) / length_sq).clamp(0.0, 1.0);
+        let closest_x = x1 + t * dx;
+        let closest_y = y1 + t * dy;
+        self.contains(closest_x, closest_y)
     }
 }
 
@@ -122,7 +141,7 @@ pub struct RrtPlanner {
 }
 
 impl RrtPlanner {
-    /// Create a new RRT planner
+    /// Create a new RRT planner for a bounded continuous 2D search space.
     pub fn new(min_x: f32, max_x: f32, min_y: f32, max_y: f32, config: RrtConfig) -> Self {
         Self {
             min_x,
@@ -182,9 +201,12 @@ impl RrtPlanner {
                 let new_node = RrtNode::with_parent(new_x, new_y, nearest_idx);
                 tree.push(new_node);
 
-                // Check if goal reached
+                // Reaching the goal region is not sufficient by itself: the exact
+                // final connection to the goal must also be collision-free.
                 let dist_to_goal = ((new_x - goal.0).powi(2) + (new_y - goal.1).powi(2)).sqrt();
-                if dist_to_goal <= self.config.goal_threshold {
+                if dist_to_goal <= self.config.goal_threshold
+                    && self.is_collision_free(new_x, new_y, goal.0, goal.1)
+                {
                     // Add goal node
                     let goal_node = RrtNode::with_parent(goal.0, goal.1, tree.len() - 1);
                     tree.push(goal_node);
@@ -242,39 +264,14 @@ impl RrtPlanner {
         }
     }
 
-    /// Check if path between two points is collision-free
+    /// Check if path between two points is collision-free.
+    ///
+    /// Circular obstacles admit an exact point-to-segment distance test, so this
+    /// avoids discretization gaps from sampling along the edge.
     fn is_collision_free(&self, x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
-        // Check endpoints
-        if self.point_in_obstacle(x1, y1) || self.point_in_obstacle(x2, y2) {
-            return false;
-        }
-
-        // Check along the path
-        let dx = x2 - x1;
-        let dy = y2 - y1;
-        let dist = (dx * dx + dy * dy).sqrt();
-        let steps = (dist / (self.config.expand_distance * 0.1)).ceil() as usize;
-
-        for i in 1..steps {
-            let t = i as f32 / steps as f32;
-            let x = x1 + t * dx;
-            let y = y1 + t * dy;
-            if self.point_in_obstacle(x, y) {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    /// Check if a point is inside any obstacle
-    fn point_in_obstacle(&self, x: f32, y: f32) -> bool {
-        for obs in &self.obstacles {
-            if obs.contains(x, y) {
-                return true;
-            }
-        }
-        false
+        self.obstacles
+            .iter()
+            .all(|obs| !obs.intersects_segment(x1, y1, x2, y2))
     }
 
     /// Extract path from tree (backtrack from goal to start)
@@ -326,8 +323,37 @@ mod tests {
         planner.add_obstacle(CircleObstacle::new(0.0, 0.0, 3.0));
         let result = planner.plan((-5.0, 0.0), (5.0, 0.0));
         assert!(result.success);
-        // Path should go around the obstacle
         assert!(!result.path.is_empty());
+
+        for segment in result.path.windows(2) {
+            assert!(planner.is_collision_free(
+                segment[0].0,
+                segment[0].1,
+                segment[1].0,
+                segment[1].1
+            ));
+        }
+    }
+
+    #[test]
+    fn test_goal_connection_is_collision_checked() {
+        let config = RrtConfig {
+            expand_distance: 1.0,
+            goal_sample_rate: 1.0,
+            max_iterations: 1,
+            goal_threshold: 2.0,
+            seed: Some(42),
+        };
+        let mut planner = RrtPlanner::new(-1.0, 3.0, -1.0, 1.0, config);
+
+        // The first expansion from (0, 0) reaches (1, 0), which is within the
+        // goal threshold. The old implementation then attached (2, 0) directly,
+        // even though this obstacle intersects only that final edge.
+        planner.add_obstacle(CircleObstacle::new(1.5, 0.0, 0.25));
+        let result = planner.plan((0.0, 0.0), (2.0, 0.0));
+
+        assert!(!result.success);
+        assert!(result.path.is_empty());
     }
 
     #[test]
