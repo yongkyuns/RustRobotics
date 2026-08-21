@@ -2,6 +2,10 @@ use egui::{Rect, Ui};
 use egui_plot::PlotUi;
 #[cfg(target_arch = "wasm32")]
 use serde::Serialize;
+#[cfg(target_arch = "wasm32")]
+use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -19,6 +23,8 @@ use wasm::WasmMujocoBackend as Backend;
 
 pub struct MujocoPanel {
     backend: Backend,
+    #[cfg(target_arch = "wasm32")]
+    active_requested_at: Option<Instant>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -35,6 +41,8 @@ impl Default for MujocoPanel {
     fn default() -> Self {
         Self {
             backend: Backend::default(),
+            #[cfg(target_arch = "wasm32")]
+            active_requested_at: None,
         }
     }
 }
@@ -82,6 +90,21 @@ impl MujocoPanel {
     }
 
     pub fn set_active(&mut self, active: bool) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !active {
+                self.active_requested_at = None;
+                self.backend.set_active(false);
+                return;
+            }
+
+            let requested_at = self.active_requested_at.get_or_insert_with(Instant::now);
+            let startup_grace_elapsed = requested_at.elapsed() >= Duration::from_millis(500);
+            self.backend.set_active(startup_grace_elapsed);
+            return;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         self.backend.set_active(active);
     }
 
