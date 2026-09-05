@@ -49,7 +49,7 @@ jobs:
             --jq '.jobs[] | select(.name == "repair") | .id' | head -n1)
           test -n "$job_id"
 
-          gh api "repos/${REPO}/actions/jobs/${job_id}/logs" > repair-job.log
+          gh api --allow-escape-sequences "repos/${REPO}/actions/jobs/${job_id}/logs" > repair-job.log
           sed -n '/cargo clippy --workspace --all-targets -- -D warnings/,/Process completed with exit code/p' \
             repair-job.log > clippy-diagnostics.log
           test -s clippy-diagnostics.log
