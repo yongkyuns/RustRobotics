@@ -1,0 +1,228 @@
+name: Repair CI branch
+
+on:
+  push:
+    branches: ["ci/thorough-coverage"]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/thorough-coverage
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt
+
+      - name: Restore legacy JS-overlay WASM fallback
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("rust_robotics_sim/src/simulator/mujoco/wasm.rs")
+          text = path.read_text()
+
+          old_import = 'use egui::{vec2, Align2, Color32, FontId, Painter, Rect, Sense, Stroke, Ui};'
+          new_import = '''use egui::{vec2, Align2, Color32, FontId, Rect, Sense, Ui};
+          #[cfg(feature = "web_wgpu_viewport")]
+          use egui::{Painter, Stroke};'''
+          if old_import not in text:
+              raise SystemExit("expected egui import marker not found")
+          text = text.replace(old_import, new_import, 1)
+
+          mesh_marker = '''
+          #[derive(Clone)]
+          struct BrowserMeshAsset {'''
+          viewport_types = '''
+          #[cfg(not(feature = "web_wgpu_viewport"))]
+          #[derive(Serialize)]
+          struct BrowserViewportOcclusionRect {
+              left: f32,
+              top: f32,
+              width: f32,
+              height: f32,
+          }
+
+          #[cfg(not(feature = "web_wgpu_viewport"))]
+          #[derive(Serialize)]
+          struct BrowserViewportConfig {
+              left: f32,
+              top: f32,
+              width: f32,
+              height: f32,
+              pixels_per_point: f32,
+              visible: bool,
+              diagnostic_colors: bool,
+              interactive: bool,
+              occlusion_rects: Vec<BrowserViewportOcclusionRect>,
+          }
+
+          #[derive(Clone)]
+          struct BrowserMeshAsset {'''
+          if mesh_marker not in text:
+              raise SystemExit("expected BrowserMeshAsset marker not found")
+          text = text.replace(mesh_marker, viewport_types, 1)
+
+          viewport_signature = '''    pub fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {'''
+          gated_signature = '''    #[cfg(feature = "web_wgpu_viewport")]
+              pub fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {'''
+          if viewport_signature not in text:
+              raise SystemExit("expected ui_viewport marker not found")
+          text = text.replace(viewport_signature, gated_signature, 1)
+
+          embed_marker = '''    pub(crate) fn embed_state(&self) -> MujocoEmbedState {'''
+          legacy_viewport = '''    #[cfg(not(feature = "web_wgpu_viewport"))]
+              pub fn ui_viewport(&mut self, ui: &mut Ui, _frame: Option<&eframe::Frame>) {
+                  if self.active {
+                      self.ensure_browser_assets_started();
+                      if let Some(bundle) = self.browser_assets_ready() {
+                          self.ensure_ort_smoke_test_started(bundle.as_ref());
+                          self.ensure_mujoco_runtime_started(bundle.as_ref());
+                      }
+                  }
+
+                  let rect = aligned_viewport_rect(ui);
+                  let _response = ui.allocate_rect(rect, Sense::click_and_drag());
+                  let status = {
+                      let state = self.mujoco_state.borrow();
+                      match &*state {
+                          BrowserMujocoState::Ready(_) => None,
+                          BrowserMujocoState::Idle => Some((
+                              "MuJoCo browser runtime idle".to_string(),
+                              Color32::from_gray(200),
+                          )),
+                          BrowserMujocoState::Loading => Some((
+                              "Loading MuJoCo browser runtime...".to_string(),
+                              Color32::from_gray(200),
+                          )),
+                          BrowserMujocoState::Error(err) => {
+                              Some((err.clone(), Color32::LIGHT_RED))
+                          }
+                      }
+                  };
+
+                  if let Some((message, color)) = status {
+                      self.hide_browser_viewport();
+                      ui.painter()
+                          .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+                      ui.painter().text(
+                          rect.center(),
+                          Align2::CENTER_CENTER,
+                          message,
+                          FontId::proportional(16.0),
+                          color,
+                      );
+                      return;
+                  }
+
+                  let occlusion_rects = self
+                      .overlay_occlusions
+                      .iter()
+                      .map(|rect| BrowserViewportOcclusionRect {
+                          left: rect.min.x,
+                          top: rect.min.y,
+                          width: rect.width(),
+                          height: rect.height(),
+                      })
+                      .collect();
+                  self.configure_browser_viewport(&BrowserViewportConfig {
+                      left: rect.min.x,
+                      top: rect.min.y,
+                      width: rect.width(),
+                      height: rect.height(),
+                      pixels_per_point: ui.ctx().pixels_per_point(),
+                      visible: true,
+                      diagnostic_colors: false,
+                      interactive: self.overlay_interactive,
+                      occlusion_rects,
+                  });
+                  ui.painter()
+                      .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+              }
+
+              pub(crate) fn embed_state(&self) -> MujocoEmbedState {'''
+          if embed_marker not in text:
+              raise SystemExit("expected embed_state marker not found")
+          text = text.replace(embed_marker, legacy_viewport, 1)
+
+          software_marker = '''    fn render_software_2d(
+                  &self,'''
+          legacy_helpers = '''    #[cfg(not(feature = "web_wgpu_viewport"))]
+              fn configure_browser_viewport(&self, config: &BrowserViewportConfig) {
+                  let Ok(config_value) = serde_wasm_bindgen::to_value(config) else {
+                      return;
+                  };
+                  let Some(window) = web_sys::window() else {
+                      return;
+                  };
+                  let Ok(function) = Reflect::get(
+                      window.as_ref(),
+                      &JsValue::from_str("rustRoboticsMujocoConfigureViewport"),
+                  ) else {
+                      return;
+                  };
+                  let Ok(function) = function.dyn_into::<Function>() else {
+                      return;
+                  };
+                  let _ = function.call1(&JsValue::NULL, &config_value);
+              }
+
+              #[cfg(not(feature = "web_wgpu_viewport"))]
+              fn hide_browser_viewport(&self) {
+                  self.configure_browser_viewport(&BrowserViewportConfig {
+                      left: 0.0,
+                      top: 0.0,
+                      width: 0.0,
+                      height: 0.0,
+                      pixels_per_point: 1.0,
+                      visible: false,
+                      diagnostic_colors: false,
+                      interactive: false,
+                      occlusion_rects: Vec::new(),
+                  });
+              }
+
+              fn render_software_2d(
+                  &self,'''
+          if software_marker not in text:
+              raise SystemExit("expected render_software_2d marker not found")
+          text = text.replace(software_marker, legacy_helpers, 1)
+
+          focused_marker = '''#[cfg(feature = "web_wgpu_viewport")]
+          fn is_focused_embed_query() -> bool {'''
+          focused_replacement = '''fn is_focused_embed_query() -> bool {'''
+          if focused_marker not in text:
+              raise SystemExit("expected is_focused_embed_query marker not found")
+          text = text.replace(focused_marker, focused_replacement, 1)
+
+          path.write_text(text)
+
+      - name: Format workspace
+        run: cargo fmt --all
+
+      - name: Verify legacy WASM configuration
+        run: cargo check -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features
+
+      - name: Verify clean patch
+        run: git diff --check
+
+      - name: Commit repairs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add rust_robotics_sim/src
+          if git diff --cached --quiet; then
+            echo "No repair changes to commit"
+            exit 0
+          fi
+          git commit -m "Restore legacy WASM fallback and normalize formatting"
+          git push origin HEAD:ci/thorough-coverage
