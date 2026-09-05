@@ -944,16 +944,14 @@ impl MujocoRuntime {
             SoftwareCamera::from_gl(&self.scene.camera[0], response.rect.aspect_ratio());
         let interaction =
             gather_viewport_interaction(self.robot.uses_setpoint_ball(), ui, response, |pointer| {
-                software_camera
-                    .as_ref()
-                    .and_then(|camera| {
-                        camera.align_setpoint_to_pointer(
-                            response.rect,
-                            pointer,
-                            COMMAND_SETPOINT_DRAG_PLANE_Z,
-                            COMMAND_SETPOINT_HEIGHT,
-                        )
-                    })
+                software_camera.as_ref().and_then(|camera| {
+                    camera.align_setpoint_to_pointer(
+                        response.rect,
+                        pointer,
+                        COMMAND_SETPOINT_DRAG_PLANE_Z,
+                        COMMAND_SETPOINT_HEIGHT,
+                    )
+                })
             });
 
         if interaction.reset_view {
@@ -2315,7 +2313,10 @@ impl SoftwareCamera {
         if depth <= 1e-4 {
             return None;
         }
-        let clip = transform_vec4_mat4(self.view_projection_matrix(), [point[0], point[1], point[2], 1.0]);
+        let clip = transform_vec4_mat4(
+            self.view_projection_matrix(),
+            [point[0], point[1], point[2], 1.0],
+        );
         if clip[3].abs() <= 1e-6 {
             return None;
         }
@@ -2405,8 +2406,14 @@ impl SoftwareCamera {
             let (screen_x, _) = self.project(rect, [world[0] + step, world[1], marker_center_z])?;
             let (screen_y, _) = self.project(rect, [world[0], world[1] + step, marker_center_z])?;
             let jacobian = [
-                [(screen_x.x - screen.x) / step, (screen_y.x - screen.x) / step],
-                [(screen_x.y - screen.y) / step, (screen_y.y - screen.y) / step],
+                [
+                    (screen_x.x - screen.x) / step,
+                    (screen_y.x - screen.x) / step,
+                ],
+                [
+                    (screen_x.y - screen.y) / step,
+                    (screen_y.y - screen.y) / step,
+                ],
             ];
             let det = jacobian[0][0] * jacobian[1][1] - jacobian[0][1] * jacobian[1][0];
             if det.abs() <= 1e-6 {
@@ -2414,10 +2421,8 @@ impl SoftwareCamera {
             }
 
             let inv_det = 1.0 / det;
-            let delta_x =
-                (jacobian[1][1] * error.x - jacobian[0][1] * error.y) * inv_det;
-            let delta_y =
-                (-jacobian[1][0] * error.x + jacobian[0][0] * error.y) * inv_det;
+            let delta_x = (jacobian[1][1] * error.x - jacobian[0][1] * error.y) * inv_det;
+            let delta_y = (-jacobian[1][0] * error.x + jacobian[0][0] * error.y) * inv_det;
             world[0] += delta_x;
             world[1] += delta_y;
         }
@@ -2547,10 +2552,22 @@ fn mul_mat4(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
 #[cfg(not(target_arch = "wasm32"))]
 fn transform_vec4_mat4(matrix: [f32; 16], vector: [f32; 4]) -> [f32; 4] {
     [
-        matrix[0] * vector[0] + matrix[4] * vector[1] + matrix[8] * vector[2] + matrix[12] * vector[3],
-        matrix[1] * vector[0] + matrix[5] * vector[1] + matrix[9] * vector[2] + matrix[13] * vector[3],
-        matrix[2] * vector[0] + matrix[6] * vector[1] + matrix[10] * vector[2] + matrix[14] * vector[3],
-        matrix[3] * vector[0] + matrix[7] * vector[1] + matrix[11] * vector[2] + matrix[15] * vector[3],
+        matrix[0] * vector[0]
+            + matrix[4] * vector[1]
+            + matrix[8] * vector[2]
+            + matrix[12] * vector[3],
+        matrix[1] * vector[0]
+            + matrix[5] * vector[1]
+            + matrix[9] * vector[2]
+            + matrix[13] * vector[3],
+        matrix[2] * vector[0]
+            + matrix[6] * vector[1]
+            + matrix[10] * vector[2]
+            + matrix[14] * vector[3],
+        matrix[3] * vector[0]
+            + matrix[7] * vector[1]
+            + matrix[11] * vector[2]
+            + matrix[15] * vector[3],
     ]
 }
 
