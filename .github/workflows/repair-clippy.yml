@@ -23,6 +23,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Install Linux dependencies
         run: |
@@ -45,69 +46,112 @@ jobs:
           echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
-      - name: Apply intentional Clippy repairs
+      - name: Apply explicit Clippy repairs
         shell: python
         run: |
           from pathlib import Path
 
-          util = Path("rust_robotics_algo/src/util.rs")
-          text = util.read_text()
-          replacements = {
-              "use crate::matrix::{Horizontal, Vertical, allocate_block_output, Block};":
-                  "use $crate::util::{allocate_block_output, Block, Horizontal, Vertical};",
-              "use crate::util::{allocate_block_output, Block, Horizontal};":
-                  "use $crate::util::{allocate_block_output, Block, Horizontal};",
-              "use crate::util::{allocate_block_output, Block, Vertical};":
-                  "use $crate::util::{allocate_block_output, Block, Vertical};",
-              "use crate::util::{allocate_block_output, Block, Diagonal};":
-                  "use $crate::util::{allocate_block_output, Block, Diagonal};",
-          }
-          for old, new in replacements.items():
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text()
               if old not in text:
-                  raise SystemExit(f"missing util marker: {old}")
-              text = text.replace(old, new, 1)
-          util.write_text(text)
+                  raise SystemExit(f"missing marker in {path}: {old!r}")
+              p.write_text(text.replace(old, new, count))
 
-          pf = Path("rust_robotics_algo/src/localization/particle_filter.rs")
-          text = pf.read_text()
-          marker = "pub fn pf_localization_with_state("
-          if marker not in text:
-              raise SystemExit("missing particle-filter API marker")
-          text = text.replace(
-              marker,
-              "#[allow(clippy::too_many_arguments)]\n" + marker,
-              1,
+          util = "rust_robotics_algo/src/util.rs"
+          replace(util,
+              "use crate::matrix::{Horizontal, Vertical, allocate_block_output, Block};",
+              "use $crate::util::{allocate_block_output, Block, Horizontal, Vertical};")
+          replace(util,
+              "use crate::util::{allocate_block_output, Block, Horizontal};",
+              "use $crate::util::{allocate_block_output, Block, Horizontal};")
+          replace(util,
+              "use crate::util::{allocate_block_output, Block, Vertical};",
+              "use $crate::util::{allocate_block_output, Block, Vertical};")
+          replace(util,
+              "use crate::util::{allocate_block_output, Block, Diagonal};",
+              "use $crate::util::{allocate_block_output, Block, Diagonal};")
+
+          replace(
+              "rust_robotics_algo/src/control/inverted_pendulum/pid.rs",
+              "        let mut pid = Self::default();\n        pid.P = P;\n        pid.I = I;\n        pid.D = D;\n        pid",
+              "        Self {\n            P,\n            I,\n            D,\n            ..Default::default()\n        }",
           )
-          pf.write_text(text)
 
-          onnx = Path("rust_robotics_algo/src/robot_fw/onnx.rs")
-          text = onnx.read_text()
-          start_marker = "            let mut builder = Session::builder()"
-          end_marker = '                .map_err(|err| format!("Failed to configure ONNX Runtime session: {err}"))?;'
-          if start_marker not in text or end_marker not in text:
-              raise SystemExit("missing ONNX builder boundary")
-          start = text.index(start_marker)
-          end = text.index(end_marker, start) + len(end_marker)
-          new = (
-              "            let builder = Session::builder()\n"
-              "                .map_err(|err| format!(\"Failed to create ONNX Runtime session builder: {err}\"))?;\n"
-              "            let builder = builder\n"
-              "                .with_optimization_level(GraphOptimizationLevel::Level1)\n"
-              "                .map_err(|err| format!(\"Failed to configure ONNX Runtime optimization: {err}\"))?;\n"
-              "            let mut builder = builder\n"
-              "                .with_log_level(LogLevel::Fatal)\n"
-              "                .map_err(|err| format!(\"Failed to configure ONNX Runtime logging: {err}\"))?;"
+          replace(
+              "rust_robotics_algo/src/control/lqr.rs",
+              "        let u = -K * x;\n        u",
+              "        -K * x",
           )
-          onnx.write_text(text[:start] + new + text[end:])
 
-      - name: Apply machine-safe Clippy suggestions
-        run: cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged
+          pf = "rust_robotics_algo/src/localization/particle_filter.rs"
+          replace(pf,
+              "pub fn pf_localization_with_state(",
+              "#[allow(clippy::too_many_arguments)]\npub fn pf_localization_with_state(")
+          replace(pf,
+              "            w = w * robust_likelihood(dz, sqrt(Q[(0, 0)]));",
+              "            w *= robust_likelihood(dz, sqrt(Q[(0, 0)]));")
+          replace(pf,
+              "    for ip in 0..NP {\n        while resample_id[ip] > w_cum[ind] && ind < NP - 1 {\n            ind += 1;\n        }\n        px_new.set_column(ip, &px.column(ind));\n    }",
+              "    for (ip, sample) in resample_id.iter().enumerate().take(NP) {\n        while *sample > w_cum[ind] && ind < NP - 1 {\n            ind += 1;\n        }\n        px_new.set_column(ip, &px.column(ind));\n    }")
+
+          replace(
+              "rust_robotics_algo/src/robot_fw/go2.rs",
+              "        for i in 0..12 {\n            let target = self.action_scale[i] * self.last_actions[i] + self.default_jpos[i];\n            torques[i] =\n                self.kp[i] * (target - raw.joint_pos[i]) + self.kd[i] * (0.0 - raw.joint_vel[i]);\n        }",
+              "        for (i, torque) in torques.iter_mut().enumerate() {\n            let target = self.action_scale[i] * self.last_actions[i] + self.default_jpos[i];\n            *torque =\n                self.kp[i] * (target - raw.joint_pos[i]) + self.kd[i] * (0.0 - raw.joint_vel[i]);\n        }",
+          )
+
+          replace(
+              "rust_robotics_algo/src/robot_fw/onnx.rs",
+              "            let mut builder = Session::builder()\n                .map_err(|err| format!(\"Failed to create ONNX Runtime session builder: {err}\"))?\n                .with_optimization_level(GraphOptimizationLevel::Level1)\n                .and_then(|builder| builder.with_log_level(LogLevel::Fatal))\n                .map_err(|err| format!(\"Failed to configure ONNX Runtime session: {err}\"))?;",
+              "            let builder = Session::builder()\n                .map_err(|err| format!(\"Failed to create ONNX Runtime session builder: {err}\"))?;\n            let builder = builder\n                .with_optimization_level(GraphOptimizationLevel::Level1)\n                .map_err(|err| format!(\"Failed to configure ONNX Runtime optimization: {err}\"))?;\n            let mut builder = builder\n                .with_log_level(LogLevel::Fatal)\n                .map_err(|err| format!(\"Failed to configure ONNX Runtime logging: {err}\"))?;",
+          )
+
+          ekf = "rust_robotics_algo/src/slam/ekf_slam.rs"
+          replace(ekf, "    let cross_robot = &g_robot * &sigma_rr;", "    let cross_robot = g_robot * sigma_rr;")
+          replace(ekf, "        let cross_k = &g_robot * &sigma_r_k;", "        let cross_k = g_robot * sigma_r_k;")
+          replace(ekf,
+              "    let sigma_mm = &g_robot * sigma_rr * g_robot.transpose()\n        + &g_obs * &config.observation_noise * g_obs.transpose();",
+              "    let sigma_mm = g_robot * sigma_rr * g_robot.transpose()\n        + g_obs * config.observation_noise * g_obs.transpose();")
+          replace(ekf,
+              "        let mahal_sq = (dz.transpose() * &s_inv * dz)[(0, 0)];",
+              "        let mahal_sq = (dz.transpose() * s_inv * dz)[(0, 0)];")
+
+          replace(
+              "rust_robotics_algo/src/slam/loop_closure.rs",
+              "        for candidate_idx in 0..=max_candidate_idx {\n            let candidate_pose = &poses[candidate_idx];",
+              "        for (candidate_idx, candidate_pose) in poses\n            .iter()\n            .enumerate()\n            .take(max_candidate_idx + 1)\n        {",
+          )
+
+          replace(
+              "rust_robotics_algo/src/slam/robust_kernels.rs",
+              "    let median_abs = if sorted.len() % 2 == 0 {",
+              "    let median_abs = if sorted.len().is_multiple_of(2) {",
+          )
+
+          replace(
+              "rust_robotics_core/src/lib.rs",
+              "        let mut output = vec![0.0; self.out_dim];\n        for out_idx in 0..self.out_dim {\n            let mut sum = self.bias.get(out_idx).copied().unwrap_or(0.0);\n            for in_idx in 0..self.in_dim {\n                sum += input[in_idx] * self.weight[in_idx * self.out_dim + out_idx];\n            }\n            output[out_idx] = sum;\n        }",
+              "        let input = &input[..self.in_dim];\n        let mut output = vec![0.0; self.out_dim];\n        for (out_idx, output_value) in output.iter_mut().enumerate() {\n            let mut sum = self.bias.get(out_idx).copied().unwrap_or(0.0);\n            for (in_idx, input_value) in input.iter().enumerate() {\n                sum += input_value * self.weight[in_idx * self.out_dim + out_idx];\n            }\n            *output_value = sum;\n        }",
+          )
+
+          replace(
+              ".github/workflows/rust.yml",
+              "cargo install wasm-bindgen-cli --version 0.2.127 --locked",
+              "cargo install wasm-bindgen-cli --version 0.2.128 --locked",
+          )
 
       - name: Format workspace
         run: cargo fmt --all
 
       - name: Verify strict Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Verify legacy WASM configuration
+        run: cargo check -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features
+
+      - name: Remove repair workflow
+        run: git rm .github/workflows/repair-clippy.yml
 
       - name: Verify patch
         run: git diff --check
@@ -116,10 +160,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add rust_robotics_algo rust_robotics_core rust_robotics_sim rust_robotics_train
-          if git diff --cached --quiet; then
-            echo "No Clippy repair changes to commit"
-            exit 0
-          fi
+          git add .github/workflows/rust.yml rust_robotics_algo rust_robotics_core
+          git add -u .github/workflows/repair-clippy.yml
           git commit -m "Fix strict Clippy findings"
           git push origin HEAD:ci/thorough-coverage
