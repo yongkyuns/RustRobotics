@@ -141,6 +141,88 @@ jobs:
               "cargo install wasm-bindgen-cli --version 0.2.128 --locked",
           )
 
+      - name: Apply explicit test-target repairs
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"missing marker in {path}: {old!r}")
+              p.write_text(text.replace(old, new, count))
+
+          replace(
+              "rust_robotics_algo/src/control/vehicle/mod.rs",
+              "        let mut model = BicycleModel::default();\n        model.vx = 5.0;",
+              "        let mut model = BicycleModel {\n            vx: 5.0,\n            ..Default::default()\n        };",
+          )
+
+          ekf = "rust_robotics_algo/src/slam/ekf_slam.rs"
+          replace(ekf,
+              "        let mut config = EkfSlamConfig::default();\n        config.max_range = 20.0; // Reasonable range",
+              "        let config = EkfSlamConfig {\n            max_range: 20.0, // Reasonable range\n            ..Default::default()\n        };",
+          )
+          replace(ekf,
+              "        let mut config = EkfSlamConfig::default();\n        config.max_range = 15.0; // Limited range so we can control when landmarks are seen",
+              "        let config = EkfSlamConfig {\n            max_range: 15.0, // Limited range so we can control when landmarks are seen\n            ..Default::default()\n        };",
+          )
+          replace(ekf,
+              "            let mut config = EkfSlamConfig::default();\n            config.max_range = 25.0;",
+              "            let config = EkfSlamConfig {\n                max_range: 25.0,\n                ..Default::default()\n            };",
+          )
+          replace(ekf,
+              "            let mut config = EkfSlamConfig::default();\n            config.max_range = 50.0; // Large range to see many landmarks",
+              "            let config = EkfSlamConfig {\n                max_range: 50.0, // Large range to see many landmarks\n                ..Default::default()\n            };",
+          )
+          replace(ekf,
+              "            let mut config = EkfSlamConfig::default();\n            config.max_range = 20.0;",
+              "            let config = EkfSlamConfig {\n                max_range: 20.0,\n                ..Default::default()\n            };",
+          )
+          replace(ekf,
+              "            let mut config = EkfSlamConfig::default();\n            config.max_range = 60.0;",
+              "            let config = EkfSlamConfig {\n                max_range: 60.0,\n                ..Default::default()\n            };",
+          )
+          replace(ekf,
+              "            let mut config = EkfSlamConfig::default();\n            config.max_range = 50.0;",
+              "            let config = EkfSlamConfig {\n                max_range: 50.0,\n                ..Default::default()\n            };",
+          )
+          replace(ekf,
+              "        let mut config = EkfSlamConfig::default();\n        config.max_range = 15.0; // Limited range",
+              "        let config = EkfSlamConfig {\n            max_range: 15.0, // Limited range\n            ..Default::default()\n        };",
+          )
+          replace(ekf,
+              "                for i in 0..n_landmarks_before {\n                    if let Some(lm) = state.landmark(i) {\n                        let diff = ((lm[0] - lm_estimates_before[i][0]).powi(2)\n                            + (lm[1] - lm_estimates_before[i][1]).powi(2))\n                        .sqrt();\n                        println!(\"    Landmark {}: before=({:.2}, {:.2}), after=({:.2}, {:.2}), change={:.4}\",\n                            i, lm_estimates_before[i][0], lm_estimates_before[i][1], lm[0], lm[1], diff);\n                    }\n                }",
+              "                for (i, before) in lm_estimates_before\n                    .iter()\n                    .enumerate()\n                    .take(n_landmarks_before)\n                {\n                    if let Some(lm) = state.landmark(i) {\n                        let diff = ((lm[0] - before[0]).powi(2)\n                            + (lm[1] - before[1]).powi(2))\n                        .sqrt();\n                        println!(\"    Landmark {}: before=({:.2}, {:.2}), after=({:.2}, {:.2}), change={:.4}\",\n                            i, before[0], before[1], lm[0], lm[1], diff);\n                    }\n                }",
+          )
+          replace(ekf,
+              "        true_pose[2] = true_pose[2] + PI;\n        dr_pose[2] = dr_pose[2] + PI;",
+              "        true_pose[2] += PI;\n        dr_pose[2] += PI;",
+          )
+          replace(ekf,
+              "        for i in 0..state.n_landmarks.min(landmarks.len()) {\n            if let Some(est_lm) = state.landmark(i) {\n                let true_lm = &landmarks[i];",
+              "        for (i, true_lm) in landmarks\n            .iter()\n            .enumerate()\n            .take(state.n_landmarks.min(landmarks.len()))\n        {\n            if let Some(est_lm) = state.landmark(i) {",
+          )
+
+          loop_closure = "rust_robotics_algo/src/slam/loop_closure.rs"
+          replace(loop_closure,
+              "        for lm_idx in 0..4 {\n            // Pose 0 observations\n            let lm = &landmarks[lm_idx];",
+              "        for (lm_idx, lm) in landmarks.iter().enumerate().take(4) {\n            // Pose 0 observations",
+          )
+          replace(loop_closure,
+              "        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 1.0; // Pose 4 is ~0.36m from pose 0\n        config.min_temporal_separation = 3;\n        config.min_common_landmarks = 3;",
+              "        let config = LoopClosureConfig {\n            proximity_threshold: 1.0, // Pose 4 is ~0.36m from pose 0\n            min_temporal_separation: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };",
+          )
+          replace(loop_closure,
+              "        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 0.1;\n        config.min_temporal_separation = 3;\n        config.landmark_observation_gap = 3;\n        config.min_common_landmarks = 3;",
+              "        let config = LoopClosureConfig {\n            proximity_threshold: 0.1,\n            min_temporal_separation: 3,\n            landmark_observation_gap: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };",
+          )
+          replace(loop_closure,
+              "        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 0.1;\n        config.landmark_observation_gap = 3;\n        config.min_common_landmarks = 3;",
+              "        let config = LoopClosureConfig {\n            proximity_threshold: 0.1,\n            landmark_observation_gap: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };",
+          )
+
       - name: Format workspace
         run: cargo fmt --all
 
