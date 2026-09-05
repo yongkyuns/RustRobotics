@@ -82,22 +82,23 @@ jobs:
 
           onnx = Path("rust_robotics_algo/src/robot_fw/onnx.rs")
           text = onnx.read_text()
-          old = '''            let mut builder = Session::builder()
-                .map_err(|err| format!("Failed to create ONNX Runtime session builder: {err}"))?
-                .with_optimization_level(GraphOptimizationLevel::Level1)
-                .and_then(|builder| builder.with_log_level(LogLevel::Fatal))
-                .map_err(|err| format!("Failed to configure ONNX Runtime session: {err}"))?;'''
-          new = '''            let builder = Session::builder()
-                .map_err(|err| format!("Failed to create ONNX Runtime session builder: {err}"))?;
-            let builder = builder
-                .with_optimization_level(GraphOptimizationLevel::Level1)
-                .map_err(|err| format!("Failed to configure ONNX Runtime optimization: {err}"))?;
-            let mut builder = builder
-                .with_log_level(LogLevel::Fatal)
-                .map_err(|err| format!("Failed to configure ONNX Runtime logging: {err}"))?;'''
-          if old not in text:
-              raise SystemExit("missing ONNX builder marker")
-          onnx.write_text(text.replace(old, new, 1))
+          start_marker = "            let mut builder = Session::builder()"
+          end_marker = '                .map_err(|err| format!("Failed to configure ONNX Runtime session: {err}"))?;'
+          if start_marker not in text or end_marker not in text:
+              raise SystemExit("missing ONNX builder boundary")
+          start = text.index(start_marker)
+          end = text.index(end_marker, start) + len(end_marker)
+          new = (
+              "            let builder = Session::builder()\n"
+              "                .map_err(|err| format!(\"Failed to create ONNX Runtime session builder: {err}\"))?;\n"
+              "            let builder = builder\n"
+              "                .with_optimization_level(GraphOptimizationLevel::Level1)\n"
+              "                .map_err(|err| format!(\"Failed to configure ONNX Runtime optimization: {err}\"))?;\n"
+              "            let mut builder = builder\n"
+              "                .with_log_level(LogLevel::Fatal)\n"
+              "                .map_err(|err| format!(\"Failed to configure ONNX Runtime logging: {err}\"))?;"
+          )
+          onnx.write_text(text[:start] + new + text[end:])
 
       - name: Apply machine-safe Clippy suggestions
         run: cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged
