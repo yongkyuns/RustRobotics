@@ -5,9 +5,6 @@ members = [
 	"rust_robotics_sim",
 	"rust_robotics_train",
 ]
-exclude = [
-	"python_interface",
-]
 
 
 # Required for wgpu v0.10 feature resolution.

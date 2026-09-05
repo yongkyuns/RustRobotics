@@ -2,15 +2,63 @@ name: Rust
 
 on:
   push:
-    branches: [ "master", "main" ]
+    branches: ["master", "main"]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: ["master", "main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   MUJOCO_VERSION: 3.4.0
 
 jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Install Linux dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 10m sudo apt-get update -o Acquire::Retries=3
+          timeout 15m sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev
+
+      - name: Install MuJoCo
+        run: |
+          curl -L --fail \
+            -o "$RUNNER_TEMP/mujoco.tar.gz" \
+            "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
+          echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   build:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -28,118 +76,149 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-    # Ubuntu needs libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev for eframe/egui usually,
-    # but since eframe 0.20+ it might be different.
-    # Let's check eframe deps. It usually needs: libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
-    # The default ubuntu runner has some, but maybe not all.
-    # rust_robotics_sim uses eframe.
-    - name: Install Linux dependencies
-      if: runner.os == 'Linux'
-      run: |
-        export DEBIAN_FRONTEND=noninteractive
-        timeout 10m sudo apt-get update -o Acquire::Retries=3
-        timeout 15m sudo apt-get install -y --no-install-recommends \
-          libgtk-3-dev \
-          libxcb-render0-dev \
-          libxcb-shape0-dev \
-          libxcb-xfixes0-dev \
-          libxkbcommon-dev \
-          libssl-dev
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 10m sudo apt-get update -o Acquire::Retries=3
+          timeout 15m sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev
 
-    - name: Install MuJoCo (Linux)
-      if: runner.os == 'Linux'
-      run: |
-        curl -L --fail \
-          -o "$RUNNER_TEMP/mujoco.tar.gz" \
-          "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz"
-        tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
-        echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
-        echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Install MuJoCo (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -L --fail \
+            -o "$RUNNER_TEMP/mujoco.tar.gz" \
+            "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
+          echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
-    - name: Install MuJoCo (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        curl -L --fail \
-          -o "$RUNNER_TEMP/mujoco.dmg" \
-          "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-macos-universal2.dmg"
-        hdiutil attach "$RUNNER_TEMP/mujoco.dmg" -mountpoint "$RUNNER_TEMP/mujoco-mount" -nobrowse
-        mkdir -p "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/include/mujoco" "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib"
-        cp -R \
-          "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework/Headers/." \
-          "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/include/mujoco/"
-        cp -R \
-          "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework" \
-          "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/"
-        ln -sf \
-          "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/mujoco.framework/Versions/Current/libmujoco.${MUJOCO_VERSION}.dylib" \
-          "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/libmujoco.dylib"
-        hdiutil detach "$RUNNER_TEMP/mujoco-mount"
-        echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
-        echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Install MuJoCo (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -L --fail \
+            -o "$RUNNER_TEMP/mujoco.dmg" \
+            "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-macos-universal2.dmg"
+          hdiutil attach "$RUNNER_TEMP/mujoco.dmg" -mountpoint "$RUNNER_TEMP/mujoco-mount" -nobrowse
+          mkdir -p "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/include/mujoco" "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib"
+          cp -R \
+            "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework/Headers/." \
+            "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/include/mujoco/"
+          cp -R \
+            "$RUNNER_TEMP/mujoco-mount/MuJoCo.app/Contents/Frameworks/mujoco.framework" \
+            "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/"
+          ln -sf \
+            "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/mujoco.framework/Versions/Current/libmujoco.${MUJOCO_VERSION}.dylib" \
+            "$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib/libmujoco.dylib"
+          hdiutil detach "$RUNNER_TEMP/mujoco-mount"
+          echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
-    - name: Install MuJoCo (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        $zip = Join-Path $env:RUNNER_TEMP 'mujoco.zip'
-        $root = Join-Path $env:RUNNER_TEMP "mujoco-$env:MUJOCO_VERSION"
-        Invoke-WebRequest `
-          -Uri "https://github.com/google-deepmind/mujoco/releases/download/$env:MUJOCO_VERSION/mujoco-$env:MUJOCO_VERSION-windows-x86_64.zip" `
-          -OutFile $zip
-        New-Item -ItemType Directory -Force -Path $root | Out-Null
-        Expand-Archive -Path $zip -DestinationPath $root -Force
-        "MUJOCO_HOME=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        "PATH=$root\\bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install MuJoCo (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'mujoco.zip'
+          $root = Join-Path $env:RUNNER_TEMP "mujoco-$env:MUJOCO_VERSION"
+          Invoke-WebRequest `
+            -Uri "https://github.com/google-deepmind/mujoco/releases/download/$env:MUJOCO_VERSION/mujoco-$env:MUJOCO_VERSION-windows-x86_64.zip" `
+            -OutFile $zip
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $root -Force
+          "MUJOCO_HOME=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PATH=$root\\bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-    - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
 
-    - name: Build
-      run: cargo build --verbose --workspace
+      - name: Build
+        run: cargo build --verbose --workspace
 
-    - name: Run tests
-      run: cargo test --verbose --workspace
+      - name: Run tests
+        run: cargo test --verbose --workspace
 
   wasm:
-    name: Build WASM
+    name: WASM & Browser
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Setup Node
-      uses: actions/setup-node@v4
-      with:
-        node-version: 22
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: wasm32-unknown-unknown
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
-    - name: Install wasm-bindgen-cli
-      run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
 
-    - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
 
-    - name: Check web runtime JS
-      run: node --check rust_robotics_sim/web/mujoco_runtime.js
+      - name: Check legacy WASM feature configuration
+        run: cargo check -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features
 
-    - name: Build web bundle
-      run: ./build_web.sh --fast
+      - name: Check web runtime JavaScript
+        run: |
+          for file in rust_robotics_sim/web/*.js; do
+            node --check "$file"
+          done
 
-    - name: Install web smoke dependencies
-      run: npm install
+      - name: Build web bundle
+        run: ./build_web.sh --fast
 
-    - name: Install Chromium for Playwright
-      run: npx playwright install --with-deps chromium
+      - name: Install web smoke dependencies
+        run: npm ci
 
-    - name: Run browser smoke tests
-      run: npm run test:web-smoke
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser smoke tests
+        run: npm run test:web-smoke
+
+      - name: Upload browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-diagnostics
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: site_docs/requirements.txt
+
+      - name: Install documentation dependencies
+        run: python -m pip install -r site_docs/requirements.txt
+
+      - name: Build documentation with warnings as errors
+        run: python -m sphinx -W -E -a -b html site_docs site_docs/_build/html
