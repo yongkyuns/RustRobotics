@@ -1,0 +1,64 @@
+name: Capture Clippy diagnostics
+
+on:
+  push:
+    branches: ["ci/thorough-coverage"]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  capture:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/thorough-coverage
+          fetch-depth: 0
+
+      - name: Capture repair job Clippy output
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=""
+          for _ in $(seq 1 90); do
+            run_id=$(gh api "repos/${REPO}/actions/runs?head_sha=${GITHUB_SHA}&event=push&per_page=20" \
+              --jq '.workflow_runs[] | select(.name == "Repair Clippy branch") | .id' | head -n1)
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            sleep 2
+          done
+          test -n "$run_id"
+
+          for _ in $(seq 1 180); do
+            status=$(gh api "repos/${REPO}/actions/runs/${run_id}" --jq '.status')
+            if [[ "$status" == "completed" ]]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$(gh api "repos/${REPO}/actions/runs/${run_id}" --jq '.status')" = completed
+
+          job_id=$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name == "repair") | .id' | head -n1)
+          test -n "$job_id"
+
+          gh api "repos/${REPO}/actions/jobs/${job_id}/logs" > repair-job.log
+          sed -n '/cargo clippy --workspace --all-targets -- -D warnings/,/Process completed with exit code/p' \
+            repair-job.log > clippy-diagnostics.log
+          test -s clippy-diagnostics.log
+          rm repair-job.log
+
+      - name: Commit diagnostics only
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add clippy-diagnostics.log
+          git commit -m "Capture remaining strict Clippy diagnostics"
+          git push origin HEAD:ci/thorough-coverage
