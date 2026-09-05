@@ -1,0 +1,124 @@
+name: Repair Clippy branch
+
+on:
+  push:
+    branches: ["ci/thorough-coverage"]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      MUJOCO_VERSION: 3.4.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/thorough-coverage
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 10m sudo apt-get update -o Acquire::Retries=3
+          timeout 15m sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev
+
+      - name: Install MuJoCo
+        run: |
+          curl -L --fail \
+            -o "$RUNNER_TEMP/mujoco.tar.gz" \
+            "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
+          echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      - name: Apply intentional Clippy repairs
+        shell: python
+        run: |
+          from pathlib import Path
+
+          util = Path("rust_robotics_algo/src/util.rs")
+          text = util.read_text()
+          replacements = {
+              "use crate::matrix::{Horizontal, Vertical, allocate_block_output, Block};":
+                  "use $crate::util::{allocate_block_output, Block, Horizontal, Vertical};",
+              "use crate::util::{allocate_block_output, Block, Horizontal};":
+                  "use $crate::util::{allocate_block_output, Block, Horizontal};",
+              "use crate::util::{allocate_block_output, Block, Vertical};":
+                  "use $crate::util::{allocate_block_output, Block, Vertical};",
+              "use crate::util::{allocate_block_output, Block, Diagonal};":
+                  "use $crate::util::{allocate_block_output, Block, Diagonal};",
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f"missing util marker: {old}")
+              text = text.replace(old, new, 1)
+          util.write_text(text)
+
+          pf = Path("rust_robotics_algo/src/localization/particle_filter.rs")
+          text = pf.read_text()
+          marker = "pub fn pf_localization_with_state("
+          if marker not in text:
+              raise SystemExit("missing particle-filter API marker")
+          text = text.replace(
+              marker,
+              "#[allow(clippy::too_many_arguments)]\n" + marker,
+              1,
+          )
+          pf.write_text(text)
+
+          onnx = Path("rust_robotics_algo/src/robot_fw/onnx.rs")
+          text = onnx.read_text()
+          old = '''            let mut builder = Session::builder()
+                .map_err(|err| format!("Failed to create ONNX Runtime session builder: {err}"))?
+                .with_optimization_level(GraphOptimizationLevel::Level1)
+                .and_then(|builder| builder.with_log_level(LogLevel::Fatal))
+                .map_err(|err| format!("Failed to configure ONNX Runtime session: {err}"))?;'''
+          new = '''            let builder = Session::builder()
+                .map_err(|err| format!("Failed to create ONNX Runtime session builder: {err}"))?;
+            let builder = builder
+                .with_optimization_level(GraphOptimizationLevel::Level1)
+                .map_err(|err| format!("Failed to configure ONNX Runtime optimization: {err}"))?;
+            let mut builder = builder
+                .with_log_level(LogLevel::Fatal)
+                .map_err(|err| format!("Failed to configure ONNX Runtime logging: {err}"))?;'''
+          if old not in text:
+              raise SystemExit("missing ONNX builder marker")
+          onnx.write_text(text.replace(old, new, 1))
+
+      - name: Apply machine-safe Clippy suggestions
+        run: cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged
+
+      - name: Format workspace
+        run: cargo fmt --all
+
+      - name: Verify strict Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Verify patch
+        run: git diff --check
+
+      - name: Commit repairs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add rust_robotics_algo rust_robotics_core rust_robotics_sim rust_robotics_train
+          if git diff --cached --quiet; then
+            echo "No Clippy repair changes to commit"
+            exit 0
+          fi
+          git commit -m "Fix strict Clippy findings"
+          git push origin HEAD:ci/thorough-coverage
