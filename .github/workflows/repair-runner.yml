@@ -60,23 +60,23 @@ jobs:
           block = raw.split(start, 1)[1].split(end, 1)[0]
           script = textwrap.dedent(block)
 
-          old = '              markers = [f"    pub(crate) fn {name}(", f"    fn {name}("]\n'
+          old = '    markers = [f"    pub(crate) fn {name}(", f"    fn {name}("]\n'
           new = (
-              '              markers = [\n'
-              '                  f"    pub(crate) fn {name}(",\n'
-              '                  f"    fn {name}(",\n'
-              '                  f"pub(crate) fn {name}(",\n'
-              '                  f"fn {name}(",\n'
-              '              ]\n'
+              '    markers = [\n'
+              '        f"    pub(crate) fn {name}(",\n'
+              '        f"    fn {name}(",\n'
+              '        f"pub(crate) fn {name}(",\n'
+              '        f"fn {name}(",\n'
+              '    ]\n'
           )
           if old not in script:
               raise SystemExit('cfg marker list not found in extracted script')
           script = script.replace(old, new, 1)
 
-          old = '                      replacement = f"    {CFG_WASM}\\n" + marker\n'
+          old = '            replacement = f"    {CFG_WASM}\\n" + marker\n'
           new = (
-              '                      indent = "    " if marker.startswith("    ") else ""\n'
-              '                      replacement = f"{indent}{CFG_WASM}\\n" + marker\n'
+              '            indent = "    " if marker.startswith("    ") else ""\n'
+              '            replacement = f"{indent}{CFG_WASM}\\n" + marker\n'
           )
           if old not in script:
               raise SystemExit('cfg replacement marker not found in extracted script')
