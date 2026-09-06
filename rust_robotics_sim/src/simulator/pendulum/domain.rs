@@ -20,7 +20,9 @@
 //!
 //! which makes it easy to compare classical and learned controllers under the
 //! same disturbance model.
-use super::super::ppo_trainer::{PpoReplicaStatus, PpoTrainerCoordinator};
+#[cfg(target_arch = "wasm32")]
+use super::super::ppo_trainer::PpoReplicaStatus;
+use super::super::ppo_trainer::PpoTrainerCoordinator;
 use super::super::{Draw, Simulate};
 use crate::data::{IntoValues, TimeTable};
 use crate::prelude::draw_cart;
@@ -31,7 +33,9 @@ use rand::Rng;
 use rb::inverted_pendulum::*;
 use rb::prelude::*;
 use rust_robotics_algo as rb;
-use rust_robotics_core::{PolicySnapshot, PpoMetrics};
+use rust_robotics_core::PolicySnapshot;
+#[cfg(target_arch = "wasm32")]
+use rust_robotics_core::PpoMetrics;
 use rust_robotics_train::PpoTrainerConfig;
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +118,7 @@ impl ControllerKind {
 
 /// User-facing pendulum plant parameters exposed in the DOM card.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct PendulumParamsSnapshot {
     pub(crate) beam_length: f32,
     pub(crate) cart_mass: f32,
@@ -123,6 +128,7 @@ pub(crate) struct PendulumParamsSnapshot {
 /// Controller-specific parameters exposed for the currently selected controller.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg(target_arch = "wasm32")]
 pub(crate) enum ControllerParamsSnapshot {
     Lqr {
         beam_length: f32,
@@ -158,6 +164,7 @@ pub(crate) enum ControllerParamsSnapshot {
 
 /// UI-facing snapshot of PPO trainer controls and health for one pendulum.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct PolicyTrainerSnapshot {
     pub(crate) training_active: bool,
     pub(crate) initialized: bool,
@@ -178,6 +185,7 @@ pub(crate) struct PolicyTrainerSnapshot {
 
 /// Serialized state for one pendulum DOM card in the focused web embed.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct PendulumCardState {
     pub(crate) id: usize,
     pub(crate) controller: ControllerKind,
@@ -188,6 +196,7 @@ pub(crate) struct PendulumCardState {
 
 /// Patch payload applied from the focused web embed to a pendulum instance.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct PendulumPatch {
     pub(crate) controller: Option<ControllerKind>,
     pub(crate) beam_length: Option<f32>,
@@ -201,6 +210,7 @@ pub(crate) struct PendulumPatch {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct LqrPatch {
     pub(crate) beam_length: Option<f32>,
     pub(crate) cart_mass: Option<f32>,
@@ -213,6 +223,7 @@ pub(crate) struct LqrPatch {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct PidPatch {
     pub(crate) kp: Option<f32>,
     pub(crate) ki: Option<f32>,
@@ -220,6 +231,7 @@ pub(crate) struct PidPatch {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct MpcPatch {
     pub(crate) beam_length: Option<f32>,
     pub(crate) cart_mass: Option<f32>,
@@ -232,6 +244,7 @@ pub(crate) struct MpcPatch {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct PolicyPatch {
     pub(crate) parallel_trainers: Option<usize>,
     pub(crate) training_updates_per_tick: Option<usize>,
@@ -243,6 +256,7 @@ pub(crate) struct PolicyPatch {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg(target_arch = "wasm32")]
 pub(crate) enum PendulumTrainerAction {
     Start,
     Stop,
@@ -250,30 +264,37 @@ pub(crate) enum PendulumTrainerAction {
     Use,
 }
 
+#[cfg(target_arch = "wasm32")]
 fn clamp_beam_length(value: f32) -> f32 {
     value.clamp(0.1, 10.0)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn clamp_cart_mass(value: f32) -> f32 {
     value.clamp(0.1, 3.0)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn clamp_ball_mass(value: f32) -> f32 {
     value.clamp(0.1, 10.0)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn clamp_weight(value: f32) -> f32 {
     value.clamp(0.0, 100.0)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn clamp_pid_gain(value: f32) -> f32 {
     value.clamp(0.01, 10000.0)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn clamp_learning_rate(value: f64) -> f64 {
     value.clamp(1.0e-5, 1.0e-2)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn clamp_action_std(value: f32) -> f32 {
     value.clamp(0.05, 10.0)
 }
@@ -391,6 +412,7 @@ impl Controller {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn params_snapshot(&self) -> ControllerParamsSnapshot {
         match self {
             Self::LQR(model) => ControllerParamsSnapshot::Lqr {
@@ -563,6 +585,7 @@ impl InvertedPendulum {
         state + (k1 + k2 * 2.0 + k3 * 2.0 + k4) * (dt / 6.0)
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn policy_trainer_snapshot(&self) -> PolicyTrainerSnapshot {
         let PpoReplicaStatus { total, ready, busy } = self.trainer_backend.status();
 
@@ -585,6 +608,7 @@ impl InvertedPendulum {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn card_state(&self) -> PendulumCardState {
         let controller_params = if self.controller_selection == ControllerKind::Policy
             && self.controller.kind() != ControllerKind::Policy
@@ -610,6 +634,7 @@ impl InvertedPendulum {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn apply_patch(&mut self, patch: PendulumPatch) {
         if let Some(controller) = patch.controller {
             self.select_controller_kind(controller);
@@ -746,9 +771,9 @@ impl InvertedPendulum {
         }
 
         let line_name = format!("{}_{}", Self::SIGNAL_LABELS[signal_index], self.id);
-        self.data
-            .values_shifted(signal_index, self.time_init, 0.0)
-            .map(|values| plot_ui.line(Line::new(&line_name, values)));
+        if let Some(values) = self.data.values_shifted(signal_index, self.time_init, 0.0) {
+            plot_ui.line(Line::new(&line_name, values));
+        }
     }
 
     /// Advances the pendulum by one fixed step with optional injected noise.
@@ -849,9 +874,9 @@ impl Draw for InvertedPendulum {
             .collect();
 
         (0..self.data.ncols()).for_each(|i| {
-            self.data
-                .values_shifted(i, self.time_init, 0.0)
-                .map(|values| plot_ui.line(Line::new(&names[i], values)));
+            if let Some(values) = self.data.values_shifted(i, self.time_init, 0.0) {
+                plot_ui.line(Line::new(&names[i], values));
+            }
         });
     }
 

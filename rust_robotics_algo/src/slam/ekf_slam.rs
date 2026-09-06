@@ -511,7 +511,7 @@ fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamCon
         state.sigma[(2, 1)],
         state.sigma[(2, 2)],
     );
-    let cross_robot = &g_robot * &sigma_rr;
+    let cross_robot = g_robot * sigma_rr;
 
     // Σ_new,robot and Σ_robot,new blocks (2x3 and 3x2)
     for i in 0..2 {
@@ -536,7 +536,7 @@ fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamCon
             state.sigma[(2, base_k + 1)],
         );
         // Σ_new,existing_k = G_robot * Σ_robot,existing_k (2x2)
-        let cross_k = &g_robot * &sigma_r_k;
+        let cross_k = g_robot * sigma_r_k;
 
         // Set both Σ_new,k and Σ_k,new (symmetric)
         for i in 0..2 {
@@ -549,8 +549,8 @@ fn add_landmark(state: &mut EkfSlamState, obs: &Observation, config: &EkfSlamCon
 
     // Compute new landmark covariance
     // Σ_new,new = G_robot * Σ_robot,robot * G_robotᵀ + G_obs * Q * G_obsᵀ
-    let sigma_mm = &g_robot * sigma_rr * g_robot.transpose()
-        + &g_obs * &config.observation_noise * g_obs.transpose();
+    let sigma_mm = g_robot * sigma_rr * g_robot.transpose()
+        + g_obs * config.observation_noise * g_obs.transpose();
 
     for i in 0..2 {
         for j in 0..2 {
@@ -824,7 +824,7 @@ fn update_landmark(
         // Innovation gating: reject outlier observations
         // Compute Mahalanobis distance of innovation
         let dz_vec = DVector::from_column_slice(&[dz[0], dz[1]]);
-        let mahal_sq = (dz.transpose() * &s_inv * dz)[(0, 0)];
+        let mahal_sq = (dz.transpose() * s_inv * dz)[(0, 0)];
 
         // Also check absolute bearing error - even with high uncertainty,
         // a bearing error > 45° likely indicates wrong data association
@@ -1359,8 +1359,10 @@ mod tests {
     #[test]
     fn test_slam_range_transitions() {
         let mut state = EkfSlamState::new();
-        let mut config = EkfSlamConfig::default();
-        config.max_range = 20.0; // Reasonable range
+        let config = EkfSlamConfig {
+            max_range: 20.0, // Reasonable range
+            ..Default::default()
+        };
 
         // Landmarks in a circle around origin - robot will see them as it circles
         let landmarks = vec![
@@ -1526,8 +1528,10 @@ mod tests {
     #[test]
     fn test_new_landmark_preserves_existing() {
         let mut state = EkfSlamState::new();
-        let mut config = EkfSlamConfig::default();
-        config.max_range = 15.0; // Limited range so we can control when landmarks are seen
+        let config = EkfSlamConfig {
+            max_range: 15.0, // Limited range so we can control when landmarks are seen
+            ..Default::default()
+        };
 
         // Initial landmarks - close to origin so they're discovered immediately
         let close_landmarks = vec![
@@ -1625,13 +1629,16 @@ mod tests {
 
                 // Immediately check if existing landmarks were corrupted
                 println!("  Checking existing landmark estimates after adding new landmark:");
-                for i in 0..n_landmarks_before {
+                for (i, before) in lm_estimates_before
+                    .iter()
+                    .enumerate()
+                    .take(n_landmarks_before)
+                {
                     if let Some(lm) = state.landmark(i) {
-                        let diff = ((lm[0] - lm_estimates_before[i][0]).powi(2)
-                            + (lm[1] - lm_estimates_before[i][1]).powi(2))
-                        .sqrt();
+                        let diff =
+                            ((lm[0] - before[0]).powi(2) + (lm[1] - before[1]).powi(2)).sqrt();
                         println!("    Landmark {}: before=({:.2}, {:.2}), after=({:.2}, {:.2}), change={:.4}",
-                            i, lm_estimates_before[i][0], lm_estimates_before[i][1], lm[0], lm[1], diff);
+                            i, before[0], before[1], lm[0], lm[1], diff);
                     }
                 }
             }
@@ -1735,8 +1742,10 @@ mod tests {
 
         for trial in 0..N_TRIALS {
             let mut state = EkfSlamState::new();
-            let mut config = EkfSlamConfig::default();
-            config.max_range = 25.0;
+            let config = EkfSlamConfig {
+                max_range: 25.0,
+                ..Default::default()
+            };
 
             // Generate initial landmarks in a ring close to origin
             let initial_landmarks = generate_random_landmarks_ring(N_INITIAL_LANDMARKS, 5.0, 15.0);
@@ -1879,8 +1888,10 @@ mod tests {
 
         for trial in 0..N_TRIALS {
             let mut state = EkfSlamState::new();
-            let mut config = EkfSlamConfig::default();
-            config.max_range = 50.0; // Large range to see many landmarks
+            let config = EkfSlamConfig {
+                max_range: 50.0, // Large range to see many landmarks
+                ..Default::default()
+            };
 
             // Generate 15 landmarks at various distances
             let mut landmarks: Vec<Vector2<f32>> = Vec::new();
@@ -1995,8 +2006,10 @@ mod tests {
 
         for trial in 0..N_TRIALS {
             let mut state = EkfSlamState::new();
-            let mut config = EkfSlamConfig::default();
-            config.max_range = 20.0;
+            let config = EkfSlamConfig {
+                max_range: 20.0,
+                ..Default::default()
+            };
 
             // 8 initial landmarks in a circle
             let mut landmarks: Vec<Vector2<f32>> = Vec::new();
@@ -2089,8 +2102,10 @@ mod tests {
 
         for trial in 0..N_TRIALS {
             let mut state = EkfSlamState::new();
-            let mut config = EkfSlamConfig::default();
-            config.max_range = 60.0;
+            let config = EkfSlamConfig {
+                max_range: 60.0,
+                ..Default::default()
+            };
 
             // Generate many landmarks in a ring - all should be visible from origin
             let landmarks = generate_random_landmarks_ring(N_LANDMARKS, 10.0, 40.0);
@@ -2178,8 +2193,10 @@ mod tests {
 
         for trial in 0..N_TRIALS {
             let mut state = EkfSlamState::new();
-            let mut config = EkfSlamConfig::default();
-            config.max_range = 50.0;
+            let config = EkfSlamConfig {
+                max_range: 50.0,
+                ..Default::default()
+            };
 
             // Generate 20 landmarks in a ring
             let landmarks = generate_random_landmarks_ring(N_LANDMARKS, 8.0, 30.0);
@@ -2314,8 +2331,10 @@ mod tests {
         println!("Simulates: visible -> out of range (drift) -> back in range (recovery?)");
 
         let mut state = EkfSlamState::new();
-        let mut config = EkfSlamConfig::default();
-        config.max_range = 15.0; // Limited range
+        let config = EkfSlamConfig {
+            max_range: 15.0, // Limited range
+            ..Default::default()
+        };
 
         // Landmarks clustered near origin
         // IMPORTANT: Include at least one asymmetric landmark to break rotational symmetry.
@@ -2460,8 +2479,8 @@ mod tests {
         println!("\n--- Phase 3: Returning to landmarks ---");
         // Turn around and head back toward origin
         // Note: Both true robot AND odometry perform the turn - otherwise heading error would be 180°
-        true_pose[2] = true_pose[2] + PI;
-        dr_pose[2] = dr_pose[2] + PI;
+        true_pose[2] += PI;
+        dr_pose[2] += PI;
         state.mu[2] = normalize_angle(state.mu[2] + PI);
         let v_back = 3.0;
         let w_back = 0.0;
@@ -2572,9 +2591,12 @@ mod tests {
             true_pose[2].to_degrees()
         );
 
-        for i in 0..state.n_landmarks.min(landmarks.len()) {
+        for (i, true_lm) in landmarks
+            .iter()
+            .enumerate()
+            .take(state.n_landmarks.min(landmarks.len()))
+        {
             if let Some(est_lm) = state.landmark(i) {
-                let true_lm = &landmarks[i];
                 let lm_err =
                     ((est_lm[0] - true_lm[0]).powi(2) + (est_lm[1] - true_lm[1]).powi(2)).sqrt();
                 println!(

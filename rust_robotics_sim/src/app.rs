@@ -241,10 +241,16 @@ pub struct App {
 
 impl App {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(target_arch = "wasm32")]
         let mut theme_mode = theme::UiTheme::Dark;
+        #[cfg(not(target_arch = "wasm32"))]
+        let theme_mode = theme::UiTheme::Dark;
         #[cfg(target_arch = "wasm32")]
         let mut embed_mode = WebEmbedMode::FullApp;
+        #[cfg(target_arch = "wasm32")]
         let mut sim = Simulator::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let sim = Simulator::default();
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(window) = web_sys::window() {
@@ -275,11 +281,7 @@ impl App {
         };
         #[cfg(not(target_arch = "wasm32"))]
         let initial_density = theme::UiDensity::Comfortable;
-        theme::install(
-            &_cc.egui_ctx,
-            initial_density,
-            theme_mode,
-        );
+        theme::install(&_cc.egui_ctx, initial_density, theme_mode);
         let app = Self {
             sim,
             last_frame_at: None,

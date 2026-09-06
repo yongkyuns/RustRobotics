@@ -1,7 +1,6 @@
 use super::domain::ControllerKind;
 use super::*;
 use crate::simulator::Simulate;
-use rust_robotics_algo::control::StateSpace;
 use rust_robotics_algo::inverted_pendulum::Model;
 use rust_robotics_algo::nalgebra;
 use rust_robotics_algo::vector;
@@ -35,10 +34,14 @@ fn disabled_noise_is_a_noop() {
         scale: 1.0,
     };
     let initial_state = vector![0.1, -0.2, 0.05, 0.3];
-    let mut sim_with_noise_api = InvertedPendulum::default();
-    sim_with_noise_api.state = initial_state;
-    let mut sim_plain = InvertedPendulum::default();
-    sim_plain.state = initial_state;
+    let mut sim_with_noise_api = InvertedPendulum {
+        state: initial_state,
+        ..Default::default()
+    };
+    let mut sim_plain = InvertedPendulum {
+        state: initial_state,
+        ..Default::default()
+    };
 
     sim_with_noise_api.step_with_noise(0.01, config);
     sim_plain.step(0.01);
@@ -117,9 +120,11 @@ fn sync_policy_controller_updates_policy_behavior() {
 
 #[test]
 fn lqr_controller_reduces_known_initial_error_over_fixed_rollout() {
-    let mut sim = InvertedPendulum::default();
-    sim.state = vector![0.3, 0.0, 0.2, 0.0];
-    sim.controller = Controller::lqr(Model::default());
+    let mut sim = InvertedPendulum {
+        state: vector![0.3, 0.0, 0.2, 0.0],
+        controller: Controller::lqr(Model::default()),
+        ..Default::default()
+    };
     let initial_angle = sim.state[2].abs();
 
     for _ in 0..400 {
@@ -142,9 +147,11 @@ fn lqr_controller_reduces_known_initial_error_over_fixed_rollout() {
 
 #[test]
 fn nonlinear_plant_falls_farther_from_upright_without_control() {
-    let mut sim = InvertedPendulum::default();
-    sim.state = vector![0.0, 0.0, 1.0, 0.0];
-    sim.controller = Controller::policy(policy_snapshot(0.0));
+    let mut sim = InvertedPendulum {
+        state: vector![0.0, 0.0, 1.0, 0.0],
+        controller: Controller::policy(policy_snapshot(0.0)),
+        ..Default::default()
+    };
 
     let initial_angle = sim.state[2];
     sim.step(PENDULUM_FIXED_DT);

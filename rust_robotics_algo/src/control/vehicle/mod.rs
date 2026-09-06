@@ -595,8 +595,10 @@ mod tests {
 
     #[test]
     fn test_vehicle_state_step() {
-        let mut model = BicycleModel::default();
-        model.vx = 5.0;
+        let mut model = BicycleModel {
+            vx: 5.0,
+            ..Default::default()
+        };
 
         let mut state = VehicleState::new();
         state.vx = 5.0;

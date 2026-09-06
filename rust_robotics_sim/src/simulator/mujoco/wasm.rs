@@ -17,7 +17,9 @@ use crate::data::{IntoValues, TimeTable};
 use eframe::emath::GuiRounding;
 #[cfg(feature = "web_wgpu_viewport")]
 use eframe::wgpu;
-use egui::{vec2, Align2, Color32, FontId, Painter, Rect, Sense, Stroke, Ui};
+use egui::{vec2, Align2, Color32, FontId, Rect, Sense, Ui};
+#[cfg(feature = "web_wgpu_viewport")]
+use egui::{Painter, Stroke};
 use egui_plot::{Line, PlotUi};
 #[cfg(feature = "web_wgpu_viewport")]
 use egui_wgpu;
@@ -455,6 +457,29 @@ struct BrowserMujocoConfig {
     command_dim: usize,
     command_mode: String,
     phase_steps: usize,
+}
+
+#[cfg(not(feature = "web_wgpu_viewport"))]
+#[derive(Serialize)]
+struct BrowserViewportOcclusionRect {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+#[cfg(not(feature = "web_wgpu_viewport"))]
+#[derive(Serialize)]
+struct BrowserViewportConfig {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    pixels_per_point: f32,
+    visible: bool,
+    diagnostic_colors: bool,
+    interactive: bool,
+    occlusion_rects: Vec<BrowserViewportOcclusionRect>,
 }
 
 #[derive(Clone)]
@@ -1102,6 +1127,7 @@ impl WasmMujocoBackend {
         });
     }
 
+    #[cfg(feature = "web_wgpu_viewport")]
     pub fn ui_viewport(&mut self, ui: &mut Ui, frame: Option<&eframe::Frame>) {
         if self.active {
             self.ensure_browser_assets_started();
@@ -1258,6 +1284,73 @@ impl WasmMujocoBackend {
             Color32::from_gray(210),
         );
         self.draw_setpoint_screen_marker(ui.painter(), &report, response.rect);
+    }
+
+    #[cfg(not(feature = "web_wgpu_viewport"))]
+    pub fn ui_viewport(&mut self, ui: &mut Ui, _frame: Option<&eframe::Frame>) {
+        if self.active {
+            self.ensure_browser_assets_started();
+            if let Some(bundle) = self.browser_assets_ready() {
+                self.ensure_ort_smoke_test_started(bundle.as_ref());
+                self.ensure_mujoco_runtime_started(bundle.as_ref());
+            }
+        }
+
+        let rect = aligned_viewport_rect(ui);
+        let _response = ui.allocate_rect(rect, Sense::click_and_drag());
+        let status = {
+            let state = self.mujoco_state.borrow();
+            match &*state {
+                BrowserMujocoState::Ready(_) => None,
+                BrowserMujocoState::Idle => Some((
+                    "MuJoCo browser runtime idle".to_string(),
+                    Color32::from_gray(200),
+                )),
+                BrowserMujocoState::Loading => Some((
+                    "Loading MuJoCo browser runtime...".to_string(),
+                    Color32::from_gray(200),
+                )),
+                BrowserMujocoState::Error(err) => Some((err.clone(), Color32::LIGHT_RED)),
+            }
+        };
+
+        if let Some((message, color)) = status {
+            self.hide_browser_viewport();
+            ui.painter()
+                .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                message,
+                FontId::proportional(16.0),
+                color,
+            );
+            return;
+        }
+
+        let occlusion_rects = self
+            .overlay_occlusions
+            .iter()
+            .map(|rect| BrowserViewportOcclusionRect {
+                left: rect.min.x,
+                top: rect.min.y,
+                width: rect.width(),
+                height: rect.height(),
+            })
+            .collect();
+        self.configure_browser_viewport(&BrowserViewportConfig {
+            left: rect.min.x,
+            top: rect.min.y,
+            width: rect.width(),
+            height: rect.height(),
+            pixels_per_point: ui.ctx().pixels_per_point(),
+            visible: true,
+            diagnostic_colors: false,
+            interactive: self.overlay_interactive,
+            occlusion_rects,
+        });
+        ui.painter()
+            .rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 24));
     }
 
     pub(crate) fn embed_state(&self) -> MujocoEmbedState {
@@ -1471,6 +1564,41 @@ impl WasmMujocoBackend {
         );
     }
 
+    #[cfg(not(feature = "web_wgpu_viewport"))]
+    fn configure_browser_viewport(&self, config: &BrowserViewportConfig) {
+        let Ok(config_value) = serde_wasm_bindgen::to_value(config) else {
+            return;
+        };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(function) = Reflect::get(
+            window.as_ref(),
+            &JsValue::from_str("rustRoboticsMujocoConfigureViewport"),
+        ) else {
+            return;
+        };
+        let Ok(function) = function.dyn_into::<Function>() else {
+            return;
+        };
+        let _ = function.call1(&JsValue::NULL, &config_value);
+    }
+
+    #[cfg(not(feature = "web_wgpu_viewport"))]
+    fn hide_browser_viewport(&self) {
+        self.configure_browser_viewport(&BrowserViewportConfig {
+            left: 0.0,
+            top: 0.0,
+            width: 0.0,
+            height: 0.0,
+            pixels_per_point: 1.0,
+            visible: false,
+            diagnostic_colors: false,
+            interactive: false,
+            occlusion_rects: Vec::new(),
+        });
+    }
+
     fn render_software_2d(
         &self,
         ui: &mut Ui,
@@ -1538,20 +1666,20 @@ impl WasmMujocoBackend {
         painter.circle_stroke(
             projected,
             7.0,
-            Stroke::new(2.0, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(2.0_f32, Color32::from_rgb(255, 245, 245)),
         );
         painter.circle_stroke(
             projected,
             11.0,
-            Stroke::new(1.5, Color32::from_rgba_unmultiplied(220, 70, 70, 220)),
+            Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(220, 70, 70, 220)),
         );
         painter.line_segment(
             [projected + vec2(-5.0, 0.0), projected + vec2(5.0, 0.0)],
-            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 245, 245)),
         );
         painter.line_segment(
             [projected + vec2(0.0, -5.0), projected + vec2(0.0, 5.0)],
-            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 245, 245)),
         );
     }
 }
@@ -1972,7 +2100,6 @@ fn aligned_viewport_rect(ui: &Ui) -> Rect {
     rect.round_to_pixels(pixels_per_point)
 }
 
-#[cfg(feature = "web_wgpu_viewport")]
 fn is_focused_embed_query() -> bool {
     web_sys::window()
         .and_then(|window| window.location().search().ok())
@@ -2084,7 +2211,10 @@ impl BrowserOrbitCamera {
             return None;
         }
         let aspect = (rect.width() / rect.height()).max(0.1);
-        let clip = transform_vec4_mat4(self.view_projection_matrix(aspect), [point[0], point[1], point[2], 1.0]);
+        let clip = transform_vec4_mat4(
+            self.view_projection_matrix(aspect),
+            [point[0], point[1], point[2], 1.0],
+        );
         if clip[3].abs() <= 1e-6 {
             return None;
         }
@@ -2133,8 +2263,14 @@ impl BrowserOrbitCamera {
             let (screen_x, _) = self.project(rect, [world[0] + step, world[1], marker_center_z])?;
             let (screen_y, _) = self.project(rect, [world[0], world[1] + step, marker_center_z])?;
             let jacobian = [
-                [(screen_x.x - screen.x) / step, (screen_y.x - screen.x) / step],
-                [(screen_x.y - screen.y) / step, (screen_y.y - screen.y) / step],
+                [
+                    (screen_x.x - screen.x) / step,
+                    (screen_y.x - screen.x) / step,
+                ],
+                [
+                    (screen_x.y - screen.y) / step,
+                    (screen_y.y - screen.y) / step,
+                ],
             ];
             let det = jacobian[0][0] * jacobian[1][1] - jacobian[0][1] * jacobian[1][0];
             if det.abs() <= 1e-6 {
@@ -2142,10 +2278,8 @@ impl BrowserOrbitCamera {
             }
 
             let inv_det = 1.0 / det;
-            let delta_x =
-                (jacobian[1][1] * error.x - jacobian[0][1] * error.y) * inv_det;
-            let delta_y =
-                (-jacobian[1][0] * error.x + jacobian[0][0] * error.y) * inv_det;
+            let delta_x = (jacobian[1][1] * error.x - jacobian[0][1] * error.y) * inv_det;
+            let delta_y = (-jacobian[1][0] * error.x + jacobian[0][0] * error.y) * inv_det;
             world[0] += delta_x;
             world[1] += delta_y;
         }
@@ -2824,10 +2958,22 @@ fn mul_mat4(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
 #[cfg(feature = "web_wgpu_viewport")]
 fn transform_vec4_mat4(matrix: [f32; 16], vector: [f32; 4]) -> [f32; 4] {
     [
-        matrix[0] * vector[0] + matrix[4] * vector[1] + matrix[8] * vector[2] + matrix[12] * vector[3],
-        matrix[1] * vector[0] + matrix[5] * vector[1] + matrix[9] * vector[2] + matrix[13] * vector[3],
-        matrix[2] * vector[0] + matrix[6] * vector[1] + matrix[10] * vector[2] + matrix[14] * vector[3],
-        matrix[3] * vector[0] + matrix[7] * vector[1] + matrix[11] * vector[2] + matrix[15] * vector[3],
+        matrix[0] * vector[0]
+            + matrix[4] * vector[1]
+            + matrix[8] * vector[2]
+            + matrix[12] * vector[3],
+        matrix[1] * vector[0]
+            + matrix[5] * vector[1]
+            + matrix[9] * vector[2]
+            + matrix[13] * vector[3],
+        matrix[2] * vector[0]
+            + matrix[6] * vector[1]
+            + matrix[10] * vector[2]
+            + matrix[14] * vector[3],
+        matrix[3] * vector[0]
+            + matrix[7] * vector[1]
+            + matrix[11] * vector[2]
+            + matrix[15] * vector[3],
     ]
 }
 

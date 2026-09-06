@@ -21,6 +21,7 @@ use native::NativeMujocoBackend as Backend;
 #[cfg(target_arch = "wasm32")]
 use wasm::WasmMujocoBackend as Backend;
 
+#[derive(Default)]
 pub struct MujocoPanel {
     backend: Backend,
     #[cfg(target_arch = "wasm32")]
@@ -35,16 +36,6 @@ pub(crate) struct MujocoEmbedState {
     pub(crate) policy_label: String,
     pub(crate) status: String,
     pub(crate) ready: bool,
-}
-
-impl Default for MujocoPanel {
-    fn default() -> Self {
-        Self {
-            backend: Backend::default(),
-            #[cfg(target_arch = "wasm32")]
-            active_requested_at: None,
-        }
-    }
 }
 
 impl MujocoPanel {

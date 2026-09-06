@@ -266,7 +266,7 @@ where
 macro_rules! block {
     ($( $( $x: expr ),*);*) => {
         {
-			use crate::matrix::{Horizontal, Vertical, allocate_block_output, Block};
+			use $crate::util::{allocate_block_output, Block, Horizontal, Vertical};
 
             let block_expression = Vertical(($(Horizontal(($($x),*,))),*));
             let mut output = allocate_block_output(&block_expression);
@@ -279,7 +279,7 @@ macro_rules! block {
 #[macro_export]
 macro_rules! hstack_pair {
     ($x:expr, $y:expr) => {{
-        use crate::util::{allocate_block_output, Block, Horizontal};
+        use $crate::util::{allocate_block_output, Block, Horizontal};
 
         let block_expression = Horizontal(($x, $y));
         let mut output = allocate_block_output(&block_expression);
@@ -306,7 +306,7 @@ macro_rules! hstack {
 #[macro_export]
 macro_rules! vstack_pair {
     ($x:expr, $y:expr) => {{
-        use crate::util::{allocate_block_output, Block, Vertical};
+        use $crate::util::{allocate_block_output, Block, Vertical};
 
         let block_expression = Vertical(($x, $y));
         let mut output = allocate_block_output(&block_expression);
@@ -333,7 +333,7 @@ macro_rules! vstack {
 #[macro_export]
 macro_rules! block_diag_pair {
     ($x:expr, $y:expr) => {{
-        use crate::util::{allocate_block_output, Block, Diagonal};
+        use $crate::util::{allocate_block_output, Block, Diagonal};
 
         let block_expression = Diagonal(($x, $y));
         let mut output = allocate_block_output(&block_expression);

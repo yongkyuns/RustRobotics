@@ -498,7 +498,7 @@ impl PathPlanning {
                     } else {
                         // Use continuous obstacles
                         for obs in &self.continuous_obstacles {
-                            planner.add_obstacle(obs.clone());
+                            planner.add_obstacle(*obs);
                         }
                     }
 
@@ -757,11 +757,11 @@ impl PathPlanning {
                 }
             }
             // Left-click to set start/goal
-            else if plot_response.response.clicked_by(PointerButton::Primary) {
-                if !self.grid.is_obstacle(gx, gy) {
-                    let world_pos = self.grid.grid_to_world(gx, gy);
-                    self.handle_left_click(world_pos);
-                }
+            else if plot_response.response.clicked_by(PointerButton::Primary)
+                && !self.grid.is_obstacle(gx, gy)
+            {
+                let world_pos = self.grid.grid_to_world(gx, gy);
+                self.handle_left_click(world_pos);
             }
         }
     }
@@ -853,7 +853,7 @@ impl PathPlanning {
             plot_ui.line(
                 Line::new("", points)
                     .color(Color32::from_gray(200))
-                    .width(0.5),
+                    .width(0.5_f32),
             );
         }
 
@@ -864,7 +864,7 @@ impl PathPlanning {
             plot_ui.line(
                 Line::new("", points)
                     .color(Color32::from_gray(200))
-                    .width(0.5),
+                    .width(0.5_f32),
             );
         }
     }
@@ -885,7 +885,7 @@ impl PathPlanning {
             plot_ui.polygon(
                 Polygon::new("", points)
                     .fill_color(Color32::from_gray(80))
-                    .stroke(egui::Stroke::new(1.0, Color32::from_gray(60))),
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(60))),
             );
         }
     }
@@ -897,7 +897,7 @@ impl PathPlanning {
             plot_ui.polygon(
                 Polygon::new("", points)
                     .fill_color(Color32::from_gray(80))
-                    .stroke(egui::Stroke::new(1.0, Color32::from_gray(60))),
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(60))),
             );
         }
     }
@@ -971,7 +971,7 @@ impl PathPlanning {
                         [parent.x as f64, parent.y as f64],
                         [node.x as f64, node.y as f64],
                     ]);
-                    plot_ui.line(Line::new("", points).color(line_color).width(1.0));
+                    plot_ui.line(Line::new("", points).color(line_color).width(1.0_f32));
                 }
             }
         }
@@ -1001,7 +1001,7 @@ impl PathPlanning {
                         PlotPoints::new(points),
                     )
                     .color(planner.color)
-                    .width(3.0),
+                    .width(3.0_f32),
                 );
             }
         }
@@ -1015,7 +1015,7 @@ impl PathPlanning {
             plot_ui.polygon(
                 Polygon::new("Start", PlotPoints::new(points))
                     .fill_color(Color32::from_rgb(50, 200, 50))
-                    .stroke(egui::Stroke::new(2.0, Color32::from_rgb(30, 150, 30))),
+                    .stroke(egui::Stroke::new(2.0_f32, Color32::from_rgb(30, 150, 30))),
             );
         }
     }
@@ -1028,7 +1028,7 @@ impl PathPlanning {
             plot_ui.polygon(
                 Polygon::new("Goal", PlotPoints::new(points))
                     .fill_color(Color32::from_rgb(200, 50, 50))
-                    .stroke(egui::Stroke::new(2.0, Color32::from_rgb(150, 30, 30))),
+                    .stroke(egui::Stroke::new(2.0_f32, Color32::from_rgb(150, 30, 30))),
             );
         }
     }
@@ -1114,7 +1114,7 @@ impl Draw for PathPlanning {
             plot_ui.line(
                 Line::new("", points)
                     .color(Color32::from_gray(100))
-                    .width(1.0),
+                    .width(1.0_f32),
             );
 
             self.draw_continuous_obstacles(plot_ui);
@@ -1275,10 +1275,10 @@ impl Draw for PathPlanning {
                     };
                     ui.label(format!("Status: {}", status_text));
 
-                    if self.state == PlanningState::ShowingResult {
-                        if ui.button("Re-run All").clicked() {
-                            self.run_all_planners();
-                        }
+                    if self.state == PlanningState::ShowingResult
+                        && ui.button("Re-run All").clicked()
+                    {
+                        self.run_all_planners();
                     }
                 }); // end vertical
             }); // end group

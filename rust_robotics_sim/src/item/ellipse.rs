@@ -18,7 +18,7 @@ impl Default for Ellipse {
             position: Point::new(0.0, 0.0),
             size: Size::default(),
             angle: 0.0,
-            stroke: Stroke::new(1.0, Color32::TRANSPARENT),
+            stroke: Stroke::new(1.0_f32, Color32::TRANSPARENT),
             style: LineStyle::Solid,
             fill_alpha: 0.05,
         }
@@ -76,7 +76,7 @@ impl Default for Circle {
             position: Point::new(0.0, 0.0),
             size: Size::default(),
             angle: 0.0,
-            stroke: Stroke::new(1.0, Color32::TRANSPARENT),
+            stroke: Stroke::new(1.0_f32, Color32::TRANSPARENT),
             style: LineStyle::Solid,
             fill_alpha: 0.05,
         }

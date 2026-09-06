@@ -147,7 +147,7 @@ macro_rules! impl_position {
                 self.position = position;
                 self
             }
-            fn move_by(mut self, vector: crate::item::Vector) -> Self {
+            fn move_by(mut self, vector: $crate::item::Vector) -> Self {
                 self.position = Point::new(self.position.x + vector.x, self.position.y + vector.y);
                 self
             }

@@ -12,6 +12,7 @@
 //! makes it easier to test the simulator state machine without involving `egui`.
 #[cfg(target_arch = "wasm32")]
 use super::mujoco::MujocoEmbedState;
+#[cfg(target_arch = "wasm32")]
 use super::{
     localization::{DriveMode as LocalizationDriveMode, LocalizationCardState, LocalizationPatch},
     path_planning::{
@@ -20,6 +21,8 @@ use super::{
     },
     pendulum::{ControllerKind, PendulumCardState, PendulumPatch},
     slam::{DriveMode as SlamDriveMode, SlamCardState, SlamPatch},
+};
+use super::{
     InvertedPendulum, ParticleFilter, PathPlanning, PendulumNoiseConfig, SimMode, Simulate,
     Simulator, SlamDemo, PENDULUM_FIXED_DT,
 };
@@ -87,6 +90,7 @@ impl Simulator {
     }
 
     /// Returns the serialized DOM-card state for each active pendulum.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn pendulum_ui_state(&self) -> Vec<PendulumCardState> {
         self.simulations
             .pendulums
@@ -96,6 +100,7 @@ impl Simulator {
     }
 
     /// Sets the selected controller kind for the pendulum with the matching id.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_pendulum_controller_kind(
         &mut self,
         pendulum_id: usize,
@@ -112,6 +117,7 @@ impl Simulator {
     }
 
     /// Removes a pendulum instance by id, keeping at least one pendulum alive.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn remove_pendulum(&mut self, pendulum_id: usize) {
         if self.simulations.pendulums.len() <= 1 {
             return;
@@ -122,6 +128,7 @@ impl Simulator {
     }
 
     /// Applies a partial configuration patch to one pendulum instance.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn patch_pendulum(&mut self, pendulum_id: usize, patch: PendulumPatch) {
         if let Some(pendulum) = self
             .simulations
@@ -134,6 +141,7 @@ impl Simulator {
     }
 
     /// Returns the serialized DOM-card state for each active localization demo.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn localization_ui_state(&self) -> Vec<LocalizationCardState> {
         self.simulations
             .vehicles
@@ -143,6 +151,7 @@ impl Simulator {
     }
 
     /// Removes a localization vehicle instance by id, keeping at least one alive.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn remove_localization_vehicle(&mut self, vehicle_id: usize) {
         if self.simulations.vehicles.len() <= 1 {
             return;
@@ -153,6 +162,7 @@ impl Simulator {
     }
 
     /// Sets the drive mode for one localization vehicle.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_localization_drive_mode(
         &mut self,
         vehicle_id: usize,
@@ -169,6 +179,7 @@ impl Simulator {
     }
 
     /// Applies a partial configuration patch to one localization vehicle.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn patch_localization_vehicle(
         &mut self,
         vehicle_id: usize,
@@ -185,16 +196,19 @@ impl Simulator {
     }
 
     /// Returns the current path-planning environment mode used by the web embed.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn path_planning_env_mode(&self) -> PathPlanningEnvironmentMode {
         self.path_settings.env_mode
     }
 
     /// Returns the current continuous obstacle radius used by new and existing planners.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn path_planning_continuous_obstacle_radius(&self) -> f32 {
         self.path_settings.continuous_obstacle_radius
     }
 
     /// Returns the serialized DOM-card state for each active path-planning comparison panel.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn path_planning_ui_state(&self) -> Vec<PathPlannerCardState> {
         self.simulations
             .planners
@@ -204,6 +218,7 @@ impl Simulator {
     }
 
     /// Sets the global path-planning environment mode and propagates it to all planners.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_path_planning_env_mode(&mut self, mode: PathPlanningEnvironmentMode) {
         self.path_settings.env_mode = mode;
         for planner in &mut self.simulations.planners {
@@ -213,6 +228,7 @@ impl Simulator {
     }
 
     /// Sets the continuous obstacle radius used by all path-planning demos.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_path_planning_continuous_obstacle_radius(&mut self, radius: f32) {
         let radius = radius.clamp(0.1, 5.0);
         self.path_settings.continuous_obstacle_radius = radius;
@@ -222,6 +238,7 @@ impl Simulator {
     }
 
     /// Removes a path-planning comparison panel by id, keeping at least one alive.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn remove_path_planner(&mut self, planner_id: usize) {
         if self.simulations.planners.len() <= 1 {
             return;
@@ -232,6 +249,7 @@ impl Simulator {
     }
 
     /// Updates the selected primary algorithm for one path-planning comparison panel.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_path_planner_algorithm(
         &mut self,
         planner_id: usize,
@@ -248,6 +266,7 @@ impl Simulator {
     }
 
     /// Updates whether one planner card shows visited cells / the RRT tree.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_path_planner_show_visited(&mut self, planner_id: usize, show_visited: bool) {
         if let Some(planner) = self
             .simulations
@@ -260,6 +279,7 @@ impl Simulator {
     }
 
     /// Applies a partial patch to one path-planning comparison panel.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn patch_path_planner(&mut self, planner_id: usize, patch: PathPlannerPatch) {
         if let Some(planner) = self
             .simulations
@@ -272,6 +292,7 @@ impl Simulator {
     }
 
     /// Returns the serialized DOM-card state for each active SLAM demo.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn slam_ui_state(&self) -> Vec<SlamCardState> {
         self.simulations
             .slam_demos
@@ -281,6 +302,7 @@ impl Simulator {
     }
 
     /// Removes one SLAM demo by id while keeping at least one demo alive.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn remove_slam_demo(&mut self, slam_id: usize) {
         if self.simulations.slam_demos.len() <= 1 {
             return;
@@ -291,6 +313,7 @@ impl Simulator {
     }
 
     /// Sets the drive mode for one SLAM demo.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_slam_drive_mode(&mut self, slam_id: usize, drive_mode: SlamDriveMode) {
         if let Some(slam) = self
             .simulations
@@ -303,6 +326,7 @@ impl Simulator {
     }
 
     /// Enables or disables EKF-SLAM for one demo.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_slam_ekf_enabled(&mut self, slam_id: usize, enabled: bool) {
         if let Some(slam) = self
             .simulations
@@ -315,6 +339,7 @@ impl Simulator {
     }
 
     /// Enables or disables Graph-SLAM for one demo.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_slam_graph_enabled(&mut self, slam_id: usize, enabled: bool) {
         if let Some(slam) = self
             .simulations
@@ -327,6 +352,7 @@ impl Simulator {
     }
 
     /// Applies a partial configuration patch to one SLAM demo.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn patch_slam(&mut self, slam_id: usize, patch: SlamPatch) {
         if let Some(slam) = self
             .simulations

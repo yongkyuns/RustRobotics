@@ -179,7 +179,7 @@ impl MujocoSim {
                 qpos[6] as f32,
             ],
             base_lin_vel: [
-                *qvel.get(0).unwrap_or(&0.0) as f32,
+                *qvel.first().unwrap_or(&0.0) as f32,
                 *qvel.get(1).unwrap_or(&0.0) as f32,
                 *qvel.get(2).unwrap_or(&0.0) as f32,
             ],

@@ -92,11 +92,7 @@ impl<T: Clone> HistoryManager<T> {
     /// Get the start step for time-based plotting.
     /// This is the step count at the beginning of the current history window.
     pub fn start_step(&self) -> usize {
-        if self.step_count > self.max_len {
-            self.step_count - self.max_len
-        } else {
-            0
-        }
+        self.step_count.saturating_sub(self.max_len)
     }
 
     /// Clear all history and reset step count.

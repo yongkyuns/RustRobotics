@@ -181,9 +181,8 @@ impl LoopClosureDetector {
         let max_candidate_idx =
             current_pose_idx.saturating_sub(self.config.min_temporal_separation);
 
-        for candidate_idx in 0..=max_candidate_idx {
-            let candidate_pose = &poses[candidate_idx];
-
+        for (candidate_idx, candidate_pose) in poses.iter().enumerate().take(max_candidate_idx + 1)
+        {
             // Proximity check
             let dx = current_pose.x - candidate_pose.x;
             let dy = current_pose.y - candidate_pose.y;
@@ -646,9 +645,8 @@ mod tests {
         // Add observations from pose 0 and pose 4 to all landmarks
         // (They're both near the center area)
         let obs_cov = Matrix2::from_diagonal(&Vector2::new(0.1, 0.01));
-        for lm_idx in 0..4 {
+        for (lm_idx, lm) in landmarks.iter().enumerate().take(4) {
             // Pose 0 observations
-            let lm = &landmarks[lm_idx];
             let dx = lm.x - poses[0].x;
             let dy = lm.y - poses[0].y;
             let r = (dx * dx + dy * dy).sqrt();
@@ -664,10 +662,12 @@ mod tests {
         }
 
         // Detect loop closures
-        let mut config = LoopClosureConfig::default();
-        config.proximity_threshold = 1.0; // Pose 4 is ~0.36m from pose 0
-        config.min_temporal_separation = 3;
-        config.min_common_landmarks = 3;
+        let config = LoopClosureConfig {
+            proximity_threshold: 1.0, // Pose 4 is ~0.36m from pose 0
+            min_temporal_separation: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
 
         let detector = LoopClosureDetector::with_config(config);
         let closures = detector.detect(
@@ -767,11 +767,13 @@ mod tests {
         add_observations_from_pose(&mut graph, 0, ground_truth_candidate, &landmarks, &obs_cov);
         add_observations_from_pose(&mut graph, 4, ground_truth_current, &landmarks, &obs_cov);
 
-        let mut config = LoopClosureConfig::default();
-        config.proximity_threshold = 0.1;
-        config.min_temporal_separation = 3;
-        config.landmark_observation_gap = 3;
-        config.min_common_landmarks = 3;
+        let config = LoopClosureConfig {
+            proximity_threshold: 0.1,
+            min_temporal_separation: 3,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
         let detector = LoopClosureDetector::with_config(config);
 
         let closures = detector.detect(
@@ -838,10 +840,12 @@ mod tests {
             graph.add_observation(4, lm_idx, point.norm(), point.y.atan2(point.x), &obs_cov);
         }
 
-        let mut config = LoopClosureConfig::default();
-        config.proximity_threshold = 0.1;
-        config.landmark_observation_gap = 3;
-        config.min_common_landmarks = 3;
+        let config = LoopClosureConfig {
+            proximity_threshold: 0.1,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
         let detector = LoopClosureDetector::with_config(config);
 
         let closures = detector.detect(

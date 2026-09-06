@@ -51,6 +51,7 @@ impl DriveMode {
 
 /// Compact read-only card state for the SLAM tutorial embed.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct SlamCardState {
     pub(crate) id: usize,
     pub(crate) drive_mode: DriveMode,
@@ -68,6 +69,7 @@ pub(crate) struct SlamCardState {
 
 /// Partial update payload for the curated SLAM tutorial controls.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[cfg(target_arch = "wasm32")]
 pub(crate) struct SlamPatch {
     pub(crate) velocity: Option<f32>,
     pub(crate) yaw_rate: Option<f32>,
@@ -513,6 +515,7 @@ impl SlamDemo {
         self.graph.reset(self.n_landmarks);
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn status_text(&self) -> String {
         match self.drive_mode {
             DriveMode::Auto => format!(
@@ -526,6 +529,7 @@ impl SlamDemo {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn card_state(&self) -> SlamCardState {
         SlamCardState {
             id: self.id,
@@ -543,10 +547,12 @@ impl SlamDemo {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_drive_mode(&mut self, drive_mode: DriveMode) {
         self.drive_mode = drive_mode;
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_ekf_enabled(&mut self, enabled: bool) {
         let needs_reset = enabled && !self.ekf.enabled;
         self.ekf.enabled = enabled;
@@ -555,6 +561,7 @@ impl SlamDemo {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_graph_enabled(&mut self, enabled: bool) {
         let needs_reset = enabled && !self.graph.enabled;
         self.graph.enabled = enabled;
@@ -563,6 +570,7 @@ impl SlamDemo {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn apply_patch(&mut self, patch: SlamPatch) {
         if let Some(velocity) = patch.velocity {
             self.velocity = velocity.clamp(0.1, 3.0);
@@ -731,7 +739,7 @@ impl SlamDemo {
                     } else {
                         output.push_str(" [EXTRA - no true landmark]");
                     }
-                    output.push_str("\n");
+                    output.push('\n');
                 }
             }
         }
@@ -769,7 +777,7 @@ impl SlamDemo {
         }
 
         // History lengths
-        output.push_str(&format!("\n--- History ---\n"));
+        output.push_str("\n--- History ---\n");
         output.push_str(&format!("True history length: {}\n", self.h_true.len()));
         output.push_str(&format!("DR history length: {}\n", self.h_dr.len()));
         if self.ekf.enabled {
@@ -807,9 +815,7 @@ impl SlamDemo {
             let mut min_dist = f32::MAX;
             let mut closest_true_idx = 0;
             for (true_idx, true_lm) in self.landmarks_true.iter().enumerate() {
-                let dist = ((lm.x - true_lm[0] as f32).powi(2)
-                    + (lm.y - true_lm[1] as f32).powi(2))
-                .sqrt();
+                let dist = ((lm.x - true_lm[0]).powi(2) + (lm.y - true_lm[1]).powi(2)).sqrt();
                 if dist < min_dist {
                     min_dist = dist;
                     closest_true_idx = true_idx;
@@ -829,7 +835,7 @@ impl SlamDemo {
                 // Write header with step info
                 let _ = writeln!(file, "=== GRAPH SLAM DEBUG DUMP ===");
                 let _ = writeln!(file, "Step: {}", self.step_count);
-                let _ = writeln!(file, "");
+                let _ = writeln!(file);
 
                 // True robot state
                 let _ = writeln!(file, "--- True Robot State ---");
@@ -844,16 +850,16 @@ impl SlamDemo {
                     self.x_true[2].to_degrees(),
                     self.x_true[2]
                 );
-                let _ = writeln!(file, "");
+                let _ = writeln!(file);
 
                 // Graph pose error
                 if !self.graph.graph.poses.is_empty() {
                     let last_pose = &self.graph.graph.poses[self.graph.graph.poses.len() - 1];
-                    let pos_err = ((last_pose.x - self.x_true[0] as f32).powi(2)
-                        + (last_pose.y - self.x_true[1] as f32).powi(2))
+                    let pos_err = ((last_pose.x - self.x_true[0]).powi(2)
+                        + (last_pose.y - self.x_true[1]).powi(2))
                     .sqrt();
                     let _ = writeln!(file, "Graph SLAM position error: {:.3}m", pos_err);
-                    let _ = writeln!(file, "");
+                    let _ = writeln!(file);
                 }
 
                 // Write graph slam diagnostics
@@ -872,14 +878,14 @@ impl SlamDemo {
                         slam_idx, lm.x, lm.y, true_idx, true_lm[0], true_lm[1], dist
                     );
                 }
-                let _ = writeln!(file, "");
+                let _ = writeln!(file);
 
                 // True landmark positions
                 let _ = writeln!(file, "--- True Landmark Positions ---");
                 for (i, lm) in self.landmarks_true.iter().enumerate() {
                     let _ = writeln!(file, "  LM {}: ({:.3}, {:.3})", i, lm[0], lm[1]);
                 }
-                let _ = writeln!(file, "");
+                let _ = writeln!(file);
 
                 // True LM -> SLAM LM mapping (data association)
                 let _ = writeln!(
@@ -891,7 +897,7 @@ impl SlamDemo {
                         let _ = writeln!(file, "  True LM {} -> SLAM LM {}", true_idx, slam_idx);
                     }
                 }
-                let _ = writeln!(file, "");
+                let _ = writeln!(file);
 
                 // Current observations
                 let _ = writeln!(
@@ -1025,7 +1031,7 @@ impl Draw for SlamDemo {
             plot_ui.points(
                 Points::new("True Landmarks", PlotPoints::new(landmark_points))
                     .shape(egui_plot::MarkerShape::Cross)
-                    .radius(6.0)
+                    .radius(6.0_f32)
                     .color(colors::TRUE),
             );
         }
@@ -1037,7 +1043,7 @@ impl Draw for SlamDemo {
                     plot_ui.points(
                         Points::new("", PlotPoints::new(vec![[lm[0] as f64, lm[1] as f64]]))
                             .shape(egui_plot::MarkerShape::Circle)
-                            .radius(5.0)
+                            .radius(5.0_f32)
                             .color(EKF_COLOR),
                     );
 
@@ -1046,7 +1052,10 @@ impl Draw for SlamDemo {
                             let ellipse = covariance_ellipse_points(lm[0], lm[1], &cov, 2.0);
                             plot_ui.polygon(
                                 Polygon::new("", PlotPoints::new(ellipse))
-                                    .stroke(egui::Stroke::new(1.5, EKF_COLOR.gamma_multiply(0.7)))
+                                    .stroke(egui::Stroke::new(
+                                        1.5_f32,
+                                        EKF_COLOR.gamma_multiply(0.7),
+                                    ))
                                     .fill_color(EKF_COLOR.gamma_multiply(0.15)),
                             );
                         }
@@ -1078,7 +1087,7 @@ impl Draw for SlamDemo {
                 let ellipse = covariance_ellipse_points(ekf_pose[0], ekf_pose[1], &pos_cov, 2.0);
                 plot_ui.polygon(
                     Polygon::new("", PlotPoints::new(ellipse))
-                        .stroke(egui::Stroke::new(1.5, EKF_COLOR.gamma_multiply(0.7)))
+                        .stroke(egui::Stroke::new(1.5_f32, EKF_COLOR.gamma_multiply(0.7)))
                         .fill_color(EKF_COLOR.gamma_multiply(0.15)),
                 );
             }
@@ -1090,7 +1099,7 @@ impl Draw for SlamDemo {
                 plot_ui.points(
                     Points::new("", PlotPoints::new(vec![[lm.x as f64, lm.y as f64]]))
                         .shape(egui_plot::MarkerShape::Diamond)
-                        .radius(5.0)
+                        .radius(5.0_f32)
                         .color(GRAPH_COLOR),
                 );
             }
@@ -1111,7 +1120,7 @@ impl Draw for SlamDemo {
                         )
                         .style(LineStyle::Dashed { length: 4.0 })
                         .color(Color32::from_rgb(255, 165, 0)) // Orange for loop closures
-                        .width(2.0),
+                        .width(2.0_f32),
                     );
                 }
             }
@@ -1121,7 +1130,7 @@ impl Draw for SlamDemo {
                 plot_ui.points(
                     Points::new("", PlotPoints::new(vec![[pose.x as f64, pose.y as f64]]))
                         .shape(egui_plot::MarkerShape::Circle)
-                        .radius(3.0)
+                        .radius(3.0_f32)
                         .color(GRAPH_COLOR.gamma_multiply(0.6)),
                 );
             }
@@ -1158,7 +1167,7 @@ impl Draw for SlamDemo {
                         )
                         .style(LineStyle::Dotted { spacing: 5.0 })
                         .color(colors::OBSERVATION)
-                        .width(1.5),
+                        .width(1.5_f32),
                     );
                 }
             }

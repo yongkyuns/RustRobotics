@@ -232,15 +232,16 @@ impl Controller {
             }
         }
     }
+}
 
-    /// Returns a stable display string for the current controller.
-    pub fn to_string(&self) -> String {
-        match self {
-            Self::LQR(_) => "LQR".to_owned(),
-            Self::PID(_) => "PID".to_owned(),
-            Self::MPC(_) => "MPC".to_owned(),
-            Self::Policy(_) => "PPO Policy".to_owned(),
-        }
+impl std::fmt::Display for Controller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::LQR(_) => "LQR",
+            Self::PID(_) => "PID",
+            Self::MPC(_) => "MPC",
+            Self::Policy(_) => "PPO Policy",
+        })
     }
 }
 
@@ -319,7 +320,7 @@ impl InvertedPendulum {
             let mut selected = self.controller_selection;
             ui.push_id(("compact_controller", self.id), |ui| {
                 ComboBox::from_id_salt("controller_select")
-                    .width(150.0)
+                    .width(150.0_f32)
                     .selected_text(selected.label())
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut selected, ControllerKind::Lqr, "LQR");

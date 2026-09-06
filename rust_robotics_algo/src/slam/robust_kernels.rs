@@ -345,7 +345,7 @@ pub fn compute_mad(residuals: &[f64]) -> f64 {
     let mut sorted = residuals.to_vec();
     sorted.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
 
-    let median_abs = if sorted.len() % 2 == 0 {
+    let median_abs = if sorted.len().is_multiple_of(2) {
         let mid = sorted.len() / 2;
         (sorted[mid - 1].abs() + sorted[mid].abs()) / 2.0
     } else {
