@@ -1,0 +1,73 @@
+name: Fix final repair helper
+
+on:
+  push:
+    branches: ["ci/thorough-coverage"]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/thorough-coverage
+          fetch-depth: 0
+
+      - name: Patch repair helper
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('.github/workflows/repair-final.yml')
+          text = path.read_text()
+          old = '''          def cfg_method(path, name):
+              text = read(path)
+              markers = [f"    pub(crate) fn {name}(", f"    fn {name}("]
+              for marker in markers:
+                  if marker in text:
+                      replacement = f"    {CFG_WASM}\\n" + marker
+                      if replacement not in text:
+                          text = text.replace(marker, replacement, 1)
+                      write(path, text)
+                      return
+              raise SystemExit(f"missing method {name} in {path}")
+'''
+          new = '''          def cfg_method(path, name):
+              text = read(path)
+              markers = [
+                  f"    pub(crate) fn {name}(",
+                  f"    fn {name}(",
+                  f"pub(crate) fn {name}(",
+                  f"fn {name}(",
+              ]
+              for marker in markers:
+                  if marker in text:
+                      indent = "    " if marker.startswith("    ") else ""
+                      replacement = f"{indent}{CFG_WASM}\\n" + marker
+                      if replacement not in text:
+                          text = text.replace(marker, replacement, 1)
+                      write(path, text)
+                      return
+              raise SystemExit(f"missing function {name} in {path}")
+'''
+          if old not in text:
+              raise SystemExit('cfg helper marker not found')
+          text = text.replace(old, new, 1)
+          old_cleanup = '      - name: Remove repair workflow\n        run: git rm .github/workflows/repair-final.yml\n'
+          new_cleanup = '      - name: Remove repair workflow\n        run: |\n          git rm .github/workflows/repair-final.yml\n          git rm -f .github/repair-trigger\n'
+          if old_cleanup not in text:
+              raise SystemExit('cleanup marker not found')
+          path.write_text(text.replace(old_cleanup, new_cleanup, 1))
+
+      - name: Commit helper fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/fix-repair-helper.yml
+          git add .github/workflows/repair-final.yml
+          git commit -m "Fix final Clippy repair helper"
+          git push origin HEAD:ci/thorough-coverage
