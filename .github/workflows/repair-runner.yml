@@ -85,6 +85,50 @@ jobs:
 
           exec(compile(script, 'reviewed-clippy-repair.py', 'exec'), {})
 
+          domain = Path('rust_robotics_sim/src/simulator/pendulum/domain.rs')
+          text = domain.read_text()
+          old = 'use super::super::ppo_trainer::{PpoReplicaStatus, PpoTrainerCoordinator};'
+          new = (
+              'use super::super::ppo_trainer::PpoTrainerCoordinator;\n'
+              '#[cfg(target_arch = "wasm32")]\n'
+              'use super::super::ppo_trainer::PpoReplicaStatus;'
+          )
+          if old not in text:
+              raise SystemExit('PpoReplicaStatus import marker not found')
+          text = text.replace(old, new, 1)
+          old = 'use rust_robotics_core::{PolicySnapshot, PpoMetrics};'
+          new = (
+              'use rust_robotics_core::PolicySnapshot;\n'
+              '#[cfg(target_arch = "wasm32")]\n'
+              'use rust_robotics_core::PpoMetrics;'
+          )
+          if old not in text:
+              raise SystemExit('PpoMetrics import marker not found')
+          domain.write_text(text.replace(old, new, 1))
+
+          pendulum_mod = Path('rust_robotics_sim/src/simulator/pendulum/mod.rs')
+          text = pendulum_mod.read_text()
+          old = (
+              'pub(crate) use domain::ControllerKind;\n'
+              '#[cfg(target_arch = "wasm32")]\n'
+              'pub(crate) use domain::{PendulumCardState, PendulumPatch};'
+          )
+          new = (
+              '#[cfg(target_arch = "wasm32")]\n'
+              'pub(crate) use domain::{ControllerKind, PendulumCardState, PendulumPatch};'
+          )
+          if old not in text:
+              raise SystemExit('ControllerKind re-export marker not found')
+          pendulum_mod.write_text(text.replace(old, new, 1))
+
+          theme = Path('rust_robotics_sim/src/theme.rs')
+          text = theme.read_text()
+          old = '    visuals.selection.stroke = Stroke::new(\n        1.0,\n'
+          new = '    visuals.selection.stroke = Stroke::new(\n        1.0_f32,\n'
+          if old not in text:
+              raise SystemExit('selection stroke f32 marker not found')
+          theme.write_text(text.replace(old, new, 1))
+
       - name: Format workspace
         run: cargo fmt --all
 
