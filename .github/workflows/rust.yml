@@ -168,7 +168,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
