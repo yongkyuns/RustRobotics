@@ -1,0 +1,395 @@
+name: Final explicit Clippy repair
+
+on:
+  push:
+    branches: ["ci/thorough-coverage"]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      MUJOCO_VERSION: 3.4.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/thorough-coverage
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Install Linux dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 10m sudo apt-get update -o Acquire::Retries=3
+          timeout 15m sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev
+
+      - name: Install MuJoCo
+        run: |
+          curl -L --fail \
+            -o "$RUNNER_TEMP/mujoco.tar.gz" \
+            "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
+          echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      - name: Apply explicit source repairs
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          CFG_WASM = '#[cfg(target_arch = "wasm32")]'
+
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def replace(path, old, new, count=1):
+              text = read(path)
+              if old not in text:
+                  raise SystemExit(f"missing marker in {path}: {old!r}")
+              write(path, text.replace(old, new, count))
+
+          def replace_all(path, old, new):
+              text = read(path)
+              if old not in text:
+                  raise SystemExit(f"missing marker in {path}: {old!r}")
+              write(path, text.replace(old, new))
+
+          def cfg_method(path, name):
+              text = read(path)
+              markers = [f"    pub(crate) fn {name}(", f"    fn {name}("]
+              for marker in markers:
+                  if marker in text:
+                      replacement = f"    {CFG_WASM}\n" + marker
+                      if replacement not in text:
+                          text = text.replace(marker, replacement, 1)
+                      write(path, text)
+                      return
+              raise SystemExit(f"missing method {name} in {path}")
+
+          def cfg_item(path, declaration):
+              text = read(path)
+              marker = declaration
+              if marker not in text:
+                  raise SystemExit(f"missing item {declaration} in {path}")
+              replacement = CFG_WASM + "\n" + marker
+              if replacement not in text:
+                  text = text.replace(marker, replacement, 1)
+              write(path, text)
+
+          # Existing production Clippy findings.
+          util = "rust_robotics_algo/src/util.rs"
+          replace(util,
+              "use crate::matrix::{Horizontal, Vertical, allocate_block_output, Block};",
+              "use $crate::util::{allocate_block_output, Block, Horizontal, Vertical};")
+          replace(util,
+              "use crate::util::{allocate_block_output, Block, Horizontal};",
+              "use $crate::util::{allocate_block_output, Block, Horizontal};")
+          replace(util,
+              "use crate::util::{allocate_block_output, Block, Vertical};",
+              "use $crate::util::{allocate_block_output, Block, Vertical};")
+          replace(util,
+              "use crate::util::{allocate_block_output, Block, Diagonal};",
+              "use $crate::util::{allocate_block_output, Block, Diagonal};")
+
+          replace(
+              "rust_robotics_algo/src/control/inverted_pendulum/pid.rs",
+              "        let mut pid = Self::default();\n        pid.P = P;\n        pid.I = I;\n        pid.D = D;\n        pid",
+              "        Self {\n            P,\n            I,\n            D,\n            ..Default::default()\n        }",
+          )
+          replace("rust_robotics_algo/src/control/lqr.rs", "        let u = -K * x;\n        u", "        -K * x")
+
+          pf = "rust_robotics_algo/src/localization/particle_filter.rs"
+          replace(pf, "pub fn pf_localization_with_state(", "#[allow(clippy::too_many_arguments)]\npub fn pf_localization_with_state(")
+          replace(pf, "            w = w * robust_likelihood(dz, sqrt(Q[(0, 0)]));", "            w *= robust_likelihood(dz, sqrt(Q[(0, 0)]));")
+          replace(pf,
+              "    for ip in 0..NP {\n        while resample_id[ip] > w_cum[ind] && ind < NP - 1 {\n            ind += 1;\n        }\n        px_new.set_column(ip, &px.column(ind));\n    }",
+              "    for (ip, sample) in resample_id.iter().enumerate().take(NP) {\n        while *sample > w_cum[ind] && ind < NP - 1 {\n            ind += 1;\n        }\n        px_new.set_column(ip, &px.column(ind));\n    }")
+
+          replace(
+              "rust_robotics_algo/src/robot_fw/go2.rs",
+              "        for i in 0..12 {\n            let target = self.action_scale[i] * self.last_actions[i] + self.default_jpos[i];\n            torques[i] =\n                self.kp[i] * (target - raw.joint_pos[i]) + self.kd[i] * (0.0 - raw.joint_vel[i]);\n        }",
+              "        for (i, torque) in torques.iter_mut().enumerate() {\n            let target = self.action_scale[i] * self.last_actions[i] + self.default_jpos[i];\n            *torque =\n                self.kp[i] * (target - raw.joint_pos[i]) + self.kd[i] * (0.0 - raw.joint_vel[i]);\n        }",
+          )
+
+          replace(
+              "rust_robotics_algo/src/robot_fw/onnx.rs",
+              "            let mut builder = Session::builder()\n                .map_err(|err| format!(\"Failed to create ONNX Runtime session builder: {err}\"))?\n                .with_optimization_level(GraphOptimizationLevel::Level1)\n                .and_then(|builder| builder.with_log_level(LogLevel::Fatal))\n                .map_err(|err| format!(\"Failed to configure ONNX Runtime session: {err}\"))?;",
+              "            let builder = Session::builder()\n                .map_err(|err| format!(\"Failed to create ONNX Runtime session builder: {err}\"))?;\n            let builder = builder\n                .with_optimization_level(GraphOptimizationLevel::Level1)\n                .map_err(|err| format!(\"Failed to configure ONNX Runtime optimization: {err}\"))?;\n            let mut builder = builder\n                .with_log_level(LogLevel::Fatal)\n                .map_err(|err| format!(\"Failed to configure ONNX Runtime logging: {err}\"))?;",
+          )
+
+          ekf = "rust_robotics_algo/src/slam/ekf_slam.rs"
+          replace(ekf, "    let cross_robot = &g_robot * &sigma_rr;", "    let cross_robot = g_robot * sigma_rr;")
+          replace(ekf, "        let cross_k = &g_robot * &sigma_r_k;", "        let cross_k = g_robot * sigma_r_k;")
+          replace(ekf,
+              "    let sigma_mm = &g_robot * sigma_rr * g_robot.transpose()\n        + &g_obs * &config.observation_noise * g_obs.transpose();",
+              "    let sigma_mm = g_robot * sigma_rr * g_robot.transpose()\n        + g_obs * config.observation_noise * g_obs.transpose();")
+          replace(ekf, "        let mahal_sq = (dz.transpose() * &s_inv * dz)[(0, 0)];", "        let mahal_sq = (dz.transpose() * s_inv * dz)[(0, 0)];")
+
+          replace(
+              "rust_robotics_algo/src/slam/loop_closure.rs",
+              "        for candidate_idx in 0..=max_candidate_idx {\n            let candidate_pose = &poses[candidate_idx];",
+              "        for (candidate_idx, candidate_pose) in poses\n            .iter()\n            .enumerate()\n            .take(max_candidate_idx + 1)\n        {",
+          )
+          replace("rust_robotics_algo/src/slam/robust_kernels.rs", "    let median_abs = if sorted.len() % 2 == 0 {", "    let median_abs = if sorted.len().is_multiple_of(2) {")
+
+          replace(
+              "rust_robotics_core/src/lib.rs",
+              "        let mut output = vec![0.0; self.out_dim];\n        for out_idx in 0..self.out_dim {\n            let mut sum = self.bias.get(out_idx).copied().unwrap_or(0.0);\n            for in_idx in 0..self.in_dim {\n                sum += input[in_idx] * self.weight[in_idx * self.out_dim + out_idx];\n            }\n            output[out_idx] = sum;\n        }",
+              "        let input = &input[..self.in_dim];\n        let mut output = vec![0.0; self.out_dim];\n        for (out_idx, output_value) in output.iter_mut().enumerate() {\n            let mut sum = self.bias.get(out_idx).copied().unwrap_or(0.0);\n            for (in_idx, input_value) in input.iter().enumerate() {\n                sum += input_value * self.weight[in_idx * self.out_dim + out_idx];\n            }\n            *output_value = sum;\n        }",
+          )
+          replace(".github/workflows/rust.yml", "cargo install wasm-bindgen-cli --version 0.2.127 --locked", "cargo install wasm-bindgen-cli --version 0.2.128 --locked")
+
+          # Existing test-target findings.
+          replace(
+              "rust_robotics_algo/src/control/vehicle/mod.rs",
+              "        let mut model = BicycleModel::default();\n        model.vx = 5.0;",
+              "        let mut model = BicycleModel {\n            vx: 5.0,\n            ..Default::default()\n        };",
+          )
+          for old, new in [
+              ("        let mut config = EkfSlamConfig::default();\n        config.max_range = 20.0; // Reasonable range", "        let config = EkfSlamConfig {\n            max_range: 20.0, // Reasonable range\n            ..Default::default()\n        };"),
+              ("        let mut config = EkfSlamConfig::default();\n        config.max_range = 15.0; // Limited range so we can control when landmarks are seen", "        let config = EkfSlamConfig {\n            max_range: 15.0, // Limited range so we can control when landmarks are seen\n            ..Default::default()\n        };"),
+              ("            let mut config = EkfSlamConfig::default();\n            config.max_range = 25.0;", "            let config = EkfSlamConfig {\n                max_range: 25.0,\n                ..Default::default()\n            };"),
+              ("            let mut config = EkfSlamConfig::default();\n            config.max_range = 50.0; // Large range to see many landmarks", "            let config = EkfSlamConfig {\n                max_range: 50.0, // Large range to see many landmarks\n                ..Default::default()\n            };"),
+              ("            let mut config = EkfSlamConfig::default();\n            config.max_range = 20.0;", "            let config = EkfSlamConfig {\n                max_range: 20.0,\n                ..Default::default()\n            };"),
+              ("            let mut config = EkfSlamConfig::default();\n            config.max_range = 60.0;", "            let config = EkfSlamConfig {\n                max_range: 60.0,\n                ..Default::default()\n            };"),
+              ("            let mut config = EkfSlamConfig::default();\n            config.max_range = 50.0;", "            let config = EkfSlamConfig {\n                max_range: 50.0,\n                ..Default::default()\n            };"),
+              ("        let mut config = EkfSlamConfig::default();\n        config.max_range = 15.0; // Limited range", "        let config = EkfSlamConfig {\n            max_range: 15.0, // Limited range\n            ..Default::default()\n        };"),
+          ]:
+              replace(ekf, old, new)
+          replace(ekf,
+              "                for i in 0..n_landmarks_before {\n                    if let Some(lm) = state.landmark(i) {\n                        let diff = ((lm[0] - lm_estimates_before[i][0]).powi(2)\n                            + (lm[1] - lm_estimates_before[i][1]).powi(2))\n                        .sqrt();\n                        println!(\"    Landmark {}: before=({:.2}, {:.2}), after=({:.2}, {:.2}), change={:.4}\",\n                            i, lm_estimates_before[i][0], lm_estimates_before[i][1], lm[0], lm[1], diff);\n                    }\n                }",
+              "                for (i, before) in lm_estimates_before\n                    .iter()\n                    .enumerate()\n                    .take(n_landmarks_before)\n                {\n                    if let Some(lm) = state.landmark(i) {\n                        let diff = ((lm[0] - before[0]).powi(2)\n                            + (lm[1] - before[1]).powi(2))\n                        .sqrt();\n                        println!(\"    Landmark {}: before=({:.2}, {:.2}), after=({:.2}, {:.2}), change={:.4}\",\n                            i, before[0], before[1], lm[0], lm[1], diff);\n                    }\n                }",
+          )
+          replace(ekf, "        true_pose[2] = true_pose[2] + PI;\n        dr_pose[2] = dr_pose[2] + PI;", "        true_pose[2] += PI;\n        dr_pose[2] += PI;")
+          replace(ekf,
+              "        for i in 0..state.n_landmarks.min(landmarks.len()) {\n            if let Some(est_lm) = state.landmark(i) {\n                let true_lm = &landmarks[i];",
+              "        for (i, true_lm) in landmarks\n            .iter()\n            .enumerate()\n            .take(state.n_landmarks.min(landmarks.len()))\n        {\n            if let Some(est_lm) = state.landmark(i) {",
+          )
+
+          loop_closure = "rust_robotics_algo/src/slam/loop_closure.rs"
+          replace(loop_closure, "        for lm_idx in 0..4 {\n            // Pose 0 observations\n            let lm = &landmarks[lm_idx];", "        for (lm_idx, lm) in landmarks.iter().enumerate().take(4) {\n            // Pose 0 observations")
+          replace(loop_closure,
+              "        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 1.0; // Pose 4 is ~0.36m from pose 0\n        config.min_temporal_separation = 3;\n        config.min_common_landmarks = 3;",
+              "        let config = LoopClosureConfig {\n            proximity_threshold: 1.0, // Pose 4 is ~0.36m from pose 0\n            min_temporal_separation: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };",
+          )
+          replace(loop_closure,
+              "        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 0.1;\n        config.min_temporal_separation = 3;\n        config.landmark_observation_gap = 3;\n        config.min_common_landmarks = 3;",
+              "        let config = LoopClosureConfig {\n            proximity_threshold: 0.1,\n            min_temporal_separation: 3,\n            landmark_observation_gap: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };",
+          )
+          replace(loop_closure,
+              "        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 0.1;\n        config.landmark_observation_gap = 3;\n        config.min_common_landmarks = 3;",
+              "        let config = LoopClosureConfig {\n            proximity_threshold: 0.1,\n            landmark_observation_gap: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };",
+          )
+
+          # rust_robotics_sim: macro hygiene and test import.
+          replace("rust_robotics_sim/src/item/mod.rs", "fn move_by(mut self, vector: crate::item::Vector)", "fn move_by(mut self, vector: $crate::item::Vector)")
+          replace("rust_robotics_sim/src/simulator/pendulum/tests.rs", "use rust_robotics_algo::control::StateSpace;\n", "")
+
+          # Rust 1.98 f32-fallback diagnostics from egui/egui_plot generic APIs.
+          for path in Path("rust_robotics_sim/src").rglob("*.rs"):
+              text = path.read_text()
+              text = re.sub(r'(?<![\w.])Stroke::new\((\d+(?:\.\d+)?)(?!_f32),', lambda m: f'Stroke::new({m.group(1)}_f32,', text)
+              text = re.sub(r'\.width\((\d+(?:\.\d+)?)(?!_f32)\)', lambda m: f'.width({m.group(1)}_f32)', text)
+              text = re.sub(r'\.radius\((\d+(?:\.\d+)?)(?!_f32)\)', lambda m: f'.radius({m.group(1)}_f32)', text)
+              path.write_text(text)
+
+          # Native App only needs mutability on wasm where URL state is applied.
+          app = "rust_robotics_sim/src/app.rs"
+          replace(app,
+              "        let mut theme_mode = theme::UiTheme::Dark;\n        #[cfg(target_arch = \"wasm32\")]\n        let mut embed_mode = WebEmbedMode::FullApp;\n        let mut sim = Simulator::default();",
+              "        #[cfg(target_arch = \"wasm32\")]\n        let mut theme_mode = theme::UiTheme::Dark;\n        #[cfg(not(target_arch = \"wasm32\"))]\n        let theme_mode = theme::UiTheme::Dark;\n        #[cfg(target_arch = \"wasm32\")]\n        let mut embed_mode = WebEmbedMode::FullApp;\n        #[cfg(target_arch = \"wasm32\")]\n        let mut sim = Simulator::default();\n        #[cfg(not(target_arch = \"wasm32\"))]\n        let sim = Simulator::default();",
+          )
+
+          # Browser bridge state should not be compiled as dead native code.
+          localization = "rust_robotics_sim/src/simulator/localization.rs"
+          for decl in ["pub struct LocalizationCardState", "pub struct LocalizationPatch"]:
+              cfg_item(localization, decl)
+          for name in ["status_text", "card_state", "set_drive_mode", "apply_patch"]:
+              cfg_method(localization, name)
+
+          pendulum_domain = "rust_robotics_sim/src/simulator/pendulum/domain.rs"
+          for decl in [
+              "pub(crate) struct PendulumParamsSnapshot", "pub(crate) enum ControllerParamsSnapshot",
+              "pub(crate) struct PolicyTrainerSnapshot", "pub(crate) struct PendulumCardState",
+              "pub(crate) struct PendulumPatch", "pub(crate) struct LqrPatch", "pub(crate) struct PidPatch",
+              "pub(crate) struct MpcPatch", "pub(crate) struct PolicyPatch", "pub(crate) enum PendulumTrainerAction",
+          ]:
+              cfg_item(pendulum_domain, decl)
+          for name in [
+              "clamp_beam_length", "clamp_cart_mass", "clamp_ball_mass", "clamp_weight",
+              "clamp_pid_gain", "clamp_learning_rate", "clamp_action_std", "params_snapshot",
+              "policy_trainer_snapshot", "card_state", "apply_patch",
+          ]:
+              cfg_method(pendulum_domain, name)
+          replace("rust_robotics_sim/src/simulator/pendulum/mod.rs",
+              "pub(crate) use domain::{ControllerKind, PendulumCardState, PendulumPatch};",
+              "pub(crate) use domain::ControllerKind;\n#[cfg(target_arch = \"wasm32\")]\npub(crate) use domain::{PendulumCardState, PendulumPatch};")
+
+          slam = "rust_robotics_sim/src/simulator/slam.rs"
+          for decl in ["pub(crate) struct SlamCardState", "pub(crate) struct SlamPatch"]:
+              cfg_item(slam, decl)
+          for name in ["status_text", "card_state", "set_drive_mode", "set_ekf_enabled", "set_graph_enabled", "apply_patch"]:
+              cfg_method(slam, name)
+
+          runtime = "rust_robotics_sim/src/simulator/runtime.rs"
+          replace(runtime,
+              "use super::{\n    localization::{DriveMode as LocalizationDriveMode, LocalizationCardState, LocalizationPatch},\n    path_planning::{\n        Algorithm as PathPlanningAlgorithm, EnvironmentMode as PathPlanningEnvironmentMode,\n        PathPlannerCardState, PathPlannerPatch,\n    },\n    pendulum::{ControllerKind, PendulumCardState, PendulumPatch},\n    slam::{DriveMode as SlamDriveMode, SlamCardState, SlamPatch},\n    InvertedPendulum, ParticleFilter, PathPlanning, PendulumNoiseConfig, SimMode, Simulate,\n    Simulator, SlamDemo, PENDULUM_FIXED_DT,\n};",
+              "use super::{\n    InvertedPendulum, ParticleFilter, PathPlanning, PendulumNoiseConfig, SimMode, Simulate,\n    Simulator, SlamDemo, PENDULUM_FIXED_DT,\n};\n#[cfg(target_arch = \"wasm32\")]\nuse super::{\n    localization::{DriveMode as LocalizationDriveMode, LocalizationCardState, LocalizationPatch},\n    path_planning::{\n        Algorithm as PathPlanningAlgorithm, EnvironmentMode as PathPlanningEnvironmentMode,\n        PathPlannerCardState, PathPlannerPatch,\n    },\n    pendulum::{ControllerKind, PendulumCardState, PendulumPatch},\n    slam::{DriveMode as SlamDriveMode, SlamCardState, SlamPatch},\n};",
+          )
+          for name in [
+              "pendulum_ui_state", "set_pendulum_controller_kind", "remove_pendulum", "patch_pendulum",
+              "localization_ui_state", "remove_localization_vehicle", "set_localization_drive_mode", "patch_localization_vehicle",
+              "path_planning_env_mode", "path_planning_continuous_obstacle_radius", "path_planning_ui_state",
+              "set_path_planning_env_mode", "set_path_planning_continuous_obstacle_radius", "remove_path_planner",
+              "set_path_planner_algorithm", "set_path_planner_show_visited", "patch_path_planner", "slam_ui_state",
+              "remove_slam_demo", "set_slam_drive_mode", "set_slam_ekf_enabled", "set_slam_graph_enabled", "patch_slam",
+          ]:
+              cfg_method(runtime, name)
+
+          # Data API cleanups.
+          data = "rust_robotics_sim/src/data/mod.rs"
+          replace(data, "    pub fn len(&self) -> usize {\n        self.data.len()\n    }", "    pub fn len(&self) -> usize {\n        self.data.len()\n    }\n\n    pub fn is_empty(&self) -> bool {\n        self.data.is_empty()\n    }")
+          replace(data,
+              "impl Into<Timeline> for Vec<Time> {\n    fn into(self) -> Timeline {\n        Timeline {\n            vec: self,\n            ..Default::default()\n        }\n    }\n}",
+              "impl From<Vec<Time>> for Timeline {\n    fn from(value: Vec<Time>) -> Self {\n        Self {\n            vec: value,\n            ..Default::default()\n        }\n    }\n}")
+          replace(data, ".map_or(true, |(prev, _)| (time - prev).abs() > Self::EPSILON)", ".is_none_or(|(prev, _)| (time - prev).abs() > Self::EPSILON)")
+          replace(data,
+              "            self.vec.iter().position(|&t| t >= time).map(|index| {\n                // self.cache = Some((time, index));\n                index\n            })",
+              "            self.vec.iter().position(|&t| t >= time)")
+          replace(data,
+              "            self.vec\n                .iter()\n                .position(|&t| t > time)\n                .map(|idx| (idx - 1).max(0))\n                .map(|index| {\n                    // self.cache = Some((time, index));\n                    index\n                })",
+              "            self.vec\n                .iter()\n                .position(|&t| t > time)\n                .map(|idx| idx.saturating_sub(1))")
+          replace(data,
+              "impl<T> Into<TimeTable<T>> for TimeSeries<T> {\n    fn into(self) -> TimeTable<T> {\n        TimeTable {\n            time: self.time,\n            data: vec![self.data],\n        }\n    }\n}",
+              "impl<T> From<TimeSeries<T>> for TimeTable<T> {\n    fn from(value: TimeSeries<T>) -> Self {\n        Self {\n            time: value.time,\n            data: vec![value.data],\n        }\n    }\n}")
+          replace(data, ".and_then(|vec| vec.get(idx).clone())", ".and_then(|vec| vec.get(idx))")
+          replace(data, ".zip(sample.into_iter())", ".zip(sample)")
+          replace("rust_robotics_sim/src/data/adapter.rs", "            self.into_iter()", "            self.iter()")
+
+          # Common helpers.
+          replace("rust_robotics_sim/src/simulator/common/history.rs",
+              "        if self.step_count > self.max_len {\n            self.step_count - self.max_len\n        } else {\n            0\n        }",
+              "        self.step_count.saturating_sub(self.max_len)")
+          replace("rust_robotics_sim/src/simulator/common/noise.rs", "            assert!(n >= -1.0 && n <= 1.0);", "            assert!((-1.0..=1.0).contains(&n));")
+          visualization = "rust_robotics_sim/src/simulator/common/visualization.rs"
+          replace(visualization, "pub fn draw_labeled_vehicle(", "#[allow(clippy::too_many_arguments)]\npub fn draw_labeled_vehicle(")
+          replace(visualization, "    let eigen = SymmetricEigen::new(cov.clone());", "    let eigen = SymmetricEigen::new(*cov);")
+
+          # Generated MuJoCo bindings and native runtime cleanup.
+          native = "rust_robotics_sim/src/simulator/mujoco/native.rs"
+          replace(native, "    unused_imports\n)]\nmod mujoco_bindings", "    unused_imports,\n    clippy::approx_constant\n)]\nmod mujoco_bindings")
+          replace(native,
+              "                    .map_err(|err| {\n                        self.init_error = Some(err.clone());\n                        err\n                    })?",
+              "                    .inspect_err(|err| {\n                        self.init_error = Some(err.clone());\n                    })?")
+          replace(native,
+              "        self.controller_kind.as_deref().unwrap_or_else(|| {\n            if self.onnx.meta.in_keys.len() == 1 {\n                \"open_duck_mini_walk\"\n            } else {\n                \"go2_facet\"\n            }\n        })",
+              "        self.controller_kind.as_deref().unwrap_or(if self.onnx.meta.in_keys.len() == 1 {\n            \"open_duck_mini_walk\"\n        } else {\n            \"go2_facet\"\n        })")
+          replace(native, "    Go2(Go2Controller),", "    Go2(Box<Go2Controller>),")
+          replace(native, "            NativeRobotController::Go2(Go2Controller::new(", "            NativeRobotController::Go2(Box::new(Go2Controller::new(")
+          replace(native, "                kd,\n            ))", "                kd,\n            )))", 1)
+          replace(native, "geom.rgba[idx] = (*rgba_src.add(idx) as f32).clamp(0.0, 1.0);", "geom.rgba[idx] = (*rgba_src.add(idx)).clamp(0.0, 1.0);")
+          replace(native, "buffers: &[vertex_layout.clone()],", "buffers: std::slice::from_ref(&vertex_layout),")
+          replace(native, "for tri in face_slice.chunks_exact(3) {", "for tri in face_slice.as_chunks::<3>().0 {")
+          replace(native, "let extent = (stat.extent as f64).max(0.25);", "let extent = stat.extent.max(0.25);")
+          replace("rust_robotics_sim/src/simulator/mujoco/native/sim.rs", "*qvel.get(0).unwrap_or(&0.0) as f32", "*qvel.first().unwrap_or(&0.0) as f32")
+
+          mujoco_mod = "rust_robotics_sim/src/simulator/mujoco/mod.rs"
+          replace(mujoco_mod, "pub struct MujocoPanel {", "#[derive(Default)]\npub struct MujocoPanel {")
+          text = read(mujoco_mod)
+          text, n = re.subn(r'\nimpl Default for MujocoPanel \{\n    fn default\(\) -> Self \{\n        Self \{\n            backend: Backend::default\(\),\n            #\[cfg\(target_arch = "wasm32"\)\]\n            active_requested_at: None,\n        \}\n    \}\n\}\n', '\n', text, count=1)
+          if n != 1:
+              raise SystemExit("failed to remove MujocoPanel Default impl")
+          write(mujoco_mod, text)
+
+          # Path-planning and pendulum UI/test cleanups.
+          path_planning = "rust_robotics_sim/src/simulator/path_planning.rs"
+          replace(path_planning, "planner.add_obstacle(obs.clone());", "planner.add_obstacle(*obs);")
+          replace(path_planning,
+              "            else if plot_response.response.clicked_by(PointerButton::Primary) {\n                if !self.grid.is_obstacle(gx, gy) {\n                    let world_pos = self.grid.grid_to_world(gx, gy);\n                    self.handle_left_click(world_pos);\n                }\n            }",
+              "            else if plot_response.response.clicked_by(PointerButton::Primary)\n                && !self.grid.is_obstacle(gx, gy)\n            {\n                let world_pos = self.grid.grid_to_world(gx, gy);\n                self.handle_left_click(world_pos);\n            }")
+          replace(path_planning,
+              "                    if self.state == PlanningState::ShowingResult {\n                        if ui.button(\"Re-run All\").clicked() {\n                            self.run_all_planners();\n                        }\n                    }",
+              "                    if self.state == PlanningState::ShowingResult\n                        && ui.button(\"Re-run All\").clicked()\n                    {\n                        self.run_all_planners();\n                    }")
+
+          pendulum_tests = "rust_robotics_sim/src/simulator/pendulum/tests.rs"
+          replace(pendulum_tests,
+              "    let mut sim_with_noise_api = InvertedPendulum::default();\n    sim_with_noise_api.state = initial_state;\n    let mut sim_plain = InvertedPendulum::default();\n    sim_plain.state = initial_state;",
+              "    let mut sim_with_noise_api = InvertedPendulum {\n        state: initial_state,\n        ..Default::default()\n    };\n    let mut sim_plain = InvertedPendulum {\n        state: initial_state,\n        ..Default::default()\n    };")
+          replace(pendulum_tests,
+              "    let mut sim = InvertedPendulum::default();\n    sim.state = vector![0.3, 0.0, 0.2, 0.0];\n    sim.controller = Controller::lqr(Model::default());",
+              "    let mut sim = InvertedPendulum {\n        state: vector![0.3, 0.0, 0.2, 0.0],\n        controller: Controller::lqr(Model::default()),\n        ..Default::default()\n    };")
+          replace(pendulum_tests,
+              "    let mut sim = InvertedPendulum::default();\n    sim.state = vector![0.0, 0.0, 1.0, 0.0];\n    sim.controller = Controller::policy(policy_snapshot(0.0));",
+              "    let mut sim = InvertedPendulum {\n        state: vector![0.0, 0.0, 1.0, 0.0],\n        controller: Controller::policy(policy_snapshot(0.0)),\n        ..Default::default()\n    };")
+
+          pendulum_ui = "rust_robotics_sim/src/simulator/pendulum/ui.rs"
+          replace(pendulum_ui,
+              "    /// Returns a stable display string for the current controller.\n    pub fn to_string(&self) -> String {\n        match self {\n            Self::LQR(_) => \"LQR\".to_owned(),\n            Self::PID(_) => \"PID\".to_owned(),\n            Self::MPC(_) => \"MPC\".to_owned(),\n            Self::Policy(_) => \"PPO Policy\".to_owned(),\n        }\n    }\n}",
+              "}\n\nimpl std::fmt::Display for Controller {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        f.write_str(match self {\n            Self::LQR(_) => \"LQR\",\n            Self::PID(_) => \"PID\",\n            Self::MPC(_) => \"MPC\",\n            Self::Policy(_) => \"PPO Policy\",\n        })\n    }\n}")
+
+          replace(pendulum_domain,
+              "        self.data\n            .values_shifted(signal_index, self.time_init, 0.0)\n            .map(|values| plot_ui.line(Line::new(&line_name, values)));",
+              "        if let Some(values) = self.data.values_shifted(signal_index, self.time_init, 0.0) {\n            plot_ui.line(Line::new(&line_name, values));\n        }")
+          replace(pendulum_domain,
+              "            self.data\n                .values_shifted(i, self.time_init, 0.0)\n                .map(|values| plot_ui.line(Line::new(&names[i], values)));",
+              "            if let Some(values) = self.data.values_shifted(i, self.time_init, 0.0) {\n                plot_ui.line(Line::new(&names[i], values));\n            }")
+
+          # SLAM reporting cleanups.
+          replace_all(slam, "output.push_str(\"\\n\");", "output.push('\\n');")
+          replace(slam, "output.push_str(&format!(\"\\n--- History ---\\n\"));", "output.push_str(\"\\n--- History ---\\n\");")
+          replace_all(slam, "true_lm[0] as f32", "true_lm[0]")
+          replace_all(slam, "true_lm[1] as f32", "true_lm[1]")
+          replace_all(slam, "self.x_true[0] as f32", "self.x_true[0]")
+          replace_all(slam, "self.x_true[1] as f32", "self.x_true[1]")
+          replace_all(slam, "writeln!(file, \"\")", "writeln!(file)")
+
+          # Derivable defaults.
+          simulator_mod = "rust_robotics_sim/src/simulator/mod.rs"
+          replace(simulator_mod, "struct HelpUiState {", "#[derive(Default)]\nstruct HelpUiState {")
+          text = read(simulator_mod)
+          text, n = re.subn(r'\nimpl Default for HelpUiState \{.*?\n\}\n\n/// Per-mode simulation collections', '\n/// Per-mode simulation collections', text, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit("failed to remove HelpUiState Default impl")
+          write(simulator_mod, text)
+
+      - name: Format workspace
+        run: cargo fmt --all
+
+      - name: Verify strict Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Verify legacy WASM configuration
+        run: cargo check -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features
+
+      - name: Remove repair workflow
+        run: git rm .github/workflows/repair-final.yml
+
+      - name: Verify patch
+        run: git diff --check
+
+      - name: Commit repairs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/rust.yml rust_robotics_algo rust_robotics_core rust_robotics_sim
+          git add -u .github/workflows/repair-final.yml
+          git commit -m "Fix strict Clippy findings"
+          git push origin HEAD:ci/thorough-coverage
