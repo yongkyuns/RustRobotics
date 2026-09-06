@@ -143,8 +143,9 @@ jobs:
 
       - name: Commit source repairs
         run: |
+          git checkout -- .github/workflows/rust.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/rust.yml rust_robotics_algo rust_robotics_core rust_robotics_sim
+          git add rust_robotics_algo rust_robotics_core rust_robotics_sim
           git commit -m "Fix strict Clippy findings"
           git push origin HEAD:ci/thorough-coverage
