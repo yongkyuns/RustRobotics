@@ -317,9 +317,9 @@ impl Go2Controller {
     /// `tau = kp * (q_target - q) + kd * (0 - q_dot)`
     pub fn decode_actuation(&self, raw: &RawState) -> Actuation {
         let mut torques = [0.0f32; 12];
-        for i in 0..12 {
+        for (i, torque) in torques.iter_mut().enumerate() {
             let target = self.action_scale[i] * self.last_actions[i] + self.default_jpos[i];
-            torques[i] =
+            *torque =
                 self.kp[i] * (target - raw.joint_pos[i]) + self.kd[i] * (0.0 - raw.joint_vel[i]);
         }
         Actuation::JointTorques(torques)

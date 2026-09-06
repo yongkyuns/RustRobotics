@@ -115,7 +115,7 @@ impl Simulator {
         painter.rect_stroke(
             plot_rect,
             scene_corner_radius,
-            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+            Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
             StrokeKind::Inside,
         );
 
@@ -210,7 +210,7 @@ impl Simulator {
                     pos2(screen_x, scene_rect.top()),
                     pos2(screen_x, scene_rect.bottom()),
                 ],
-                Stroke::new(1.0, grid_color),
+                Stroke::new(1.0_f32, grid_color),
             );
         }
 
@@ -225,7 +225,7 @@ impl Simulator {
                     pos2(scene_rect.left(), screen_y),
                     pos2(scene_rect.right(), screen_y),
                 ],
-                Stroke::new(1.0, grid_color),
+                Stroke::new(1.0_f32, grid_color),
             );
         }
 
@@ -236,7 +236,7 @@ impl Simulator {
                     pos2(origin_x, scene_rect.top()),
                     pos2(origin_x, scene_rect.bottom()),
                 ],
-                Stroke::new(1.5, visuals.widgets.noninteractive.fg_stroke.color),
+                Stroke::new(1.5_f32, visuals.widgets.noninteractive.fg_stroke.color),
             );
         }
 
@@ -245,7 +245,7 @@ impl Simulator {
                 pos2(scene_rect.left() + pad * 0.5, ground_y),
                 pos2(scene_rect.right() - pad * 0.5, ground_y),
             ],
-            Stroke::new(2.0, visuals.widgets.noninteractive.fg_stroke.color),
+            Stroke::new(2.0_f32, visuals.widgets.noninteractive.fg_stroke.color),
         );
 
         let tick_y0 = ground_y - 4.0;
@@ -261,7 +261,7 @@ impl Simulator {
             }
             painter.line_segment(
                 [pos2(screen_x, tick_y0), pos2(screen_x, tick_y1)],
-                Stroke::new(1.0, visuals.widgets.noninteractive.fg_stroke.color),
+                Stroke::new(1.0_f32, visuals.widgets.noninteractive.fg_stroke.color),
             );
             painter.text(
                 pos2(screen_x, label_y),
@@ -277,8 +277,8 @@ impl Simulator {
             let x = sim.x_position();
             let th = sim.rod_angle();
             let base_color = Self::pendulum_color(index);
-            let stroke = Stroke::new(2.0, visuals.widgets.noninteractive.fg_stroke.color);
-            let wheel_stroke = Stroke::new(1.5, stroke.color);
+            let stroke = Stroke::new(2.0_f32, visuals.widgets.noninteractive.fg_stroke.color);
+            let wheel_stroke = Stroke::new(1.5_f32, stroke.color);
             let fill = base_color.linear_multiply(0.05);
 
             let r_ball = 0.1 * model.m_ball;
@@ -317,7 +317,7 @@ impl Simulator {
             let rod_top_screen = to_screen(rod_top.x, rod_top.y);
             painter.line_segment(
                 [rod_bottom_screen, rod_top_screen],
-                Stroke::new(3.0, base_color),
+                Stroke::new(3.0_f32, base_color),
             );
 
             let ball_radius = (r_ball * scale).max(3.0);
@@ -374,7 +374,7 @@ impl Simulator {
             let line_mid_y = y + legend_row_height * 0.5;
             let line_start = pos2(legend_rect.left() + legend_padding.x, line_mid_y);
             let line_end = pos2(line_start.x + legend_line_width, line_mid_y);
-            painter.line_segment([line_start, line_end], Stroke::new(3.0, color));
+            painter.line_segment([line_start, line_end], Stroke::new(3.0_f32, color));
             painter.text(
                 pos2(line_end.x + 8.0, y + 1.0),
                 Align2::LEFT_TOP,

@@ -45,11 +45,12 @@ impl PID {
     }
     /// Creates a controller with caller-provided `P`, `I`, and `D` gains.
     pub fn with_gains(P: f32, I: f32, D: f32) -> Self {
-        let mut pid = Self::default();
-        pid.P = P;
-        pid.I = I;
-        pid.D = D;
-        pid
+        Self {
+            P,
+            I,
+            D,
+            ..Default::default()
+        }
     }
     /// Clears the accumulated integral and previous-error state.
     pub fn reset_state(&mut self) {

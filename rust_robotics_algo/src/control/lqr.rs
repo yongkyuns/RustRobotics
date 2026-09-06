@@ -78,8 +78,7 @@ where
     fn control(&self, x: Vector<N>, dt: f32) -> Vector<M> {
         let (Ad, Bd) = self.model(dt);
         let K = self.dlqr(Ad, Bd);
-        let u = -K * x;
-        u
+        -K * x
     }
 
     /// Computes the optimal discrete-time feedback gain `K`.

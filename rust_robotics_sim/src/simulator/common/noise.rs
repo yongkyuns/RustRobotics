@@ -29,7 +29,7 @@ mod tests {
     fn test_rand_noise_range() {
         for _ in 0..1000 {
             let n = rand_noise();
-            assert!(n >= -1.0 && n <= 1.0);
+            assert!((-1.0..=1.0).contains(&n));
         }
     }
 

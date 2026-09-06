@@ -43,6 +43,7 @@ impl DriveMode {
 
 /// Compact read-only state exposed for a localization card in the web tutorial embed.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg(target_arch = "wasm32")]
 pub struct LocalizationCardState {
     pub id: usize,
     pub drive_mode: DriveMode,
@@ -58,6 +59,7 @@ pub struct LocalizationCardState {
 
 /// Partial update payload for the subset of localization parameters curated for docs embeds.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[cfg(target_arch = "wasm32")]
 pub struct LocalizationPatch {
     pub velocity: Option<f32>,
     pub yaw_rate: Option<f32>,
@@ -239,6 +241,7 @@ impl ParticleFilter {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn status_text(&self) -> String {
         match self.config.drive_mode {
             DriveMode::Kinematic => format!(
@@ -253,6 +256,7 @@ impl ParticleFilter {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn card_state(&self) -> LocalizationCardState {
         LocalizationCardState {
             id: self.id,
@@ -268,12 +272,14 @@ impl ParticleFilter {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_drive_mode(&mut self, drive_mode: DriveMode) {
         if self.config.drive_mode != drive_mode {
             self.enter_drive_mode(drive_mode);
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn apply_patch(&mut self, patch: LocalizationPatch) {
         if let Some(velocity) = patch.velocity {
             self.config.velocity = velocity.clamp(0.0, 30.0);
@@ -506,7 +512,7 @@ impl Draw for ParticleFilter {
 
         // Draw landmarks and detection lines (hidden from legend)
         MARKERS.iter().for_each(|marker| {
-            plot_ui.points(Points::new("", marker_values()).radius(5.0));
+            plot_ui.points(Points::new("", marker_values()).radius(5.0_f32));
             if is_detected(marker, &self.x_true, self.config.max_range) {
                 plot_ui.line(
                     Line::new("", values_from_marker_state(marker, &self.x_true))

@@ -346,6 +346,7 @@ impl Default for PathPlanningSettings {
 }
 
 /// State required to drive the guided help tour and highlight overlays.
+#[derive(Default)]
 struct HelpUiState {
     visited_modes: HashSet<SimMode>,
     tutorial_enabled: Option<bool>,
@@ -357,23 +358,6 @@ struct HelpUiState {
     help_controls_rect: Option<Rect>,
     help_options_rect: Option<Rect>,
     help_scene_rect: Option<Rect>,
-}
-
-impl Default for HelpUiState {
-    fn default() -> Self {
-        Self {
-            visited_modes: HashSet::new(),
-            tutorial_enabled: None,
-            show_tutorial_prompt: false,
-            show_help_popup: false,
-            shared_help_intro_completed: false,
-            help_step_index: 0,
-            help_mode_selector_rect: None,
-            help_controls_rect: None,
-            help_options_rect: None,
-            help_scene_rect: None,
-        }
-    }
 }
 
 /// Per-mode simulation collections owned by the app coordinator.

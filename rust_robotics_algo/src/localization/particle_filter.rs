@@ -227,6 +227,7 @@ impl Default for PFNoiseParams {
 /// 4. compute a weighted state estimate
 /// 5. adaptively smooth the estimate when recovering
 /// 6. resample if the effective sample size becomes too small
+#[allow(clippy::too_many_arguments)]
 pub fn pf_localization_with_state(
     x_est: &mut Vector4,
     px: &mut PX,
@@ -269,7 +270,7 @@ pub fn pf_localization_with_state(
             let dy = x[1] - zi.y();
             let pre_z = hypot(dx, dy);
             let dz = pre_z - zi.d();
-            w = w * robust_likelihood(dz, sqrt(Q[(0, 0)]));
+            w *= robust_likelihood(dz, sqrt(Q[(0, 0)]));
         }
         px.set_column(ip, &x);
         pw[ip] = w;
@@ -360,8 +361,8 @@ pub fn re_sampling(px: &mut PX, pw: &mut PW) {
 
     let mut ind = 0;
     let mut px_new = zeros!(4, NP);
-    for ip in 0..NP {
-        while resample_id[ip] > w_cum[ind] && ind < NP - 1 {
+    for (ip, sample) in resample_id.iter().enumerate().take(NP) {
+        while *sample > w_cum[ind] && ind < NP - 1 {
             ind += 1;
         }
         px_new.set_column(ip, &px.column(ind));

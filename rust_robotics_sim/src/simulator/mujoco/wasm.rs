@@ -1666,20 +1666,20 @@ impl WasmMujocoBackend {
         painter.circle_stroke(
             projected,
             7.0,
-            Stroke::new(2.0, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(2.0_f32, Color32::from_rgb(255, 245, 245)),
         );
         painter.circle_stroke(
             projected,
             11.0,
-            Stroke::new(1.5, Color32::from_rgba_unmultiplied(220, 70, 70, 220)),
+            Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(220, 70, 70, 220)),
         );
         painter.line_segment(
             [projected + vec2(-5.0, 0.0), projected + vec2(5.0, 0.0)],
-            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 245, 245)),
         );
         painter.line_segment(
             [projected + vec2(0.0, -5.0), projected + vec2(0.0, 5.0)],
-            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 245, 245)),
         );
     }
 }

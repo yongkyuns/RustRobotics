@@ -78,11 +78,14 @@ mod native {
 
             ensure_ort_initialized(&ort_lib)?;
 
-            let mut builder = Session::builder()
-                .map_err(|err| format!("Failed to create ONNX Runtime session builder: {err}"))?
+            let builder = Session::builder()
+                .map_err(|err| format!("Failed to create ONNX Runtime session builder: {err}"))?;
+            let builder = builder
                 .with_optimization_level(GraphOptimizationLevel::Level1)
-                .and_then(|builder| builder.with_log_level(LogLevel::Fatal))
-                .map_err(|err| format!("Failed to configure ONNX Runtime session: {err}"))?;
+                .map_err(|err| format!("Failed to configure ONNX Runtime optimization: {err}"))?;
+            let mut builder = builder
+                .with_log_level(LogLevel::Fatal)
+                .map_err(|err| format!("Failed to configure ONNX Runtime logging: {err}"))?;
             let session = builder
                 .commit_from_file(path)
                 .map_err(|err| format!("Failed to load ONNX model {}: {err}", path.display()))?;

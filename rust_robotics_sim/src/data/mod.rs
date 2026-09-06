@@ -51,6 +51,10 @@ impl<T> ColumnData<T> {
         self.data.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     pub fn pop_first(&mut self) {
         self.data.remove(0);
     }
@@ -81,10 +85,10 @@ struct Timeline {
     vec: Vec<Time>,
 }
 
-impl Into<Timeline> for Vec<Time> {
-    fn into(self) -> Timeline {
-        Timeline {
-            vec: self,
+impl From<Vec<Time>> for Timeline {
+    fn from(value: Vec<Time>) -> Self {
+        Self {
+            vec: value,
             ..Default::default()
         }
     }
@@ -127,7 +131,7 @@ impl Timeline {
     /// [`get_index`]: Self::get_index
     fn time_changed(&self, time: Time) -> bool {
         self.cache
-            .map_or(true, |(prev, _)| (time - prev).abs() > Self::EPSILON)
+            .is_none_or(|(prev, _)| (time - prev).abs() > Self::EPSILON)
     }
 
     /// Find the index that corresponds to the given time in seconds.
@@ -135,10 +139,7 @@ impl Timeline {
     /// Returns index of first time that is greater or equal to the specified time.
     fn get_index(&self, time: Time) -> Option<usize> {
         if self.time_changed(time) {
-            self.vec.iter().position(|&t| t >= time).map(|index| {
-                // self.cache = Some((time, index));
-                index
-            })
+            self.vec.iter().position(|&t| t >= time)
         } else {
             // unwrap here is ok, since time_changed always ensures cache is not None
             Some(self.cache.unwrap().1)
@@ -156,11 +157,7 @@ impl Timeline {
             self.vec
                 .iter()
                 .position(|&t| t > time)
-                .map(|idx| (idx - 1).max(0))
-                .map(|index| {
-                    // self.cache = Some((time, index));
-                    index
-                })
+                .map(|idx| idx.saturating_sub(1))
         } else {
             // unwrap here is ok, since time_changed always ensures cache is not None
             Some(self.cache.unwrap().1)
@@ -196,11 +193,11 @@ pub struct TimeTable<T = f32> {
     data: Vec<ColumnData<T>>,
 }
 
-impl<T> Into<TimeTable<T>> for TimeSeries<T> {
-    fn into(self) -> TimeTable<T> {
-        TimeTable {
-            time: self.time,
-            data: vec![self.data],
+impl<T> From<TimeSeries<T>> for TimeTable<T> {
+    fn from(value: TimeSeries<T>) -> Self {
+        Self {
+            time: value.time,
+            data: vec![value.data],
         }
     }
 }
@@ -248,7 +245,7 @@ impl<T: Clone> TimeTable<T> {
         if let Some(idx) = self.time.get_index(time) {
             self.data
                 .get(column)
-                .and_then(|vec| vec.get(idx).clone())
+                .and_then(|vec| vec.get(idx))
                 .map(|el| el.to_owned())
         } else {
             None
@@ -290,7 +287,7 @@ impl<T: Clone> TimeTable<T> {
         self.time.add(time);
         self.data
             .iter_mut()
-            .zip(sample.into_iter())
+            .zip(sample)
             .for_each(|(vec, el)| vec.add(el));
 
         if self.nrow() > LIMIT {

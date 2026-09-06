@@ -50,7 +50,8 @@ use sim::MujocoSim;
     non_snake_case,
     non_upper_case_globals,
     dead_code,
-    unused_imports
+    unused_imports,
+    clippy::approx_constant
 )]
 mod mujoco_bindings {
     include!(concat!(env!("OUT_DIR"), "/mujoco_bindings.rs"));
@@ -361,9 +362,8 @@ impl NativeMujocoBackend {
             self.status = "MuJoCo runtime loading...".to_string();
             self.runtime = Some(
                 MujocoRuntime::load(Path::new(&self.scene_path), Path::new(&self.policy_path))
-                    .map_err(|err| {
+                    .inspect_err(|err| {
                         self.init_error = Some(err.clone());
-                        err
                     })?,
             );
             debug_log("ensure_runtime: runtime constructed");
@@ -419,13 +419,13 @@ struct PolicyCommandConfig {
 #[cfg(not(target_arch = "wasm32"))]
 impl PolicyFile {
     fn controller_kind(&self) -> &str {
-        self.controller_kind.as_deref().unwrap_or_else(|| {
-            if self.onnx.meta.in_keys.len() == 1 {
+        self.controller_kind
+            .as_deref()
+            .unwrap_or(if self.onnx.meta.in_keys.len() == 1 {
                 "open_duck_mini_walk"
             } else {
                 "go2_facet"
-            }
-        })
+            })
     }
 
     fn phase_steps(&self) -> usize {
@@ -524,7 +524,7 @@ struct MujocoRuntime {
 
 #[cfg(not(target_arch = "wasm32"))]
 enum NativeRobotController {
-    Go2(Go2Controller),
+    Go2(Box<Go2Controller>),
     Duck(DuckController),
 }
 
@@ -658,13 +658,13 @@ impl MujocoRuntime {
             let action_scale = [policy_file.action_scale; 12];
             let kp = [policy_file.stiffness; 12];
             let kd = [policy_file.damping; 12];
-            NativeRobotController::Go2(Go2Controller::new(
+            NativeRobotController::Go2(Box::new(Go2Controller::new(
                 policy_file.command_mode(),
                 default_jpos,
                 action_scale,
                 kp,
                 kd,
-            ))
+            )))
         };
 
         let policy_started = Instant::now();
@@ -883,7 +883,7 @@ impl MujocoRuntime {
                 painter.circle_stroke(
                     setpoint_pos,
                     radius,
-                    Stroke::new(1.5, Color32::from_rgb(255, 220, 220)),
+                    Stroke::new(1.5_f32, Color32::from_rgb(255, 220, 220)),
                 );
             }
         }
@@ -908,20 +908,20 @@ impl MujocoRuntime {
         painter.circle_stroke(
             projected,
             7.0,
-            Stroke::new(2.0, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(2.0_f32, Color32::from_rgb(255, 245, 245)),
         );
         painter.circle_stroke(
             projected,
             11.0,
-            Stroke::new(1.5, Color32::from_rgba_unmultiplied(220, 70, 70, 220)),
+            Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(220, 70, 70, 220)),
         );
         painter.line_segment(
             [projected + vec2(-5.0, 0.0), projected + vec2(5.0, 0.0)],
-            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 245, 245)),
         );
         painter.line_segment(
             [projected + vec2(0.0, -5.0), projected + vec2(0.0, 5.0)],
-            Stroke::new(1.5, Color32::from_rgb(255, 245, 245)),
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 245, 245)),
         );
     }
 
@@ -1041,7 +1041,7 @@ impl MujocoRuntime {
 
     fn draw_ground(&self, painter: &Painter, rect: Rect, camera: Option<&SoftwareCamera>) {
         if let Some(camera) = camera {
-            let stroke = Stroke::new(1.0, Color32::from_gray(40));
+            let stroke = Stroke::new(1.0_f32, Color32::from_gray(40));
             for i in -10..=10 {
                 let offset = i as f32 * 0.25;
                 let a = camera.project(rect, [-2.5, offset, 0.0]);
@@ -1058,7 +1058,7 @@ impl MujocoRuntime {
             return;
         }
 
-        let stroke = Stroke::new(1.0, Color32::from_gray(45));
+        let stroke = Stroke::new(1.0_f32, Color32::from_gray(45));
         let center = rect.center();
         let spacing = 28.0;
         for i in -8..=8 {
@@ -1172,7 +1172,7 @@ impl MujocoRuntime {
                     painter.add(Shape::convex_polygon(
                         hull,
                         shaded_color.gamma_multiply(0.75),
-                        Stroke::new(1.0, shaded_color),
+                        Stroke::new(1.0_f32, shaded_color),
                     ));
                 } else {
                     painter.circle_filled(
@@ -1343,7 +1343,7 @@ impl MujocoRuntime {
                 (*model).geom_rgba.add(geom_id * 4)
             };
             for idx in 0..4 {
-                geom.rgba[idx] = (*rgba_src.add(idx) as f32).clamp(0.0, 1.0);
+                geom.rgba[idx] = (*rgba_src.add(idx)).clamp(0.0, 1.0);
             }
             if geom.rgba[3] <= 0.01 {
                 return None;
@@ -1776,7 +1776,7 @@ impl WgpuSceneRenderer {
             vertex: wgpu::VertexState {
                 module: &scene_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[vertex_layout.clone()],
+                buffers: std::slice::from_ref(&vertex_layout),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             primitive: wgpu::PrimitiveState {
@@ -2165,7 +2165,7 @@ fn collect_mesh_assets(model: *const mjModel) -> BTreeMap<usize, MeshAssetCpu> {
             let mut vertices = Vec::with_capacity(facenum * 3);
             let mut local_min = [f32::INFINITY; 3];
             let mut local_max = [f32::NEG_INFINITY; 3];
-            for tri in face_slice.chunks_exact(3) {
+            for tri in face_slice.as_chunks::<3>().0 {
                 for &i in tri {
                     let idx = i as usize;
                     if idx >= vertnum {
@@ -2239,7 +2239,7 @@ fn fit_camera_to_model_stat(model: *const mjModel, cam: &mut mjvCamera) {
         cam.lookat[1] = stat.center[1];
         cam.lookat[2] = stat.center[2];
 
-        let extent = (stat.extent as f64).max(0.25);
+        let extent = stat.extent.max(0.25);
         cam.distance = (extent * 2.8).max(1.25);
 
         if cam.elevation.abs() < 1.0 {

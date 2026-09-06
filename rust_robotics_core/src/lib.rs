@@ -45,13 +45,14 @@ impl LinearSnapshot {
     /// This keeps runtime inference possible in plain Rust and in wasm without
     /// recreating the original training framework module.
     pub fn forward(&self, input: &[f32]) -> Vec<f32> {
+        let input = &input[..self.in_dim];
         let mut output = vec![0.0; self.out_dim];
-        for out_idx in 0..self.out_dim {
+        for (out_idx, output_value) in output.iter_mut().enumerate() {
             let mut sum = self.bias.get(out_idx).copied().unwrap_or(0.0);
-            for in_idx in 0..self.in_dim {
-                sum += input[in_idx] * self.weight[in_idx * self.out_dim + out_idx];
+            for (in_idx, input_value) in input.iter().enumerate() {
+                sum += input_value * self.weight[in_idx * self.out_dim + out_idx];
             }
-            output[out_idx] = sum;
+            *output_value = sum;
         }
         output
     }

@@ -120,7 +120,7 @@ fn build_visuals(theme: UiTheme) -> Visuals {
     visuals.hyperlink_color = Color32::from_rgb(120, 188, 255);
     visuals.selection.bg_fill = accent;
     visuals.selection.stroke = Stroke::new(
-        1.0,
+        1.0_f32,
         match theme {
             UiTheme::Dark => Color32::from_rgb(255, 221, 209),
             UiTheme::Light => Color32::from_rgb(117, 61, 39),
@@ -129,30 +129,30 @@ fn build_visuals(theme: UiTheme) -> Visuals {
 
     visuals.window_corner_radius = CornerRadius::same(16);
     visuals.menu_corner_radius = CornerRadius::same(12);
-    visuals.window_stroke = Stroke::new(1.0, border);
+    visuals.window_stroke = Stroke::new(1.0_f32, border);
     visuals.widgets.noninteractive.bg_fill = panel_alt;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text_muted);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, border);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, text_muted);
 
     visuals.widgets.inactive.bg_fill = panel_strong;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, border);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, text);
 
     visuals.widgets.hovered.bg_fill = match theme {
         UiTheme::Dark => Color32::from_rgb(42, 50, 64),
         UiTheme::Light => Color32::from_rgb(235, 226, 216),
     };
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, accent);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, text);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, text);
     visuals.widgets.hovered.expansion = 0.0;
 
     visuals.widgets.active.bg_fill = accent;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, accent);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, accent);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
 
     visuals.widgets.open.bg_fill = panel_strong;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, accent_soft);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, text);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, accent_soft);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, text);
 
     visuals
 }

@@ -15,4 +15,5 @@ mod training;
 mod ui;
 
 pub use domain::{Controller, InvertedPendulum, NoiseConfig, State, PENDULUM_FIXED_DT};
+#[cfg(target_arch = "wasm32")]
 pub(crate) use domain::{ControllerKind, PendulumCardState, PendulumPatch};

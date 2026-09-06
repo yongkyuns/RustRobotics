@@ -72,6 +72,7 @@ pub fn draw_trajectory<'a, T: HasPosition + 'a>(
 /// * `steering` - Front wheel steering angle in radians
 /// * `params` - Vehicle visualization parameters
 /// * `vehicle_name` - Name for the vehicle in legend
+#[allow(clippy::too_many_arguments)]
 pub fn draw_labeled_vehicle(
     plot_ui: &mut PlotUi<'_>,
     pose: &rust_robotics_algo::Vector3,
@@ -139,7 +140,7 @@ pub fn covariance_ellipse_points(
     n_sigma: f32,
 ) -> Vec<[f64; 2]> {
     // Eigendecomposition of covariance matrix
-    let eigen = SymmetricEigen::new(cov.clone());
+    let eigen = SymmetricEigen::new(*cov);
     let eigenvalues = eigen.eigenvalues;
     let eigenvectors = eigen.eigenvectors;
 
@@ -185,7 +186,7 @@ pub fn draw_covariance_ellipse(
     let ellipse = covariance_ellipse_points(cx, cy, cov, n_sigma);
     plot_ui.polygon(
         Polygon::new("", PlotPoints::new(ellipse))
-            .stroke(egui::Stroke::new(1.5, color.gamma_multiply(0.7)))
+            .stroke(egui::Stroke::new(1.5_f32, color.gamma_multiply(0.7)))
             .fill_color(color.gamma_multiply(0.15)),
     );
 }

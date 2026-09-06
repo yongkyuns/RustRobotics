@@ -38,7 +38,7 @@ pub trait VehiclePlot {
 impl VehiclePlot for Vec<rb::Vector4> {
     fn positions(&self) -> PlotPoints<'static> {
         PlotPoints::new(
-            self.into_iter()
+            self.iter()
                 .map(|&state| [*state.get(0).unwrap() as f64, *state.get(1).unwrap() as f64])
                 .collect(),
         )
