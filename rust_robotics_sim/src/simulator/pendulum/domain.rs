@@ -307,6 +307,12 @@ pub(crate) struct LqrRuntimeCache {
     prepared: rb::control::lqr::PreparedLqr<4, 1>,
 }
 
+pub(crate) struct MpcRuntimeCache {
+    model: Model,
+    dt: f32,
+    prepared: PreparedMpc,
+}
+
 fn mpc_stage_cost_model(mut model: Model) -> Model {
     model.Q[0] = 1.0;
     model.Q[5] = 1.0;
@@ -480,6 +486,9 @@ pub struct InvertedPendulum {
     pub(crate) training_updates_per_tick: usize,
     pub(crate) parallel_trainers: usize,
     pub(crate) lqr_cache: Option<LqrRuntimeCache>,
+    pub(crate) mpc_cache: Option<MpcRuntimeCache>,
+    #[cfg(test)]
+    pub(crate) mpc_preparations: usize,
     pub(crate) last_control_error: Option<String>,
 }
 
@@ -511,6 +520,9 @@ impl Default for InvertedPendulum {
             training_updates_per_tick: 1,
             parallel_trainers: 1,
             lqr_cache: None,
+            mpc_cache: None,
+            #[cfg(test)]
+            mpc_preparations: 0,
             last_control_error: None,
         }
     }
@@ -809,6 +821,7 @@ impl InvertedPendulum {
 
         let control_command = match &mut self.controller {
             Controller::LQR(model) => {
+                self.mpc_cache = None;
                 let needs_prepare = self.lqr_cache.as_ref().is_none_or(|cache| {
                     cache.model != *model || cache.dt.to_bits() != dt.to_bits()
                 });
@@ -828,12 +841,33 @@ impl InvertedPendulum {
             }
             Controller::PID(pid) => {
                 self.lqr_cache = None;
+                self.mpc_cache = None;
                 self.last_control_error = None;
                 pid.control(-measured_state[2], dt)
             }
             Controller::MPC(model) => {
                 self.lqr_cache = None;
-                match try_mpc_control(measured_state, *model, dt) {
+                let needs_prepare = self.mpc_cache.as_ref().is_none_or(|cache| {
+                    cache.model != *model || cache.dt.to_bits() != dt.to_bits()
+                });
+                if needs_prepare {
+                    self.mpc_cache = Some(MpcRuntimeCache {
+                        model: *model,
+                        dt,
+                        prepared: PreparedMpc::new(*model, dt),
+                    });
+                    #[cfg(test)]
+                    {
+                        self.mpc_preparations += 1;
+                    }
+                }
+                match self
+                    .mpc_cache
+                    .as_ref()
+                    .expect("MPC cache is prepared above")
+                    .prepared
+                    .try_control(measured_state)
+                {
                     Ok(control) => {
                         self.last_control_error = None;
                         control
@@ -846,6 +880,7 @@ impl InvertedPendulum {
             }
             Controller::Policy(policy) => {
                 self.lqr_cache = None;
+                self.mpc_cache = None;
                 self.last_control_error = None;
                 policy.act([
                     measured_state[0],
@@ -894,6 +929,13 @@ impl InvertedPendulum {
             .is_some_and(|cache| cache.model == model && cache.dt.to_bits() == dt.to_bits())
     }
 
+    #[cfg(test)]
+    pub(crate) fn mpc_cache_matches(&self, model: Model, dt: f32) -> bool {
+        self.mpc_cache
+            .as_ref()
+            .is_some_and(|cache| cache.model == model && cache.dt.to_bits() == dt.to_bits())
+    }
+
     pub fn last_control_error(&self) -> Option<&str> {
         self.last_control_error.as_deref()
     }
@@ -927,6 +969,7 @@ impl Simulate for InvertedPendulum {
         self.visual_episode_steps = 0;
         self.controller.reset_state();
         self.lqr_cache = None;
+        self.mpc_cache = None;
         self.last_control_error = None;
         self.data.clear();
     }
