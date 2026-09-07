@@ -1,0 +1,28 @@
+name: Numerical invariants
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+
+permissions:
+  contents: read
+
+jobs:
+  numerical-invariants:
+    name: Robotics numerical invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust_robotics_algo
+
+      - name: Run numerical invariant tests
+        run: cargo test -p rust_robotics_algo --test numerical_invariants --verbose
