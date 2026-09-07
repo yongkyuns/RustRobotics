@@ -15,7 +15,11 @@ fn path_cost(path: &[(f32, f32)]) -> f32 {
         .sum()
 }
 
-fn assert_astar_matches_dijkstra(grid: &Grid, start_cell: (usize, usize), goal_cell: (usize, usize)) {
+fn assert_astar_matches_dijkstra(
+    grid: &Grid,
+    start_cell: (usize, usize),
+    goal_cell: (usize, usize),
+) {
     let start = grid.grid_to_world(start_cell.0, start_cell.1);
     let goal = grid.grid_to_world(goal_cell.0, goal_cell.1);
 
@@ -230,7 +234,8 @@ fn dense_and_sparse_graph_slam_are_numerically_equivalent() {
     }
 
     assert_eq!(dense.landmarks.len(), sparse.landmarks.len());
-    for (index, (dense_lm, sparse_lm)) in dense.landmarks.iter().zip(&sparse.landmarks).enumerate() {
+    for (index, (dense_lm, sparse_lm)) in dense.landmarks.iter().zip(&sparse.landmarks).enumerate()
+    {
         assert!(
             (dense_lm.x - sparse_lm.x).abs() <= 5e-3,
             "landmark {index} x differs: {} vs {}",
@@ -246,7 +251,10 @@ fn dense_and_sparse_graph_slam_are_numerically_equivalent() {
     }
 }
 
-fn ekf_observations(pose: &Vector3<f32>, landmarks: &[Vector2<f32>]) -> Vec<(usize, EkfObservation)> {
+fn ekf_observations(
+    pose: &Vector3<f32>,
+    landmarks: &[Vector2<f32>],
+) -> Vec<(usize, EkfObservation)> {
     landmarks
         .iter()
         .enumerate()
@@ -267,7 +275,9 @@ fn ekf_observations(pose: &Vector3<f32>, landmarks: &[Vector2<f32>]) -> Vec<(usi
 fn assert_covariance_symmetric_psd(sigma: &DMatrix<f32>, context: &str) {
     assert_eq!(sigma.nrows(), sigma.ncols());
 
-    let scale = sigma.iter().fold(1.0_f32, |acc, value| acc.max(value.abs()));
+    let scale = sigma
+        .iter()
+        .fold(1.0_f32, |acc, value| acc.max(value.abs()));
     let symmetry_tolerance = 1e-5 * scale;
     let mut max_asymmetry = 0.0_f32;
     for row in 0..sigma.nrows() {
@@ -284,10 +294,7 @@ fn assert_covariance_symmetric_psd(sigma: &DMatrix<f32>, context: &str) {
     // the already-checked roundoff tolerance before inspecting eigenvalues.
     let symmetric = (sigma + sigma.transpose()) * 0.5;
     let eigenvalues = SymmetricEigen::new(symmetric).eigenvalues;
-    let min_eigenvalue = eigenvalues
-        .iter()
-        .copied()
-        .fold(f32::INFINITY, f32::min);
+    let min_eigenvalue = eigenvalues.iter().copied().fold(f32::INFINITY, f32::min);
     let psd_tolerance = 1e-5 * scale;
     assert!(
         min_eigenvalue >= -psd_tolerance,
