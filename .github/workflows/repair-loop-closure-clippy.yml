@@ -18,17 +18,53 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply strict Clippy fixes
+      - name: Apply explicit strict-Clippy fixes
         run: |
-          cargo clippy -p rust_robotics_algo --all-targets --fix --allow-dirty --allow-staged -- -D warnings
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("rust_robotics_algo/src/slam/loop_closure.rs")
+          source = path.read_text()
+
+          replacements = [
+              (
+                  """        for candidate_idx in 0..=max_candidate_idx.min(poses.len().saturating_sub(1)) {\n            let candidate_pose = &poses[candidate_idx];\n""",
+                  """        let candidate_count = max_candidate_idx.min(poses.len().saturating_sub(1)) + 1;\n        for (candidate_idx, candidate_pose) in poses.iter().enumerate().take(candidate_count) {\n""",
+              ),
+              (
+                  """        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 1.0;\n        config.min_temporal_separation = 3;\n        config.landmark_observation_gap = 3;\n        config.min_common_landmarks = 3;\n""",
+                  """        let config = LoopClosureConfig {\n            proximity_threshold: 1.0,\n            min_temporal_separation: 3,\n            landmark_observation_gap: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };\n""",
+              ),
+              (
+                  """        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 0.1;\n        config.min_temporal_separation = 3;\n        config.landmark_observation_gap = 3;\n        config.min_common_landmarks = 3;\n""",
+                  """        let config = LoopClosureConfig {\n            proximity_threshold: 0.1,\n            min_temporal_separation: 3,\n            landmark_observation_gap: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };\n""",
+              ),
+              (
+                  """        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 0.1;\n        config.landmark_observation_gap = 3;\n        config.min_common_landmarks = 3;\n""",
+                  """        let config = LoopClosureConfig {\n            proximity_threshold: 0.1,\n            landmark_observation_gap: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };\n""",
+              ),
+              (
+                  """        let mut config = LoopClosureConfig::default();\n        config.proximity_threshold = 20.0;\n        config.min_temporal_separation = 3;\n        config.landmark_observation_gap = 3;\n        config.min_common_landmarks = 3;\n""",
+                  """        let config = LoopClosureConfig {\n            proximity_threshold: 20.0,\n            min_temporal_separation: 3,\n            landmark_observation_gap: 3,\n            min_common_landmarks: 3,\n            ..Default::default()\n        };\n""",
+              ),
+              (
+                  """        let mut config = LoopClosureConfig::default();\n        config.chi2_confidence = 0.99;\n""",
+                  """        let config = LoopClosureConfig {\n            chi2_confidence: 0.99,\n            ..Default::default()\n        };\n""",
+              ),
+          ]
+
+          for old, new in replacements:
+              if old not in source:
+                  raise SystemExit(f"expected source block not found: {old!r}")
+              source = source.replace(old, new, 1)
+
+          path.write_text(source)
+          PY
           cargo fmt --all
-          cargo test -p rust_robotics_algo
+          cargo clippy -p rust_robotics_algo --all-targets -- -D warnings
+          cargo test -p rust_robotics_algo slam::loop_closure
       - name: Commit repair
         run: |
-          if git diff --quiet; then
-            echo "No source change needed"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add rust_robotics_algo/src/slam/loop_closure.rs
