@@ -34,15 +34,6 @@ pub mod prelude {
         AStarPlanner, AStarResult, CircleObstacle, DijkstraPlanner, DijkstraResult, Grid,
         RrtConfig, RrtNode, RrtPlanner, RrtResult,
     };
-
-    // #[cfg(not(feature = "libm"))]
-    // pub mod std {
-    //     extern crate std;
-    //     pub use std::{println, vec::Vec};
-    // }
 }
-
-#[cfg(feature = "numpy")]
-pub use nalgebra_numpy::matrix_from_numpy;
 
 pub use prelude::*;
