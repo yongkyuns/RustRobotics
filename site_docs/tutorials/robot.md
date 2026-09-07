@@ -1,18 +1,15 @@
-# Robot Tutorial
+# Robot Runtime Tutorial
 
-The robot tutorial is where the ideas from the earlier chapters stop looking
-like isolated textbook problems and start looking like a real control loop. The
-robot simulator is still educational rather than production-grade, but it makes
-one important transition visible:
-
-how do algorithms become a runtime?
+The earlier chapters isolate one algorithm at a time. A robot runtime has to connect state,
+observations, policy/controller execution, action decoding, and physics while respecting timing and
+interface contracts. This chapter uses the Go2 path as the main concrete example.
 
 ```{raw} html
 <div class="sim-embed-card">
   <iframe
     class="sim-embed-frame"
     data-sim-mode="robot"
-    data-sim-path="?mode=robot&embed=focused&ui=20260416g"
+    data-sim-path="?mode=robot&embed=focused&ui=20260907a"
     title="Rust Robotics robot runtime simulator"
     loading="lazy"
   ></iframe>
@@ -21,194 +18,205 @@ how do algorithms become a runtime?
 
 ## Learning goals
 
-This chapter is built to answer questions such as:
+By the end of this chapter, you should be able to:
 
-- what changes when control moves from a toy system to a legged robot simulator?
-- how do observations, policies, commands, and actuation fit together?
-- why do latency, memory, and compute matter more in a richer runtime?
-- what does portability mean in practice for robot control software?
+- describe the runtime path from raw robot state to joint torques
+- explain why policy observation ordering is part of the model contract
+- identify recurrent/history state that must survive between control steps
+- distinguish normalized policy actions from actuator commands
+- explain where latency, jitter, and model-loading failures enter the loop
+- understand which parts of the current robot stack belong in reusable algorithm code versus runtime/inference adapters
 
-## Where this matters in practice
+## The concrete Go2 control path
 
-Robot runtimes like this are relevant whenever an algorithm must actually live
-inside a control loop rather than on paper:
-
-- legged locomotion
-- mobile robot command following
-- simulation-to-deployment experiments
-- browser-accessible demonstrations for education and testing
-- native interactive tools used for debugging behavior
-
-## The runtime loop
-
-At a high level, the robot runtime follows a standard perception-to-action loop:
-
-1. the simulator advances the world and produces raw robot state
-2. that state is converted into an observation vector
-3. a controller or policy consumes the observation
-4. the output is decoded into actuation
-5. the world steps again under the new actuation
-
-Conceptually:
+The reusable Go2 controller follows this sequence:
 
 $$
-\text{state} \rightarrow \text{observation} \rightarrow \text{policy} \rightarrow \text{action} \rightarrow \text{next state}
+\text{raw state}
+\rightarrow \text{history update}
+\rightarrow \text{observation + command features}
+\rightarrow \text{policy inference}
+\rightarrow \text{action smoothing}
+\rightarrow \text{PD torque decoding}.
 $$
 
-This loop sounds simple, but every stage creates design questions.
+That is more precise than saying "the policy controls the robot." The policy is one component in a
+stateful control pipeline.
 
-## Why this loop is more demanding than the pendulum
+## Observation contract
 
-Compared with the pendulum tutorial, the robot runtime has:
+The Go2 policy observation is a dense vector of **117 values** built from three samples of:
 
-- much larger observation spaces
-- more actuators
-- more complicated contact dynamics
-- stronger dependence on timing and stability
-- more opportunities for mismatch between simulation and future deployment
+- body-frame gravity: `3 x 3 = 9`
+- 12 joint positions: `3 x 12 = 36`
+- 12 joint velocities: `3 x 12 = 36`
+- previous actions: `3 x 12 = 36`
 
-That makes it the right place to discuss not only does the algorithm work, but also:
+Total:
 
-- how much state must be carried?
-- how much memory does inference require?
-- how much latency is acceptable?
-- how portable is the implementation between native and web environments?
+$$
+9 + 36 + 36 + 36 = 117.
+$$
 
-## Observations and actions
+The controller also carries a recurrent hidden-state buffer of **128 values**. Resetting the robot
+controller therefore means more than zeroing a command: history buffers, previous actions, recurrent
+state, and initialization state must all be reset coherently.
 
-The observation vector is the compression of the world into what the controller
-is allowed to see. Good observation design matters because:
+```{admonition} Observation order is an ABI for the policy
+:class: note-shell
 
-- too little information makes control impossible or brittle
-- too much information increases model size and training burden
-- the wrong representation can make transfer or generalization harder
+A neural policy does not know the semantic names of its inputs. If joint order, history order,
+coordinate frame, scaling, or command layout changes while the model stays the same, inference can
+still run and produce completely wrong behavior. Golden tests for these layouts are therefore
+correctness tests, not cosmetic unit tests.
+```
 
-Similarly, the action representation matters because the controller may not
-output torques directly. It may output:
+## Command features
 
-- desired joint targets
-- normalized action values
-- velocity-like commands
-- gait or command abstractions that are decoded further downstream
+The Go2 controller currently supports two high-level command styles.
 
-This separation is one of the central practical lessons of robot control: the
-policy output is rarely the final actuator command in the most naive sense.
+**Velocity mode** rotates commanded planar velocity into the robot body frame, includes yaw/yaw-rate
+features, and appends oscillator features used by the locomotion policy.
 
-## Portability as a design goal
+**Impedance-style mode** converts a world-space target into the body frame, bounds the local target
+radius, and builds a richer target feature vector.
 
-One of the main ideas behind Rust Robotics is that the same control logic should
-not be trapped in one runtime.
+The key engineering point is that world commands should not be passed directly to a policy whose
+training contract expects robot-centric features.
 
-In practical terms, portability means:
+## Policy output is not torque
 
-- the same control semantics can appear in the browser and native application
-- the same algorithmic core does not need to be rewritten for each UI host
-- simulation can be used as a public teaching surface without forcing a separate
-  implementation stack
+The policy produces at least 12 action values plus recurrent output. The controller low-pass filters
+new actions with the previous action:
 
-This is not only a software engineering preference. It is educationally useful:
-if a reader can study the same runtime loop in multiple accessible environments,
-the barrier to experimentation is lower.
+$$
+a_{used} = 0.2\,a_{prev} + 0.8\,a_{new}.
+$$
 
-## Comparison to the earlier tutorials
+Each used action becomes a joint-position offset around a nominal posture. The final torque is then
+computed by a PD law
 
-The earlier tutorials isolate one main problem at a time:
+$$
+\tau_i = k_{p,i}(q_{target,i}-q_i) + k_{d,i}(0-\dot q_i).
+$$
 
-- control
-- localization
-- planning
-- SLAM
+This separation matters when debugging. If the robot moves badly, the cause can be observation
+construction, policy inference, action smoothing/scaling, nominal joint targets, gains, state
+ordering, or the physics model. Looking only at the neural-network output hides most of the runtime.
 
-The robot runtime combines several ideas at once. That is why it is a useful
-final chapter: it shows what changes when algorithms become part of a system
-with state, timing, and interface constraints.
+## Experiment 1: trace one command through the stack
 
-## Performance, memory, and runtime concerns
+**Question:** What actually changes when you change a high-level command?
 
-Robot control is where practical systems issues become unavoidable.
+1. Select the Go2 robot.
+2. Start from a reset state and use a small velocity command.
+3. Identify the requested world/body motion in the UI.
+4. Observe the resulting locomotion.
+5. Increase one command component at a time rather than changing several simultaneously.
 
-### Compute
+While watching the robot, mentally trace:
 
-A control loop must finish within its time budget. If policy inference, state
-construction, or decoding becomes too slow, the controller may destabilize or
-behave inconsistently.
+`command -> body-frame command features -> policy -> smoothed action -> target joints -> torque`.
 
-### Memory
+**What this teaches:** a high-level command is transformed several times before it reaches the
+simulated actuator.
 
-Model parameters, temporary buffers, recurrent state, and simulator state all
-consume memory. On the web, this is especially relevant because the environment
-is more constrained and more visible to end users.
+## Experiment 2: stateful inference and reset behavior
 
-### Latency
+**Question:** Why must reset clear more than the physics pose?
 
-Even when average performance looks fine, jitter matters. A control policy that
-sometimes stalls is different from one that runs consistently.
+The Go2 path keeps three-step histories and a 128-value recurrent state. A robust reset should clear
+those controller states consistently with the simulated robot reset.
 
-These concerns are part of the algorithm story, not separate from it. A method
-that is elegant mathematically but too expensive for the intended runtime is not
-actually a good solution.
+1. Run the robot long enough for histories/recurrent state to become nontrivial.
+2. Reset the demo.
+3. Apply the same small command again.
+4. Watch for any obvious transient that suggests stale controller state survived reset.
 
-## Practical comparison questions
+This is also a good automated regression: reset should restore deterministic controller state even
+when the subsequent physics trajectory is not bit-for-bit identical across platforms.
 
-When looking at a robot runtime, a professional reader usually cares about
-questions like these:
+## Experiment 3: action smoothing versus responsiveness
 
-- how large is the observation and action representation?
-- how expensive is inference?
-- how much state must be carried between steps?
-- what happens if timing slips?
-- how portable is the controller between runtime hosts?
+**Question:** What does smoothing buy, and what does it cost?
 
-Those are algorithm questions as much as runtime questions.
+The current controller blends 20% previous action with 80% new action. That is light smoothing, but
+it still changes the temporal response.
 
-## What to look at
+1. Apply a steady command and observe normal motion.
+2. Change command direction abruptly.
+3. Watch how quickly the robot changes behavior.
+4. Consider what would happen with no smoothing or much stronger smoothing.
 
-- how command changes affect robot motion
-- whether the robot remains stable under changes in setpoint
-- how smoothly actions appear to be decoded and applied
-- how responsive the runtime feels
-- how much complexity is hidden behind just run the policy
+**Tradeoff:** smoothing can reduce abrupt target jumps and torque spikes, but excessive smoothing
+adds lag.
 
-Try to observe the system as both a learner and an engineer:
+## Experiment 4: runtime failures should be visible
 
-- as a learner, ask what the robot is trying to do
-- as an engineer, ask what data and computation were required to do it
+**Question:** What happens when the policy contract is not satisfied?
 
-## Try this
+The controller explicitly rejects policy outputs shorter than 12 actions or shorter than 128
+recurrent values. Model-loading/inference failures also need to remain distinguishable from a valid
+zero or neutral action.
 
-### Experiment 1: Command interpretation
+A polished runtime should surface those errors in the UI and tests instead of silently substituting
+behavior that looks like a legitimate policy decision.
 
-1. Change the high-level command inputs.
-2. Watch how the robot’s behavior changes.
-3. Ask what intermediate representation must exist between command and actuation.
+## Performance and timing
 
-### Experiment 2: Stability and responsiveness
+A robot-control step has several costs:
 
-1. Try more aggressive command changes.
-2. Observe whether the robot reacts smoothly or abruptly.
-3. Think about how action smoothing and decoding affect the visible result.
+- copying/transforming raw state
+- maintaining history buffers
+- building observations and commands
+- inference
+- smoothing/decoding actions
+- physics stepping and rendering in the simulator
 
-### Experiment 3: Runtime mindset
+For control quality, average frame rate is not enough. Measure control-step latency and jitter
+separately from rendering. A controller that usually runs quickly but occasionally stalls can behave
+very differently from one with consistent timing.
 
-1. Reset and rerun the demo.
-2. Focus less on the animation and more on the loop:
-   observation, policy, action, world step.
-3. Ask where latency, memory use, and portability constraints would matter most.
+## Portability boundary
 
-## Common mistakes when thinking about robot runtimes
+Rust Robotics wants control semantics to be reusable across native and web runtimes. That goal is
+best served by keeping these layers explicit:
 
-- assuming the simulator state can be fed directly into the policy without design
-- ignoring time budget and only focusing on mathematical correctness
-- forgetting that action decoding is part of the control pipeline
-- treating browser execution as just UI rather than a real runtime constraint
-- assuming portability happens automatically
+1. robot semantics and observation/action contracts
+2. inference backend adapters
+3. simulator/world integration
+4. UI/rendering
+
+The current `rust_robotics_algo` crate still includes robot-framework and inference-related
+dependencies alongside pure control/localization/planning/SLAM algorithms. Extracting that boundary
+remains useful cleanup because an A* or particle-filter user should not need the robot policy
+runtime dependency graph.
+
+## What to measure
+
+For runtime experiments, prefer:
+
+- observation/action dimensions and contract checks
+- inference latency
+- complete control-step latency
+- jitter/worst-case latency
+- reset correctness
+- command tracking error
+- joint/torque saturation where available
+- model-loading and inference error rate
+
+## Common mistakes
+
+- treating simulator state as though it can be fed directly to a trained policy
+- changing input ordering without changing/retraining the model
+- assuming policy action equals actuator torque
+- resetting physics while leaving recurrent controller state intact
+- hiding inference failure behind a neutral-looking action
+- measuring rendering FPS instead of control-loop timing
+- mixing pure algorithm reuse with heavyweight inference/runtime dependencies
 
 ## What this chapter is really teaching
 
-The earlier tutorials teach individual algorithmic ideas. This chapter teaches
-something broader:
-
-an algorithm becomes useful only when it can live inside a runtime that respects
-time, memory, interface, and deployment constraints.
-
-That is the bridge from robotics as theory to robotics as a usable system.
+Robotics software becomes useful when mathematical components are connected by explicit contracts.
+Observation layout, state lifetime, coordinate frames, inference semantics, decoding, and timing are
+part of control correctness—not plumbing around it.
