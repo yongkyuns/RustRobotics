@@ -26,18 +26,13 @@ jobs:
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
 
-      - name: Generate lockfile
-        run: cargo generate-lockfile
+      - name: Verify lockfile is current
+        run: |
+          cargo generate-lockfile
+          git diff --exit-code -- Cargo.lock
 
       - name: Audit Rust dependencies
         run: cargo audit
-
-      - name: Upload resolved lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: resolved-cargo-lock
-          path: Cargo.lock
-          if-no-files-found: error
 
   docs-javascript:
     name: Tutorial JavaScript syntax
