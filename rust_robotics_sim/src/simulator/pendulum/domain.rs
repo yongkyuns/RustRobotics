@@ -192,6 +192,7 @@ pub(crate) struct PendulumCardState {
     pub(crate) pendulum: PendulumParamsSnapshot,
     pub(crate) controller_params: ControllerParamsSnapshot,
     pub(crate) policy_trainer: PolicyTrainerSnapshot,
+    pub(crate) control_error: Option<String>,
 }
 
 /// Patch payload applied from the focused web embed to a pendulum instance.
@@ -297,6 +298,13 @@ fn clamp_learning_rate(value: f64) -> f64 {
 #[cfg(target_arch = "wasm32")]
 fn clamp_action_std(value: f32) -> f32 {
     value.clamp(0.05, 10.0)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LqrRuntimeCache {
+    model: Model,
+    dt: f32,
+    prepared: rb::control::lqr::PreparedLqr<4, 1>,
 }
 
 fn mpc_stage_cost_model(mut model: Model) -> Model {
@@ -471,6 +479,8 @@ pub struct InvertedPendulum {
     pub(crate) training_active: bool,
     pub(crate) training_updates_per_tick: usize,
     pub(crate) parallel_trainers: usize,
+    pub(crate) lqr_cache: Option<LqrRuntimeCache>,
+    pub(crate) last_control_error: Option<String>,
 }
 
 impl Default for InvertedPendulum {
@@ -500,6 +510,8 @@ impl Default for InvertedPendulum {
             training_active: false,
             training_updates_per_tick: 1,
             parallel_trainers: 1,
+            lqr_cache: None,
+            last_control_error: None,
         }
     }
 }
@@ -631,6 +643,7 @@ impl InvertedPendulum {
             },
             controller_params,
             policy_trainer: self.policy_trainer_snapshot(),
+            control_error: self.last_control_error.clone(),
         }
     }
 
@@ -794,7 +807,54 @@ impl InvertedPendulum {
             measured_state[3] += rand(profile.angular_velocity_radps);
         }
 
-        let control_command = self.controller.control(measured_state, dt);
+        let control_command = match &mut self.controller {
+            Controller::LQR(model) => {
+                let needs_prepare = self.lqr_cache.as_ref().is_none_or(|cache| {
+                    cache.model != *model || cache.dt.to_bits() != dt.to_bits()
+                });
+                if needs_prepare {
+                    self.lqr_cache = Some(LqrRuntimeCache {
+                        model: *model,
+                        dt,
+                        prepared: model.prepare(dt),
+                    });
+                }
+                self.last_control_error = None;
+                self.lqr_cache
+                    .as_ref()
+                    .expect("LQR cache is prepared above")
+                    .prepared
+                    .control(measured_state)[0]
+            }
+            Controller::PID(pid) => {
+                self.lqr_cache = None;
+                self.last_control_error = None;
+                pid.control(-measured_state[2], dt)
+            }
+            Controller::MPC(model) => {
+                self.lqr_cache = None;
+                match try_mpc_control(measured_state, *model, dt) {
+                    Ok(control) => {
+                        self.last_control_error = None;
+                        control
+                    }
+                    Err(error) => {
+                        self.last_control_error = Some(error.to_string());
+                        0.0
+                    }
+                }
+            }
+            Controller::Policy(policy) => {
+                self.lqr_cache = None;
+                self.last_control_error = None;
+                policy.act([
+                    measured_state[0],
+                    measured_state[1],
+                    measured_state[2],
+                    measured_state[3],
+                ])
+            }
+        };
         let applied_control = if noise.is_active() {
             control_command + rand(noise.profile().force_n)
         } else {
@@ -827,6 +887,17 @@ impl InvertedPendulum {
         self.controller.sync_policy(snapshot);
     }
 
+    #[cfg(test)]
+    pub(crate) fn lqr_cache_matches(&self, model: Model, dt: f32) -> bool {
+        self.lqr_cache
+            .as_ref()
+            .is_some_and(|cache| cache.model == model && cache.dt.to_bits() == dt.to_bits())
+    }
+
+    pub fn last_control_error(&self) -> Option<&str> {
+        self.last_control_error.as_deref()
+    }
+
     pub(crate) fn visual_episode_done(&self) -> bool {
         let env = &self.trainer_config.env;
         self.state[2].abs() > env.max_angle_rad
@@ -855,6 +926,8 @@ impl Simulate for InvertedPendulum {
         self.time_init = 0.0;
         self.visual_episode_steps = 0;
         self.controller.reset_state();
+        self.lqr_cache = None;
+        self.last_control_error = None;
         self.data.clear();
     }
 

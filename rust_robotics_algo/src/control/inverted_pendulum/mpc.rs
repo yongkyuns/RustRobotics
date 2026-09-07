@@ -33,6 +33,37 @@ const N_EQ: usize = (N + 1) * NX;
 /// Number of inequality constraints (control bounds only: upper + lower for each control)
 const N_INEQ: usize = 2 * N * NU;
 
+/// Error returned when the MPC quadratic-program solver does not produce a usable solution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MpcSolveError {
+    status: String,
+}
+
+impl MpcSolveError {
+    fn from_status(status: impl std::fmt::Debug) -> Self {
+        Self {
+            status: format!("{status:?}"),
+        }
+    }
+
+    /// Returns the underlying solver status as a diagnostic string.
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+impl std::fmt::Display for MpcSolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MPC solver did not produce a usable solution: {}",
+            self.status
+        )
+    }
+}
+
+impl std::error::Error for MpcSolveError {}
+
 /// MPC control using quadratic programming with the Clarabel solver.
 ///
 /// This function computes the optimal control input for an inverted pendulum
@@ -56,7 +87,7 @@ const N_INEQ: usize = 2 * N * NU;
 /// 6. apply only the first optimized control `u(0)` and discard the rest
 ///
 /// This "receding horizon" procedure is repeated every time step.
-pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
+pub fn try_mpc_control(x: Vector4, model: Model, dt: f32) -> Result<f32, MpcSolveError> {
     use crate::control::LQR;
     use clarabel::algebra::*;
     use clarabel::solver::*;
@@ -207,18 +238,40 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
     let u_idx = (N + 1) * NX;
 
     match solver.solution.status {
-        SolverStatus::Solved | SolverStatus::AlmostSolved => solver.solution.x[u_idx] as f32,
-        _ => {
-            // Solver failed - return 0 as safe fallback
-            0.0
-        }
+        SolverStatus::Solved | SolverStatus::AlmostSolved => Ok(solver.solution.x[u_idx] as f32),
+        ref status => Err(MpcSolveError::from_status(status)),
     }
+}
+
+/// Compatibility helper that preserves the historical zero-force fallback.
+///
+/// New runtime code should prefer [`try_mpc_control`] so solver failure cannot be
+/// mistaken for a valid zero-force optimum.
+pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
+    try_mpc_control(x, model, dt).unwrap_or(0.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn fallible_api_reports_a_valid_solution() {
+        let x = vector![0.0, 0.1, 0.1, 0.0];
+        let result = try_mpc_control(x, Model::default(), 0.1);
+        let u = result.expect("nominal MPC solve should succeed");
+        assert!(u.is_finite());
+    }
+
+    #[test]
+    fn compatibility_api_matches_fallible_api_on_success() {
+        let x = vector![0.0, 0.1, 0.1, 0.0];
+        let model = Model::default();
+        let expected = try_mpc_control(x, model, 0.1).expect("nominal solve");
+        let actual = mpc_control(x, model, 0.1);
+        assert!((actual - expected).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn test_mpc_control() {
