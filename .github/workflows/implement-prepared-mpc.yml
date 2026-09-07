@@ -1,0 +1,57 @@
+name: Implement prepared MPC runtime
+
+on:
+  push:
+    branches: ["improve/prepared-mpc-runtime"]
+
+permissions:
+  contents: write
+
+env:
+  MUJOCO_VERSION: 3.4.0
+
+jobs:
+  implement:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: improve/prepared-mpc-runtime
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install simulator system dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 10m sudo apt-get update -o Acquire::Retries=3
+          timeout 15m sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev
+      - name: Install MuJoCo
+        run: |
+          curl -L --fail \
+            -o "$RUNNER_TEMP/mujoco.tar.gz" \
+            "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
+          echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Implement and validate prepared MPC
+        run: |
+          python3 .github/scripts/implement_prepared_mpc.py
+          cargo fmt --all
+          cargo test -p rust_robotics_algo control::inverted_pendulum::mpc
+          cargo clippy -p rust_robotics_algo --all-targets -- -D warnings
+          cargo test -p rust_robotics_sim --lib simulator::pendulum::tests
+          cargo clippy -p rust_robotics_sim --all-targets -- -D warnings
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add rust_robotics_algo/src/control/inverted_pendulum/mpc.rs rust_robotics_sim/src/simulator/pendulum/domain.rs rust_robotics_sim/src/simulator/pendulum/tests.rs
+          git commit -m "Prepare MPC problem data for runtime reuse"
+          git push origin HEAD:improve/prepared-mpc-runtime
