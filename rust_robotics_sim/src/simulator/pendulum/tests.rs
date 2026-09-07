@@ -159,3 +159,52 @@ fn nonlinear_plant_falls_farther_from_upright_without_control() {
     assert!(sim.state[2] > initial_angle, "final_state={:?}", sim.state);
     assert!(sim.state[3] > 0.0, "final_state={:?}", sim.state);
 }
+
+#[test]
+fn pendulum_runtime_prepares_and_reuses_lqr_configuration() {
+    let model = Model::default();
+    let mut sim = InvertedPendulum {
+        state: vector![0.1, 0.0, 0.05, 0.0],
+        controller: Controller::lqr(model),
+        ..Default::default()
+    };
+
+    assert!(!sim.lqr_cache_matches(model, PENDULUM_FIXED_DT));
+    sim.step(PENDULUM_FIXED_DT);
+    assert!(sim.lqr_cache_matches(model, PENDULUM_FIXED_DT));
+
+    sim.step(PENDULUM_FIXED_DT);
+    assert!(sim.lqr_cache_matches(model, PENDULUM_FIXED_DT));
+}
+
+#[test]
+fn lqr_runtime_reprepares_when_model_changes() {
+    let original = Model::default();
+    let mut sim = InvertedPendulum {
+        controller: Controller::lqr(original),
+        ..Default::default()
+    };
+    sim.step(PENDULUM_FIXED_DT);
+    assert!(sim.lqr_cache_matches(original, PENDULUM_FIXED_DT));
+
+    let mut updated = original;
+    updated.Q[10] *= 1.5;
+    sim.controller = Controller::lqr(updated);
+    sim.step(PENDULUM_FIXED_DT);
+
+    assert!(!sim.lqr_cache_matches(original, PENDULUM_FIXED_DT));
+    assert!(sim.lqr_cache_matches(updated, PENDULUM_FIXED_DT));
+}
+
+#[test]
+fn successful_mpc_runtime_clears_control_error() {
+    let mut sim = InvertedPendulum {
+        state: vector![0.0, 0.0, 0.05, 0.0],
+        controller: Controller::mpc(Model::default()),
+        last_control_error: Some("stale error".to_owned()),
+        ..Default::default()
+    };
+
+    sim.step(PENDULUM_FIXED_DT);
+    assert!(sim.last_control_error().is_none());
+}

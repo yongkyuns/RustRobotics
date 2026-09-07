@@ -46,7 +46,7 @@ impl MpcSolveError {
         }
     }
 
-    /// Returns the underlying solver status as a stable diagnostic string.
+    /// Returns the underlying solver status as a diagnostic string.
     pub fn status(&self) -> &str {
         &self.status
     }
