@@ -208,3 +208,140 @@ fn successful_mpc_runtime_clears_control_error() {
     sim.step(PENDULUM_FIXED_DT);
     assert!(sim.last_control_error().is_none());
 }
+
+fn default_mpc_model() -> Model {
+    match Controller::mpc(Model::default()) {
+        Controller::MPC(model) => model,
+        _ => unreachable!("MPC constructor must select MPC"),
+    }
+}
+
+fn mpc_sim(model: Model) -> InvertedPendulum {
+    InvertedPendulum {
+        state: vector![0.0, 0.0, 0.05, 0.0],
+        controller: Controller::MPC(model),
+        controller_selection: ControllerKind::Mpc,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn pendulum_runtime_prepares_and_reuses_mpc_configuration() {
+    let model = default_mpc_model();
+    let mut sim = mpc_sim(model);
+
+    assert!(!sim.mpc_cache_matches(model, PENDULUM_FIXED_DT));
+    assert_eq!(sim.mpc_preparations, 0);
+    sim.step(PENDULUM_FIXED_DT);
+    assert!(sim.mpc_cache_matches(model, PENDULUM_FIXED_DT));
+    assert_eq!(sim.mpc_preparations, 1);
+    sim.step(PENDULUM_FIXED_DT);
+    assert!(sim.mpc_cache_matches(model, PENDULUM_FIXED_DT));
+    assert_eq!(
+        sim.mpc_preparations, 1,
+        "unchanged configuration must be reused"
+    );
+    assert!(sim.last_control_error().is_none());
+}
+
+#[test]
+fn mpc_runtime_reprepares_when_model_changes() {
+    let original = default_mpc_model();
+    let mut sim = mpc_sim(original);
+    sim.step(PENDULUM_FIXED_DT);
+    assert_eq!(sim.mpc_preparations, 1);
+
+    let mut updated = original;
+    updated.Q[10] *= 1.5;
+    sim.controller = Controller::MPC(updated);
+    sim.step(PENDULUM_FIXED_DT);
+
+    assert!(!sim.mpc_cache_matches(original, PENDULUM_FIXED_DT));
+    assert!(sim.mpc_cache_matches(updated, PENDULUM_FIXED_DT));
+    assert_eq!(sim.mpc_preparations, 2);
+    sim.step(PENDULUM_FIXED_DT);
+    assert_eq!(sim.mpc_preparations, 2);
+    assert!(sim.last_control_error().is_none());
+}
+
+#[test]
+fn mpc_runtime_reprepares_when_timestep_changes() {
+    let model = default_mpc_model();
+    let mut sim = mpc_sim(model);
+    sim.step(PENDULUM_FIXED_DT);
+    assert_eq!(sim.mpc_preparations, 1);
+
+    let updated_dt = PENDULUM_FIXED_DT * 0.5;
+    sim.step(updated_dt);
+    assert!(!sim.mpc_cache_matches(model, PENDULUM_FIXED_DT));
+    assert!(sim.mpc_cache_matches(model, updated_dt));
+    assert_eq!(sim.mpc_preparations, 2);
+    sim.step(updated_dt);
+    assert_eq!(sim.mpc_preparations, 2);
+    assert!(sim.last_control_error().is_none());
+}
+
+#[test]
+fn switching_away_from_mpc_discards_its_prepared_configuration() {
+    let model = default_mpc_model();
+    for controller in [
+        Controller::lqr(Model::default()),
+        Controller::pid(),
+        Controller::policy(policy_snapshot(0.0)),
+    ] {
+        let mut sim = mpc_sim(model);
+        sim.step(PENDULUM_FIXED_DT);
+        assert!(sim.mpc_cache_matches(model, PENDULUM_FIXED_DT));
+        assert_eq!(sim.mpc_preparations, 1);
+
+        sim.controller = controller;
+        sim.step(PENDULUM_FIXED_DT);
+        assert!(sim.mpc_cache.is_none());
+        assert_eq!(sim.mpc_preparations, 1);
+
+        sim.controller = Controller::MPC(model);
+        sim.step(PENDULUM_FIXED_DT);
+        assert!(sim.mpc_cache_matches(model, PENDULUM_FIXED_DT));
+        assert!(sim.lqr_cache.is_none());
+        assert_eq!(sim.mpc_preparations, 2);
+        assert!(sim.last_control_error().is_none());
+    }
+}
+
+#[test]
+fn resetting_mpc_clears_prepared_configuration_and_error() {
+    let model = default_mpc_model();
+    let mut sim = mpc_sim(model);
+    sim.step(PENDULUM_FIXED_DT);
+    assert_eq!(sim.mpc_preparations, 1);
+    sim.last_control_error = Some("stale failure".to_owned());
+
+    sim.reset_state();
+    assert!(sim.mpc_cache.is_none());
+    assert!(sim.lqr_cache.is_none());
+    assert!(sim.last_control_error().is_none());
+
+    // Keep the rollout deterministic despite reset's randomized starting angle.
+    sim.state = vector![0.0, 0.0, 0.05, 0.0];
+    sim.step(PENDULUM_FIXED_DT);
+    assert!(sim.mpc_cache_matches(model, PENDULUM_FIXED_DT));
+    assert_eq!(sim.mpc_preparations, 2);
+    assert!(sim.last_control_error().is_none());
+}
+
+#[test]
+fn cached_mpc_rollout_matches_fresh_preparation_each_step() {
+    let model = default_mpc_model();
+    let mut cached = mpc_sim(model);
+    let mut fresh = mpc_sim(model);
+    for _ in 0..12 {
+        fresh.mpc_cache = None;
+        cached.step(PENDULUM_FIXED_DT);
+        fresh.step(PENDULUM_FIXED_DT);
+        assert!(cached.last_control_error().is_none());
+        assert!(fresh.last_control_error().is_none());
+        assert!((cached.state - fresh.state).norm() < 1e-6);
+    }
+    assert_eq!(cached.mpc_preparations, 1);
+    assert_eq!(fresh.mpc_preparations, 12);
+}

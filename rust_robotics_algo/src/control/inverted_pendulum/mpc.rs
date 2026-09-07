@@ -64,183 +64,125 @@ impl std::fmt::Display for MpcSolveError {
 
 impl std::error::Error for MpcSolveError {}
 
+/// MPC problem data that is constant for a fixed model and timestep.
+///
+/// Preparing the problem once avoids repeating the terminal Riccati solve,
+/// horizon matrix assembly, and dense-to-CSC conversion on every control tick.
+/// A fresh Clarabel solver is still constructed for each solve; this type does
+/// not cache solver factorization or warm-start the optimization.
+pub struct PreparedMpc {
+    p: clarabel::algebra::CscMatrix<f64>,
+    q: Vec<f64>,
+    a: clarabel::algebra::CscMatrix<f64>,
+    b_template: Vec<f64>,
+}
+
+impl PreparedMpc {
+    /// Builds the static quadratic-program data for a fixed model and timestep.
+    pub fn new(model: Model, dt: f32) -> Self {
+        use crate::control::LQR;
+        use clarabel::algebra::*;
+
+        let (Ad, Bd) = model.model(dt);
+        let umin = -50.0_f64;
+        let umax = 50.0_f64;
+        let Q = model.Q;
+        let R = model.R;
+        let QN = model.solve_DARE(Ad, Bd);
+
+        let P_mat = block_diag!(kron!(eye!(N), Q), QN, kron!(eye!(N), R));
+
+        // The pendulum MPC reference is the zero state, so q is identically zero.
+        let q = vec![0.0; N_VARS];
+
+        let Ax = kron!(eye!(N + 1), -eye!(NX)) + kron!(eye!({ N + 1 }, -1), Ad);
+        let Bu = kron!(vstack!(zeros!(1, N), eye!(N)), Bd);
+        let Aeq = hstack!(Ax, Bu);
+
+        let zeros_xu = zeros!({ N * NU }, { (N + 1) * NX });
+        let eye_u = eye!(N * NU);
+        let Aineq_upper = hstack!(zeros_xu, eye_u);
+        let Aineq_lower = hstack!(zeros_xu, -eye_u);
+        let A_mat = vstack!(Aeq, vstack!(Aineq_upper, Aineq_lower));
+
+        let mut p_row_indices = Vec::new();
+        let mut p_col_ptrs = vec![0];
+        let mut p_values = Vec::new();
+        for j in 0..N_VARS {
+            for i in 0..=j {
+                let val = P_mat[(i, j)] as f64;
+                if val.abs() > 1e-12 {
+                    p_row_indices.push(i);
+                    p_values.push(val);
+                }
+            }
+            p_col_ptrs.push(p_row_indices.len());
+        }
+        let p = CscMatrix::new(N_VARS, N_VARS, p_col_ptrs, p_row_indices, p_values);
+
+        let n_constraints = N_EQ + N_INEQ;
+        let mut a_row_indices = Vec::new();
+        let mut a_col_ptrs = vec![0];
+        let mut a_values = Vec::new();
+        for j in 0..N_VARS {
+            for i in 0..n_constraints {
+                let val = A_mat[(i, j)] as f64;
+                if val.abs() > 1e-12 {
+                    a_row_indices.push(i);
+                    a_values.push(val);
+                }
+            }
+            a_col_ptrs.push(a_row_indices.len());
+        }
+        let a = CscMatrix::new(n_constraints, N_VARS, a_col_ptrs, a_row_indices, a_values);
+
+        let mut b_template = vec![0.0; n_constraints];
+        for k in 0..N {
+            b_template[N_EQ + k] = umax;
+            b_template[N_EQ + N * NU + k] = -umin;
+        }
+
+        Self {
+            p,
+            q,
+            a,
+            b_template,
+        }
+    }
+
+    /// Solves the prepared MPC problem for the current measured state.
+    pub fn try_control(&self, x: Vector4) -> Result<f32, MpcSolveError> {
+        use clarabel::solver::*;
+
+        let mut b = self.b_template.clone();
+        for i in 0..NX {
+            b[i] = -(x[i] as f64);
+        }
+
+        let cones = [ZeroConeT(N_EQ), NonnegativeConeT(N_INEQ)];
+        let settings = DefaultSettingsBuilder::default()
+            .verbose(false)
+            .build()
+            .unwrap();
+        let mut solver = DefaultSolver::new(&self.p, &self.q, &self.a, &b, &cones, settings);
+        solver.solve();
+
+        let u_idx = (N + 1) * NX;
+        match solver.solution.status {
+            SolverStatus::Solved | SolverStatus::AlmostSolved => {
+                Ok(solver.solution.x[u_idx] as f32)
+            }
+            ref status => Err(MpcSolveError::from_status(status)),
+        }
+    }
+}
+
 /// MPC control using quadratic programming with the Clarabel solver.
 ///
-/// This function computes the optimal control input for an inverted pendulum
-/// using Model Predictive Control with a quadratic cost function.
-///
-/// # Arguments
-/// * `x` - Current state vector [position, velocity, angle, angular_velocity]
-/// * `model` - System model parameters
-/// * `dt` - Time step
-///
-/// # Returns
-/// The optimal control input (force on cart).
-///
-/// High-level derivation:
-///
-/// 1. discretize the pendulum model into `(A_d, B_d)`
-/// 2. build a horizon-stacked quadratic objective over states and controls
-/// 3. encode dynamics as equality constraints
-/// 4. encode actuator saturation as inequality constraints
-/// 5. solve the QP
-/// 6. apply only the first optimized control `u(0)` and discard the rest
-///
-/// This "receding horizon" procedure is repeated every time step.
+/// This one-shot API prepares the fixed QP structure and solves it once. Runtime
+/// callers with a fixed model and timestep should reuse [`PreparedMpc`] instead.
 pub fn try_mpc_control(x: Vector4, model: Model, dt: f32) -> Result<f32, MpcSolveError> {
-    use crate::control::LQR;
-    use clarabel::algebra::*;
-    use clarabel::solver::*;
-
-    let (Ad, Bd) = model.model(dt);
-
-    // Control input bounds (force in Newtons)
-    let umin = -50.0_f64;
-    let umax = 50.0_f64;
-
-    // Stage cost weights and control penalty come directly from the pendulum
-    // model so the UI can expose MPC tuning using the same quadratic form as
-    // the solver.
-    let Q = model.Q;
-    let R = model.R;
-
-    // Terminal cost: use the infinite-horizon LQR value function approximation
-    // from the Riccati equation. This is the standard MPC trick for better
-    // finite-horizon stability.
-    let QN = model.solve_DARE(Ad, Bd);
-
-    // Initial state (from input) and reference state
-    let x0_vec: [f64; NX] = [x[0] as f64, x[1] as f64, x[2] as f64, x[3] as f64];
-    let xr: [f64; NX] = [0.0, 0.0, 0.0, 0.0]; // Reference: upright at origin
-
-    // Build QP matrices.
-    // Decision variables: z = [x(0), x(1), ..., x(N), u(0), ..., u(N-1)]
-
-    // Quadratic cost matrix P (block diagonal in the stacked variables):
-    // repeated stage-state cost, one terminal-state cost, then repeated
-    // control cost.
-    let P_mat = block_diag!(kron!(eye!(N), Q), QN, kron!(eye!(N), R));
-
-    // Linear cost vector q
-    let q_part1 = kron!(
-        ones!(N, 1),
-        -dot!(
-            Q,
-            vector![xr[0] as f32, xr[1] as f32, xr[2] as f32, xr[3] as f32]
-        )
-    );
-    let q_part2 = -dot!(
-        QN,
-        vector![xr[0] as f32, xr[1] as f32, xr[2] as f32, xr[3] as f32]
-    );
-    let q_part3 = zeros!({ N * NU }, 1);
-    let q_mat = vstack!(q_part1, q_part2, q_part3);
-
-    // Dynamics constraints: x(k+1) = Ad * x(k) + Bd * u(k)
-    // Rewritten as: -I * x(k+1) + Ad * x(k) + Bd * u(k) = 0
-    let Ax = kron!(eye!(N + 1), -eye!(NX)) + kron!(eye!({ N + 1 }, -1), Ad);
-    let Bu = kron!(vstack!(zeros!(1, N), eye!(N)), Bd);
-    let Aeq = hstack!(Ax, Bu);
-
-    // Inequality constraints for control bounds: umin <= u <= umax
-    // Reformulate as: u <= umax and -u <= -umin
-    // Stack: [I; -I] * u <= [umax; -umin]
-    // In terms of full decision vector z = [x; u]:
-    // [0 I; 0 -I] * z <= [umax; -umin]
-
-    // Build inequality constraint matrix for controls only
-    let zeros_xu = zeros!({ N * NU }, { (N + 1) * NX }); // Zero block for state part
-    let eye_u = eye!(N * NU);
-    let Aineq_upper = hstack!(zeros_xu, eye_u); // u <= umax
-    let Aineq_lower = hstack!(zeros_xu, -eye_u); // -u <= -umin
-    let Aineq = vstack!(Aineq_upper, Aineq_lower);
-
-    // Stack equality and inequality constraints
-    let A_mat = vstack!(Aeq, Aineq);
-
-    // Convert P matrix to Clarabel format (upper triangular CSC)
-    let mut P_row_indices: Vec<usize> = Vec::new();
-    let mut P_col_ptrs: Vec<usize> = vec![0];
-    let mut P_values: Vec<f64> = Vec::new();
-
-    for j in 0..N_VARS {
-        for i in 0..=j {
-            // Upper triangular only
-            let val = P_mat[(i, j)] as f64;
-            if val.abs() > 1e-12 {
-                P_row_indices.push(i);
-                P_values.push(val);
-            }
-        }
-        P_col_ptrs.push(P_row_indices.len());
-    }
-
-    let P_csc = CscMatrix::new(N_VARS, N_VARS, P_col_ptrs, P_row_indices, P_values);
-
-    // Convert A matrix to Clarabel format (CSC)
-    let n_constraints = N_EQ + N_INEQ;
-    let mut A_row_indices: Vec<usize> = Vec::new();
-    let mut A_col_ptrs: Vec<usize> = vec![0];
-    let mut A_values: Vec<f64> = Vec::new();
-
-    for j in 0..N_VARS {
-        for i in 0..n_constraints {
-            let val = A_mat[(i, j)] as f64;
-            if val.abs() > 1e-12 {
-                A_row_indices.push(i);
-                A_values.push(val);
-            }
-        }
-        A_col_ptrs.push(A_row_indices.len());
-    }
-
-    let A_csc = CscMatrix::new(n_constraints, N_VARS, A_col_ptrs, A_row_indices, A_values);
-
-    // Build q vector
-    let mut q_vec: Vec<f64> = vec![0.0; N_VARS];
-    for i in 0..N_VARS {
-        q_vec[i] = q_mat[(i, 0)] as f64;
-    }
-
-    // Build b vector (RHS of constraints)
-    let mut b_vec: Vec<f64> = vec![0.0; n_constraints];
-
-    // Equality constraints RHS: [-x0, 0, 0, ...]
-    for i in 0..NX {
-        b_vec[i] = -x0_vec[i];
-    }
-    // Rest of equality constraints are 0 (already initialized)
-
-    // Inequality constraints RHS: [umax, umax, ..., -umin, -umin, ...]
-    for k in 0..N {
-        b_vec[N_EQ + k] = umax; // u <= umax
-        b_vec[N_EQ + N * NU + k] = -umin; // -u <= -umin
-    }
-
-    // Define cones: equality (ZeroCone) + inequality (NonnegativeCone)
-    let cones = [ZeroConeT(N_EQ), NonnegativeConeT(N_INEQ)];
-
-    // Solver settings
-    let settings = DefaultSettingsBuilder::default()
-        .verbose(false)
-        .build()
-        .unwrap();
-
-    // Create and solve
-    let mut solver = DefaultSolver::new(&P_csc, &q_vec, &A_csc, &b_vec, &cones, settings);
-    solver.solve();
-
-    // Extract only the first control input u(0). This is the standard receding
-    // horizon MPC pattern: solve for the whole sequence, apply the first
-    // action, then re-solve next step with a new measured state.
-    // Decision variables are ordered: [x(0)..x(N), u(0)..u(N-1)]
-    // u(0) starts at index (N+1)*NX
-    let u_idx = (N + 1) * NX;
-
-    match solver.solution.status {
-        SolverStatus::Solved | SolverStatus::AlmostSolved => Ok(solver.solution.x[u_idx] as f32),
-        ref status => Err(MpcSolveError::from_status(status)),
-    }
+    PreparedMpc::new(model, dt).try_control(x)
 }
 
 /// Compatibility helper that preserves the historical zero-force fallback.
@@ -255,6 +197,27 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn prepared_api_matches_one_shot_api_across_states() {
+        let model = Model::default();
+        let dt = 0.1;
+        let prepared = PreparedMpc::new(model, dt);
+        let states = [
+            vector![0.0, 0.1, 0.1, 0.0],
+            vector![0.5, -0.2, 0.05, 0.1],
+            vector![-0.5, 0.3, -0.1, -0.2],
+        ];
+
+        for x in states {
+            let expected = try_mpc_control(x, model, dt).expect("one-shot MPC solve");
+            let actual = prepared.try_control(x).expect("prepared MPC solve");
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "actual={actual}, expected={expected}"
+            );
+        }
+    }
 
     #[test]
     fn fallible_api_reports_a_valid_solution() {
@@ -425,5 +388,64 @@ mod tests {
             "Final state: pos={:.3}, vel={:.3}, angle={:.4}, omega={:.3}",
             x[0], x[1], x[2], x[3]
         );
+    }
+}
+
+#[cfg(test)]
+mod prepared_mpc_regression_tests {
+    use super::*;
+
+    // Reference outputs captured from the pre-refactor implementation at 7086dc7b6d3e18681b0ec9b034358a6cd69986b6.
+
+    fn reference_models() -> [Model; 2] {
+        let tuned = Model {
+            l_bar: 1.5,
+            m_cart: 1.2,
+            m_ball: 0.8,
+            Q: diag![1.0, 1.0, 10.0, 1.0],
+            R: diag![0.1],
+            ..Model::default()
+        };
+        [Model::default(), tuned]
+    }
+
+    fn reference_states() -> [Vector4; 5] {
+        [
+            vector![0.0, 0.0, 0.0, 0.0],
+            vector![0.0, 0.1, 0.1, 0.0],
+            vector![0.5, -0.2, 0.05, 0.1],
+            vector![-0.5, 0.3, -0.1, -0.2],
+            vector![2.0, 1.0, 0.6, 0.3],
+        ]
+    }
+
+    #[test]
+    fn prepared_mpc_preserves_pre_refactor_outputs() {
+        let expected: [f32; 30] = [
+            0.0, -8.597041, -9.025621, 17.5912, -50.0, 0.0, -8.867897, -10.036228, 19.373695,
+            -50.0, 0.0, -7.3404503, -8.015412, 15.528098, -50.0, 0.0, -5.964992, -5.471871,
+            11.17137, -38.25106, 0.0, -6.5874786, -5.974267, 12.624699, -39.630215, 0.0,
+            -6.0539446, -5.490645, 11.508687, -37.035965,
+        ];
+        let mut index = 0;
+        for model in reference_models() {
+            for dt in [0.01, 0.05, 0.1] {
+                let prepared = PreparedMpc::new(model, dt);
+                for state in reference_states() {
+                    let actual = prepared
+                        .try_control(state)
+                        .expect("prepared MPC reference solve");
+                    assert!(actual.is_finite());
+                    assert!(actual.abs() <= 50.0001, "actuator bound: {actual}");
+                    assert!(
+                        (actual - expected[index]).abs() < 1e-4,
+                        "case {index}: actual={actual}, expected={}",
+                        expected[index]
+                    );
+                    index += 1;
+                }
+            }
+        }
+        assert_eq!(index, expected.len());
     }
 }

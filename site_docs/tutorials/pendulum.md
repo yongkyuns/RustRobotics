@@ -117,11 +117,12 @@ $$
 u_k = -Kx_k.
 $$
 
-In the current reusable implementation, `K` is recomputed when `control()` is called rather than
-cached as a prepared controller. That is convenient for a small educational system but is not the
-runtime structure you would normally choose for a fixed embedded control loop. Treat the
-complexity discussion here as the algorithmic structure of LQR, not a claim that this current API
-has already optimized away controller preparation.
+The algorithm crate offers both a one-shot `control()` API, which prepares the gain for each
+call, and `PreparedLqr`, which reuses a prepared gain. The pendulum simulator uses the prepared
+path: it computes the gain on the first step and rebuilds it when the controller model or timestep
+changes. Resetting the simulation or stepping with a different controller clears the cache.
+For unchanged configuration, LQR therefore performs the matrix-vector feedback operation without
+repeating the Riccati solve on every simulation tick.
 
 The default model uses
 
@@ -152,9 +153,24 @@ cost is not identical to the default LQR cost: the simulator sets MPC state weig
 objective. This is fine for exploring tuned behavior, but it should not be interpreted as a
 controlled algorithm-only benchmark.
 
+For a fixed controller model and timestep, `PreparedMpc` stores the terminal Riccati solution's
+contribution, assembled horizon matrices in sparse CSC form, the zero-reference linear objective,
+and the constant constraint right-hand side. The pendulum runtime reuses this problem data until
+its controller model or timestep changes. Resetting the simulation or stepping with another
+controller discards the cache. Each solve supplies the current measured initial state.
+
+This is **problem-data reuse**, not solver or factorization reuse: a fresh Clarabel solver is
+still constructed and run for each control step. It does not warm-start the optimization.
+The one-shot `try_mpc_control()` API remains available for callers that do not retain a
+`PreparedMpc` instance.
+
 MPC also has a qualitatively different failure mode: an optimizer can fail to produce a usable
-solution. A production controller should expose that status and define a deliberate fallback
-rather than treating solver failure as ordinary control output.
+solution. `PreparedMpc::try_control()` and `try_mpc_control()` return a `Result` so a solver failure
+is distinguishable from a valid zero-force optimum. The pendulum runtime records the failure in
+`last_control_error()` and the web card's `control_error` snapshot field, then uses a zero-force
+fallback. A successful control step or reset clears the stale error. The compatibility
+`mpc_control()` wrapper also retains its historical zero-force fallback. This fallback is an
+educational simulator policy, not a recovery controller or a hardware-safety guarantee.
 
 ## PPO: learned feedback
 
@@ -234,8 +250,8 @@ is therefore a combined sensing-and-actuation robustness experiment, not a pure 
 | Method | Algorithmic online work after preparation | Current demo caveat | Main tradeoff |
 | --- | --- | --- | --- |
 | PID | constant scalar arithmetic | angle-focused baseline | simple but weakly expresses coupling |
-| LQR | matrix-vector multiply | current API recomputes the Riccati solution/gain | excellent local linear feedback |
-| MPC | optimization every step | horizon and objective differ from default LQR | constraints and anticipation at runtime cost |
+| LQR | matrix-vector multiply | preparation repeats when the cached configuration changes | excellent local linear feedback |
+| MPC | optimization every step | fixed QP data is reused, but the solver is constructed and run each tick | constraints and anticipation at runtime cost |
 | PPO | neural-policy inference | correctness/reproducibility work is still tracked | flexible learned behavior after training |
 
 ## Common mistakes
