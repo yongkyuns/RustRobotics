@@ -14,7 +14,7 @@ s = p.read_text()
 
 marker = "fn mpc_stage_cost_model(mut model: Model) -> Model {\n"
 cache = """#[derive(Debug, Clone)]
-struct LqrRuntimeCache {
+pub(crate) struct LqrRuntimeCache {
     model: Model,
     dt: f32,
     prepared: rb::control::lqr::PreparedLqr<4, 1>,
@@ -37,7 +37,7 @@ if old_card in s:
 old_fields = """    pub(crate) parallel_trainers: usize,
 }"""
 new_fields = """    pub(crate) parallel_trainers: usize,
-    lqr_cache: Option<LqrRuntimeCache>,
+    pub(crate) lqr_cache: Option<LqrRuntimeCache>,
     pub(crate) last_control_error: Option<String>,
 }"""
 if old_fields not in s:
@@ -116,10 +116,54 @@ new_control = """        let control_command = match &mut self.controller {
                 ])
             }
         };
-        let applied_control = if noise.is_active() {"""
+        let applied_control = if noise.is_active() {
+            control_command + rand(noise.profile().force_n)
+        } else {
+            control_command
+        };
+
+        self.state = self.integrate_plant_rk4(self.state, applied_control, dt);
+        self.visual_episode_steps += 1;
+        self.data.add(
+            self.data.time_last() + dt,
+            vec![
+                self.state[0],
+                self.state[1],
+                self.state[2],
+                self.state[3],
+                applied_control,
+            ],
+        );
+
+        if self.training_active && self.visual_episode_done() {
+            self.reset_state();
+        }
+    }
+
+    pub fn set_policy_controller(&mut self, snapshot: &PolicySnapshot) {
+        self.controller = Controller::policy(snapshot.clone());
+    }
+
+    pub fn sync_policy_controller(&mut self, snapshot: &PolicySnapshot) {
+        self.controller.sync_policy(snapshot);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lqr_cache_matches(&self, model: Model, dt: f32) -> bool {
+        self.lqr_cache.as_ref().is_some_and(|cache| {
+            cache.model == model && cache.dt.to_bits() == dt.to_bits()
+        })
+    }
+
+    pub fn last_control_error(&self) -> Option<&str> {
+        self.last_control_error.as_deref()
+    }
+
+    pub(crate) fn visual_episode_done(&self) -> bool {"""
+# Replace only the beginning marker here; the rest of the file already contains the body.
 if old_control not in s:
     raise SystemExit("step control marker not found")
-s = s.replace(old_control, new_control, 1)
+s = s.replace(old_control, new_control.split("        self.state =", 1)[0] + "        self.state =", 1)
 
 old_reset = """        self.controller.reset_state();
         self.data.clear();"""
