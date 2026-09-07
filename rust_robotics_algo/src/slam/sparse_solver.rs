@@ -516,7 +516,10 @@ mod tests {
             }
         }
 
-        assert!(current_error < 1.0, "sparse assembly + dense solve should converge");
+        assert!(
+            current_error < 1.0,
+            "sparse assembly + dense solve should converge"
+        );
     }
 
     #[test]
@@ -543,7 +546,10 @@ mod tests {
             );
 
             let stats = SparseSlamSolver::sparsity_stats(&j);
-            assert!(stats.density < 0.5, "graph with {n_poses} poses should be sparse");
+            assert!(
+                stats.density < 0.5,
+                "graph with {n_poses} poses should be sparse"
+            );
         }
     }
 }
