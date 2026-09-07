@@ -1,0 +1,103 @@
+name: Implement control runtime state
+
+on:
+  push:
+    branches: ["improve/control-runtime-status"]
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: improve/control-runtime-status
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Add runtime LQR cache and MPC diagnostics
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Tighten the public MPC diagnostic wording while retaining the verified API.
+          mpc = Path('rust_robotics_algo/src/control/inverted_pendulum/mpc.rs')
+          s = mpc.read_text()
+          s = s.replace(
+              '/// Returns the underlying solver status as a stable diagnostic string.',
+              '/// Returns the underlying solver status as a diagnostic string.'
+          )
+          mpc.write_text(s)
+
+          p = Path('rust_robotics_sim/src/simulator/pendulum/domain.rs')
+          s = p.read_text()
+
+          marker = '''fn mpc_stage_cost_model(mut model: Model) -> Model {\n'''
+          cache = '''#[derive(Debug, Clone)]\nstruct LqrRuntimeCache {\n    model: Model,\n    dt: f32,\n    prepared: rb::control::lqr::PreparedLqr<4, 1>,\n}\n\n'''
+          if 'struct LqrRuntimeCache' not in s:
+              s = s.replace(marker, cache + marker, 1)
+
+          old_card = '''    pub(crate) controller_params: ControllerParamsSnapshot,\n    pub(crate) policy_trainer: PolicyTrainerSnapshot,\n}'''
+          new_card = '''    pub(crate) controller_params: ControllerParamsSnapshot,\n    pub(crate) policy_trainer: PolicyTrainerSnapshot,\n    pub(crate) control_error: Option<String>,\n}'''
+          if old_card in s:
+              s = s.replace(old_card, new_card, 1)
+
+          old_fields = '''    pub(crate) parallel_trainers: usize,\n}'''
+          new_fields = '''    pub(crate) parallel_trainers: usize,\n    lqr_cache: Option<LqrRuntimeCache>,\n    pub(crate) last_control_error: Option<String>,\n}'''
+          if old_fields not in s:
+              raise SystemExit('InvertedPendulum field marker not found')
+          s = s.replace(old_fields, new_fields, 1)
+
+          old_default = '''            training_updates_per_tick: 1,\n            parallel_trainers: 1,\n        }'''
+          new_default = '''            training_updates_per_tick: 1,\n            parallel_trainers: 1,\n            lqr_cache: None,\n            last_control_error: None,\n        }'''
+          if old_default not in s:
+              raise SystemExit('default marker not found')
+          s = s.replace(old_default, new_default, 1)
+
+          old_card_build = '''            controller_params,\n            policy_trainer: self.policy_trainer_snapshot(),\n        }'''
+          new_card_build = '''            controller_params,\n            policy_trainer: self.policy_trainer_snapshot(),\n            control_error: self.last_control_error.clone(),\n        }'''
+          if old_card_build in s:
+              s = s.replace(old_card_build, new_card_build, 1)
+
+          old_control = '''        let control_command = self.controller.control(measured_state, dt);\n        let applied_control = if noise.is_active() {'''
+          new_control = '''        let control_command = match &mut self.controller {\n            Controller::LQR(model) => {\n                let needs_prepare = self.lqr_cache.as_ref().is_none_or(|cache| {\n                    cache.model != *model || cache.dt.to_bits() != dt.to_bits()\n                });\n                if needs_prepare {\n                    self.lqr_cache = Some(LqrRuntimeCache {\n                        model: *model,\n                        dt,\n                        prepared: model.prepare(dt),\n                    });\n                }\n                self.last_control_error = None;\n                self.lqr_cache\n                    .as_ref()\n                    .expect("LQR cache is prepared above")\n                    .prepared\n                    .control(measured_state)[0]\n            }\n            Controller::PID(pid) => {\n                self.lqr_cache = None;\n                self.last_control_error = None;\n                pid.control(-measured_state[2], dt)\n            }\n            Controller::MPC(model) => {\n                self.lqr_cache = None;\n                match try_mpc_control(measured_state, *model, dt) {\n                    Ok(control) => {\n                        self.last_control_error = None;\n                        control\n                    }\n                    Err(error) => {\n                        self.last_control_error = Some(error.to_string());\n                        0.0\n                    }\n                }\n            }\n            Controller::Policy(policy) => {\n                self.lqr_cache = None;\n                self.last_control_error = None;\n                policy.act([\n                    measured_state[0],\n                    measured_state[1],\n                    measured_state[2],\n                    measured_state[3],\n                ])\n            }\n        };\n        let applied_control = if noise.is_active() {'''
+          if old_control not in s:
+              raise SystemExit('step control marker not found')
+          s = s.replace(old_control, new_control, 1)
+
+          old_reset = '''        self.controller.reset_state();\n        self.data.clear();'''
+          new_reset = '''        self.controller.reset_state();\n        self.lqr_cache = None;\n        self.last_control_error = None;\n        self.data.clear();'''
+          if old_reset not in s:
+              raise SystemExit('reset marker not found')
+          s = s.replace(old_reset, new_reset, 1)
+
+          # Small test-only visibility helpers avoid exposing cache internals publicly.
+          getter_marker = '''    pub(crate) fn visual_episode_done(&self) -> bool {'''
+          getter = '''    #[cfg(test)]\n    pub(crate) fn lqr_cache_matches(&self, model: Model, dt: f32) -> bool {\n        self.lqr_cache.as_ref().is_some_and(|cache| {\n            cache.model == model && cache.dt.to_bits() == dt.to_bits()\n        })\n    }\n\n    pub fn last_control_error(&self) -> Option<&str> {\n        self.last_control_error.as_deref()\n    }\n\n'''
+          if 'pub(crate) fn lqr_cache_matches' not in s:
+              s = s.replace(getter_marker, getter + getter_marker, 1)
+
+          p.write_text(s)
+
+          tests = Path('rust_robotics_sim/src/simulator/pendulum/tests.rs')
+          t = tests.read_text()
+          additions = '''\n#[test]\nfn pendulum_runtime_prepares_and_reuses_lqr_configuration() {\n    let model = Model::default();\n    let mut sim = InvertedPendulum {\n        state: vector![0.1, 0.0, 0.05, 0.0],\n        controller: Controller::lqr(model),\n        ..Default::default()\n    };\n\n    assert!(!sim.lqr_cache_matches(model, PENDULUM_FIXED_DT));\n    sim.step(PENDULUM_FIXED_DT);\n    assert!(sim.lqr_cache_matches(model, PENDULUM_FIXED_DT));\n\n    sim.step(PENDULUM_FIXED_DT);\n    assert!(sim.lqr_cache_matches(model, PENDULUM_FIXED_DT));\n}\n\n#[test]\nfn lqr_runtime_reprepares_when_model_changes() {\n    let original = Model::default();\n    let mut sim = InvertedPendulum {\n        controller: Controller::lqr(original),\n        ..Default::default()\n    };\n    sim.step(PENDULUM_FIXED_DT);\n    assert!(sim.lqr_cache_matches(original, PENDULUM_FIXED_DT));\n\n    let mut updated = original;\n    updated.Q[10] *= 1.5;\n    sim.controller = Controller::lqr(updated);\n    sim.step(PENDULUM_FIXED_DT);\n\n    assert!(!sim.lqr_cache_matches(original, PENDULUM_FIXED_DT));\n    assert!(sim.lqr_cache_matches(updated, PENDULUM_FIXED_DT));\n}\n\n#[test]\nfn successful_mpc_runtime_clears_control_error() {\n    let mut sim = InvertedPendulum {\n        state: vector![0.0, 0.0, 0.05, 0.0],\n        controller: Controller::mpc(Model::default()),\n        last_control_error: Some("stale error".to_owned()),\n        ..Default::default()\n    };\n\n    sim.step(PENDULUM_FIXED_DT);\n    assert!(sim.last_control_error().is_none());\n}\n'''
+          if 'pendulum_runtime_prepares_and_reuses_lqr_configuration' not in t:
+              t += additions
+          tests.write_text(t)
+          PY
+          cargo fmt --all
+          cargo test -p rust_robotics_algo control::inverted_pendulum::mpc
+          cargo clippy -p rust_robotics_algo --all-targets -- -D warnings
+          cargo test -p rust_robotics_sim --lib simulator::pendulum::tests
+          cargo clippy -p rust_robotics_sim --all-targets -- -D warnings
+      - name: Commit implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add rust_robotics_algo/src/control/inverted_pendulum/mpc.rs rust_robotics_sim/src/simulator/pendulum/domain.rs rust_robotics_sim/src/simulator/pendulum/tests.rs
+          git commit -m "Track control runtime health and cache LQR gains" || exit 0
+          git push origin HEAD:improve/control-runtime-status
