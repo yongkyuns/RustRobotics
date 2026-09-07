@@ -29,6 +29,33 @@ use crate::prelude::*;
 
 use nalgebra::{allocator::Allocator, Const, DefaultAllocator, DimMin, DimSub, ToTypenum};
 
+/// Prepared infinite-horizon LQR feedback for a fixed model and sample period.
+///
+/// Computing the Riccati solution is configuration work, not control-loop work.
+/// `PreparedLqr` stores the resulting gain so repeated calls are a single
+/// fixed-size matrix-vector multiplication.
+#[derive(Debug, Clone)]
+pub struct PreparedLqr<const N: usize, const M: usize> {
+    gain: Mat<M, N>,
+}
+
+impl<const N: usize, const M: usize> PreparedLqr<N, M> {
+    /// Creates a prepared controller from a feedback gain.
+    pub fn new(gain: Mat<M, N>) -> Self {
+        Self { gain }
+    }
+
+    /// Returns the cached feedback gain `K` used by `u = -Kx`.
+    pub fn gain(&self) -> &Mat<M, N> {
+        &self.gain
+    }
+
+    /// Computes a control action without solving another Riccati equation.
+    pub fn control(&self, x: Vector<N>) -> Vector<M> {
+        -self.gain * x
+    }
+}
+
 /// Trait for systems that can provide an LQR controller.
 ///
 /// Implementors must provide:
@@ -64,21 +91,26 @@ where
     /// Returns the maximum number of Riccati iterations.
     fn max_iter(&self) -> u32;
 
+    /// Computes and returns the discrete-time feedback gain for `dt`.
+    fn gain(&self, dt: f32) -> Mat<M, N> {
+        let (ad, bd) = self.model(dt);
+        self.dlqr(ad, bd)
+    }
+
+    /// Prepares a controller for repeated use at a fixed sample period.
+    ///
+    /// Call this when the model, weights, or `dt` changes, then keep the returned
+    /// controller in the runtime state and use [`PreparedLqr::control`] each step.
+    fn prepare(&self, dt: f32) -> PreparedLqr<N, M> {
+        PreparedLqr::new(self.gain(dt))
+    }
+
     /// Computes the LQR control input for the current state.
     ///
-    /// This method:
-    ///
-    /// 1. discretizes the model at `dt`
-    /// 2. solves the DARE
-    /// 3. forms the optimal feedback gain `K`
-    /// 4. returns `u = -Kx`
-    ///
-    /// For small fixed-size systems this is convenient and readable, though it
-    /// recomputes `K` each call instead of caching it.
+    /// This compatibility helper recomputes the Riccati solution every call.
+    /// Real-time or repeated control loops should use [`LQR::prepare`] instead.
     fn control(&self, x: Vector<N>, dt: f32) -> Vector<M> {
-        let (Ad, Bd) = self.model(dt);
-        let K = self.dlqr(Ad, Bd);
-        -K * x
+        -self.gain(dt) * x
     }
 
     /// Computes the optimal discrete-time feedback gain `K`.
@@ -90,7 +122,6 @@ where
         let P = self.solve_DARE(A, B);
         let R = self.R();
 
-        // compute the LQR gain
         let BT = B.transpose();
         let inv = (BT * P * B + R)
             .pseudo_inverse(self.epsilon())
@@ -137,5 +168,40 @@ where
             P = Pn;
         }
         P
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::inverted_pendulum::Model;
+    use nalgebra::vector;
+
+    #[test]
+    fn prepared_control_matches_compatibility_path() {
+        let model = Model::default();
+        let dt = 0.01;
+        let state = vector![0.2, -0.1, 0.05, 0.3];
+
+        let prepared = model.prepare(dt);
+        let prepared_u = prepared.control(state);
+        let direct_u = model.control(state, dt);
+
+        assert!((prepared_u - direct_u).abs().amax() < 1e-6);
+    }
+
+    #[test]
+    fn prepared_gain_is_reusable_across_states() {
+        let model = Model::default();
+        let prepared = model.prepare(0.01);
+
+        for state in [
+            vector![0.0, 0.0, 0.05, 0.0],
+            vector![0.2, 0.1, -0.1, 0.3],
+            vector![-0.1, 0.4, 0.02, -0.2],
+        ] {
+            let u = prepared.control(state);
+            assert!(u.iter().all(|value| value.is_finite()));
+        }
     }
 }
