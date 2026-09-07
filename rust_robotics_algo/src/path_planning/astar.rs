@@ -5,6 +5,11 @@
 //! - four cardinal neighbors with unit cost
 //! - four diagonal neighbors with cost `sqrt(2)`
 //!
+//! Diagonal moves currently require only the destination cell to be free; the
+//! planner therefore allows corner cutting between blocked cardinal cells. This
+//! is a deliberate documented grid convention until footprint-aware collision
+//! semantics are introduced consistently across all grid planners.
+//!
 //! The priority queue is ordered by the usual A* score:
 //!
 //! `f(n) = g(n) + h(n)`
@@ -16,16 +21,16 @@ use super::grid::Grid;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
-/// Result of A* path planning
+/// Result of A* path planning.
 #[derive(Debug, Clone)]
 pub struct AStarResult {
-    /// Path in world coordinates (from start to goal)
+    /// Path in world coordinates (from start to goal).
     pub path: Vec<(f32, f32)>,
-    /// Visited cells during search (for visualization)
+    /// Cells expanded during search (for visualization).
     pub visited: Vec<(usize, usize)>,
-    /// Whether a path was found
+    /// Whether a path was found.
     pub success: bool,
-    /// Number of iterations (nodes expanded)
+    /// Number of unique nodes expanded.
     pub iterations: usize,
 }
 
@@ -34,13 +39,12 @@ pub struct AStarPlanner<'a> {
     grid: &'a Grid,
 }
 
-/// Search node stored in the open-set heap.
 #[derive(Clone)]
 struct Node {
     x: usize,
     y: usize,
-    g: f32, // Cost from start
-    h: f32, // Heuristic to goal
+    g: f32,
+    h: f32,
 }
 
 impl Node {
@@ -59,7 +63,6 @@ impl Eq for Node {}
 
 impl Ord for Node {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse order for min-heap (lower f = higher priority)
         other.f().partial_cmp(&self.f()).unwrap_or(Ordering::Equal)
     }
 }
@@ -71,14 +74,13 @@ impl PartialOrd for Node {
 }
 
 impl<'a> AStarPlanner<'a> {
-    /// Create a new A* planner for the given grid
+    /// Create a new A* planner for the given grid.
     pub fn new(grid: &'a Grid) -> Self {
         Self { grid }
     }
 
-    /// Plan a path from start to goal (world coordinates)
+    /// Plan a path from start to goal in world coordinates.
     pub fn plan(&self, start: (f32, f32), goal: (f32, f32)) -> AStarResult {
-        // Convert to grid coordinates
         let start_grid = match self.grid.world_to_grid(start.0, start.1) {
             Some(pos) => pos,
             None => {
@@ -103,7 +105,6 @@ impl<'a> AStarPlanner<'a> {
             }
         };
 
-        // Check if start or goal is an obstacle
         if self.grid.is_obstacle(start_grid.0, start_grid.1)
             || self.grid.is_obstacle(goal_grid.0, goal_grid.1)
         {
@@ -115,7 +116,6 @@ impl<'a> AStarPlanner<'a> {
             };
         }
 
-        // A* search
         let mut open_set = BinaryHeap::new();
         let mut closed_set = HashSet::new();
         let mut visited_order = Vec::new();
@@ -135,30 +135,30 @@ impl<'a> AStarPlanner<'a> {
         g_scores.insert((start_node.x, start_node.y), 0.0);
         open_set.push(start_node);
 
-        // 8-directional movement
         let directions: [(i32, i32); 8] = [
             (1, 0),
             (-1, 0),
             (0, 1),
-            (0, -1), // Cardinal
+            (0, -1),
             (1, 1),
             (1, -1),
             (-1, 1),
-            (-1, -1), // Diagonal
+            (-1, -1),
         ];
 
         while let Some(current) = open_set.pop() {
-            iterations += 1;
             let current_pos = (current.x, current.y);
 
+            // The heap may contain stale entries for a cell after a lower-cost
+            // path has been pushed. Those are queue operations, not expansions.
             if closed_set.contains(&current_pos) {
                 continue;
             }
 
+            iterations += 1;
             visited_order.push(current_pos);
             closed_set.insert(current_pos);
 
-            // Check if we reached the goal
             if current_pos == goal_grid {
                 let path = self.reconstruct_path(&came_from, goal_grid, start_grid);
                 return AStarResult {
@@ -169,7 +169,6 @@ impl<'a> AStarPlanner<'a> {
                 };
             }
 
-            // Explore neighbors
             for (dx, dy) in directions.iter() {
                 let nx = current.x as i32 + dx;
                 let ny = current.y as i32 + dy;
@@ -186,12 +185,10 @@ impl<'a> AStarPlanner<'a> {
                 }
 
                 let neighbor_pos = (nx, ny);
-
                 if closed_set.contains(&neighbor_pos) {
                     continue;
                 }
 
-                // Movement cost (1.0 for cardinal, sqrt(2) for diagonal)
                 let move_cost = if *dx != 0 && *dy != 0 {
                     std::f32::consts::SQRT_2
                 } else {
@@ -199,7 +196,6 @@ impl<'a> AStarPlanner<'a> {
                 };
 
                 let tentative_g = current.g + move_cost;
-
                 let current_g = g_scores
                     .get(&neighbor_pos)
                     .copied()
@@ -209,19 +205,16 @@ impl<'a> AStarPlanner<'a> {
                     came_from.insert(neighbor_pos, current_pos);
                     g_scores.insert(neighbor_pos, tentative_g);
 
-                    let neighbor_node = Node {
+                    open_set.push(Node {
                         x: nx,
                         y: ny,
                         g: tentative_g,
                         h: self.heuristic(neighbor_pos, goal_grid),
-                    };
-
-                    open_set.push(neighbor_node);
+                    });
                 }
             }
         }
 
-        // No path found
         AStarResult {
             path: vec![],
             visited: visited_order,
@@ -237,7 +230,6 @@ impl<'a> AStarPlanner<'a> {
         (dx * dx + dy * dy).sqrt()
     }
 
-    /// Reconstructs the final world-space path from the predecessor map.
     fn reconstruct_path(
         &self,
         came_from: &std::collections::HashMap<(usize, usize), (usize, usize)>,
@@ -248,20 +240,14 @@ impl<'a> AStarPlanner<'a> {
         let mut current = goal;
 
         while current != start {
-            let world_pos = self.grid.grid_to_world(current.0, current.1);
-            path.push(world_pos);
-
+            path.push(self.grid.grid_to_world(current.0, current.1));
             match came_from.get(&current) {
                 Some(&parent) => current = parent,
                 None => break,
             }
         }
 
-        // Add start position
-        let start_world = self.grid.grid_to_world(start.0, start.1);
-        path.push(start_world);
-
-        // Reverse to get path from start to goal
+        path.push(self.grid.grid_to_world(start.0, start.1));
         path.reverse();
         path
     }
@@ -278,31 +264,31 @@ mod tests {
         let result = planner.plan((-4.0, -4.0), (4.0, 4.0));
         assert!(result.success);
         assert!(!result.path.is_empty());
+        assert_eq!(result.iterations, result.visited.len());
     }
 
     #[test]
     fn test_path_with_obstacles() {
         let mut grid = Grid::new(10, 10, 1.0);
-        // Create a wall
         for y in 0..8 {
             grid.set_obstacle(5, y);
         }
         let planner = AStarPlanner::new(&grid);
         let result = planner.plan((-4.0, 0.0), (4.0, 0.0));
         assert!(result.success);
-        // Path should go around the wall
         assert!(!result.path.is_empty());
+        assert_eq!(result.iterations, result.visited.len());
     }
 
     #[test]
     fn test_no_path() {
         let mut grid = Grid::new(10, 10, 1.0);
-        // Create a complete barrier
         for y in 0..10 {
             grid.set_obstacle(5, y);
         }
         let planner = AStarPlanner::new(&grid);
         let result = planner.plan((-4.0, 0.0), (4.0, 0.0));
         assert!(!result.success);
+        assert_eq!(result.iterations, result.visited.len());
     }
 }

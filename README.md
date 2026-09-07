@@ -17,166 +17,81 @@
   <img alt="Targets" src="https://img.shields.io/badge/targets-native%20%7C%20web-334155?style=flat-square">
 </p>
 
-Rust Robotics is a project with two practical goals:
+Rust Robotics has two practical goals:
 
-1. build a reusable library of robotics algorithms
-2. build an interactive simulation layer for learning, testing, and demonstration
+1. provide readable, reusable Rust implementations of robotics algorithms
+2. make those algorithms easier to understand through interactive native and web simulations
 
-The project is intentionally straightforward. It is not trying to be a large
-framework or a research platform with every possible feature. The focus is on
-clear implementations, portable runtime boundaries, and interactive experiences
-that make the underlying algorithms easier to understand.
+The project focuses on control, localization, path planning, SLAM, and robot runtime execution. It
+is intentionally not a giant robotics framework: the priority is clear implementations, explicit
+runtime boundaries, numerical verification, and educational experiments that connect the math to
+observable behavior.
 
-## Live Links
+## Live project
 
-- Documentation site: <https://yongkyuns.github.io/sim-tutorial/>
-- Full simulator: <https://yongkyuns.github.io/sim/>
-- Control tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/pendulum.html>
-- Localization tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/localization.html>
-- Path planning tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/path_planning.html>
-- SLAM tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/slam.html>
-- Robot tutorial: <https://yongkyuns.github.io/sim-tutorial/tutorials/robot.html>
+- Documentation: <https://yongkyuns.github.io/sim-tutorial/>
+- Simulator: <https://yongkyuns.github.io/sim/>
+- Control: <https://yongkyuns.github.io/sim-tutorial/tutorials/pendulum.html>
+- Localization: <https://yongkyuns.github.io/sim-tutorial/tutorials/localization.html>
+- Path planning: <https://yongkyuns.github.io/sim-tutorial/tutorials/path_planning.html>
+- SLAM: <https://yongkyuns.github.io/sim-tutorial/tutorials/slam.html>
+- Robot runtime: <https://yongkyuns.github.io/sim-tutorial/tutorials/robot.html>
 
-## What This Repository Is For
+## What the tutorials try to teach
 
-Rust Robotics is meant to be useful to both:
+The tutorial site is the explanatory layer above the Rust APIs. Each main chapter is intended to
+connect four things:
 
-- students who want clear explanations and interactive examples
-- engineers who want compact, readable implementations and practical tradeoff discussion
+- the mathematical problem and assumptions
+- the concrete implementation used by this repository
+- an interactive experiment in the simulator
+- the compute, memory, numerical, and runtime tradeoffs that matter in practice
 
-The main themes of the project are:
+That distinction is important. When the current implementation differs from the idealized textbook
+structure—for example, when sparse Graph SLAM assembly still ends in a dense solve—the tutorial
+should say so explicitly.
 
-- control systems
-- localization
-- path planning
-- SLAM
-- robot runtime and policy execution
-
-The documentation is meant to explain:
-
-- what each algorithm is for
-- what assumptions it makes
-- where it is used
-- how it compares to alternatives
-- what it costs in compute and memory
-- and how to interpret its behavior in the simulator
-
-## Core Idea
-
-The project is built around two connected ideas.
-
-### Portable implementations
-
-Algorithms should not be trapped inside one simulator or one UI surface. The
-same core logic should be usable in:
-
-- native applications
-- web-based simulations
-- interactive educational material
-- and, where reasonable, more deployment-oriented contexts
-
-### Interactivity as a teaching tool
-
-Robotics concepts become much easier to learn when the behavior is visible. This
-repository uses simulation not just as a demo layer, but as part of the
-explanation:
-
-- control becomes easier to understand when overshoot and settling are visible
-- localization becomes easier to understand when uncertainty is visible
-- planning becomes easier to compare when search effort and path quality are visible
-- SLAM becomes easier to understand when drift and correction are visible
-
-## What You Can Study Here
-
-### Control systems
-
-The inverted pendulum tutorial compares:
-
-- PID
-- LQR
-- MPC
-- PPO policies
-
-This is the most compact place in the repo to compare classical and learned
-control methods under a shared plant.
-
-### Localization
-
-The localization tutorial focuses on noisy sensing, motion uncertainty, and
-particle-filter behavior. It is intended to make state estimation visible
-instead of purely abstract.
-
-### Path planning
-
-The planning tutorial compares:
-
-- Dijkstra
-- A*
-- Theta*
-- RRT
-
-This makes it easier to see the tradeoffs between graph search, heuristics,
-any-angle methods, and sampling-based planning.
-
-### SLAM
-
-The SLAM tutorial focuses on joint pose and map estimation, drift accumulation,
-and correction behavior. It is written to connect the math to what a reader can
-actually observe in a live demo.
-
-### Robot runtime
-
-The robot tutorial connects simulation, observations, policy execution, and
-actuation into a more realistic runtime loop. This is where the project moves
-from toy examples toward a richer robot-control stack.
-
-## Repository Layout
+## Repository layout
 
 ### `rust_robotics_algo`
 
-Reusable robotics logic:
+Reusable robotics and robot-control logic:
 
-- control algorithms
-- localization and SLAM
-- planning methods
-- shared robot-framework logic
+- classical control
+- particle-filter localization
+- grid and sampling-based planning
+- EKF and graph SLAM
+- shared robot observation/action logic
+
+The pure-algorithm versus robot-runtime dependency boundary is still being refined; algorithm-only
+consumers should eventually be able to avoid inference/runtime dependencies entirely.
 
 ### `rust_robotics_core`
 
-Small shared crate for portable data exchanged across the workspace, including
-policy snapshots and training metrics.
+Small portable data types shared across runtime boundaries, including policy snapshots and training
+metrics.
 
 ### `rust_robotics_train`
 
-Training-side runtime and PPO implementation:
-
-- rollout collection
-- optimization
-- model ownership
-- export into portable snapshots
+Training-side runtime and PPO implementation: rollout collection, optimization, model ownership, and
+portable policy export.
 
 ### `rust_robotics_sim`
 
-Interactive application and world ownership:
-
-- native and web simulator runtime
-- egui / eframe app shell
-- MuJoCo integration
-- pendulum, localization, planning, SLAM, and robot demos
+Native and web simulator runtime, egui/eframe application shell, MuJoCo integration, and the
+interactive tutorial demos.
 
 ### `site_docs`
 
-Authored documentation source for the GitHub Pages tutorial site.
+Authored Sphinx/MyST tutorial source.
 
 ### `docs`
 
-Generated web bundle for the hosted simulator.
+Generated simulator web bundle used by the hosted demo.
 
-## Getting Started Locally
+## Start from a fresh checkout
 
-### Fastest route
-
-Build the web simulator:
+The quickest interactive route is:
 
 ```bash
 ./build_web.sh --fast
@@ -185,114 +100,124 @@ Build the web simulator:
 
 Then open:
 
-- simulator: `http://127.0.0.1:3000/`
+- <http://127.0.0.1:3000/>
 
-If you also want the authored documentation site locally:
+`build_web.sh` checks the command-line tools it needs and reports missing prerequisites. For the
+complete prerequisite list, see the documentation quickstart.
+
+Build the authored tutorial site with:
 
 ```bash
-source /tmp/rust-robotics-docs-venv/bin/activate
 ./scripts/build_docs_site.sh
 ```
 
-Then open the built HTML under:
+The script creates a repository-local `.venv-docs` environment when needed, installs
+`site_docs/requirements.txt`, and builds Sphinx with warnings treated as errors. The result is under:
 
 - `site_docs/_build/html/`
 
-### Useful reading order
+## Suggested reading order
 
-If you are new to the project:
+1. Quickstart and project overview
+2. Control systems
+3. Localization
+4. Path planning
+5. SLAM
+6. Robot runtime
 
-1. read the docs overview
-2. start with the control tutorial
-3. continue to localization
-4. continue to path planning
-5. then read SLAM
-6. finish with the robot runtime tutorial
+The tutorials increasingly move from isolated algorithms toward complete runtime contracts.
 
-## Local Development Checks
+## Development checks
 
-### Core checks
+Core crates:
 
 ```bash
 cargo check -p rust_robotics_core
 cargo check -p rust_robotics_algo
+cargo test -p rust_robotics_algo
 ```
 
-### Simulator checks
+Numerical invariants:
+
+```bash
+cargo test -p rust_robotics_algo --test numerical_invariants
+```
+
+Formatting and linting:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Simulator, with MuJoCo installed:
 
 ```bash
 MUJOCO_HOME=/path/to/mujoco cargo check -p rust_robotics_sim
 MUJOCO_HOME=/path/to/mujoco cargo test -p rust_robotics_sim --lib
 ```
 
-### Web checks
+Web/browser checks:
 
 ```bash
 cargo check -p rust_robotics_sim --target wasm32-unknown-unknown
 node --check rust_robotics_sim/web/mujoco_runtime.js
+node --check site_docs/_static/sim_embed.js
 ./build_web.sh --fast
+npm ci
 npm run test:web-smoke
 ```
 
-## Native And Web Targets
+Dependency audit:
 
-The project is intentionally usable in both native and browser environments.
+```bash
+cargo generate-lockfile
+cargo audit
+```
 
-### Native
+CI runs the native platform matrix, strict formatting/Clippy, documentation, numerical invariants,
+browser smoke tests, and dependency auditing.
 
-Native mode is the easiest place to use the full interactive app and the richer
-MuJoCo-backed runtime.
+## Native and web targets
 
-### Web
+Native mode is the richest environment for interactive simulation and MuJoCo-backed robot work.
+The browser build exists for education, lightweight sharing, and testing the same underlying Rust
+logic in an accessible environment.
 
-The browser build exists for accessibility, education, and lightweight sharing.
-The GitHub Pages deployment is structured so the tutorial site can embed focused
-simulator views from the hosted simulator bundle.
+The tutorial site embeds focused simulator views from the hosted web bundle rather than maintaining
+a separate implementation of each demonstration.
 
-## Documentation And Publishing
+## Documentation and publishing
 
-The simulator bundle and the tutorial site are built separately:
+Simulator and tutorial output are built separately:
 
 - simulator bundle: `docs/`
 - tutorial site: `site_docs/_build/html/`
 
-Helper script:
+The publishing helper can rebuild and sync both into the Pages repository:
 
 ```bash
 ./scripts/publish_pages.sh --build
 ```
 
-Default sync target:
-
-- `~/Dev/me/blog/yongkyuns.github.io`
-
-Default publish subdirectories:
-
-- `sim/`
-- `sim-tutorial/`
+The default target remains `~/Dev/me/blog/yongkyuns.github.io`, with `sim/` and `sim-tutorial/`
+subdirectories; use the script options or environment variables to override it.
 
 ## Why Rust
 
-Rust is useful here because the project wants explicit boundaries between:
+Rust fits this project because the codebase wants explicit boundaries between reusable algorithms,
+training state, portable model/state representations, and simulator/runtime ownership. It also
+keeps the project close to deployment and systems concerns instead of treating every algorithm as a
+notebook-only demonstration.
 
-- reusable algorithms
-- training logic
-- portable shared model/state representations
-- interactive simulation runtime
+## Current direction
 
-It is also a good fit for a codebase that wants to stay close to runtime and
-deployment concerns rather than only producing notebooks or one-off demos.
+Near-term work emphasizes:
 
-## Current Direction
+- correctness and numerical invariants before adding more breadth
+- guided, reproducible tutorial experiments
+- explicit feature-maturity and implementation caveats
+- cleaner algorithm/runtime dependency boundaries
+- trustworthy native/web behavior under CI
 
-The current documentation direction is:
-
-- learning-first tutorials
-- more explicit algorithm comparisons
-- more complexity and memory discussion
-- less focus on internal architecture for its own sake
-
-If you want a place to start, use:
-
-- docs homepage: <https://yongkyuns.github.io/sim-tutorial/>
-- simulator: <https://yongkyuns.github.io/sim/>
+Start at <https://yongkyuns.github.io/sim-tutorial/>.

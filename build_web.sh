@@ -10,8 +10,8 @@ while test $# -gt 0; do
   case "$1" in
     -h|--help)
       echo "build_web.sh [--fast] [--open]"
-      echo "  --fast: skip optimization step"
-      echo "  --open: open the result in a browser"
+      echo "  --fast: skip wasm-opt optimization"
+      echo "  --open: open the locally served simulator URL"
       exit 0
       ;;
     --fast)
@@ -23,33 +23,37 @@ while test $# -gt 0; do
       OPEN=true
       ;;
     *)
-      break
+      echo "Unknown argument: $1" >&2
+      exit 1
       ;;
   esac
 done
 
-# ./setup_web.sh # <- call this first!
+require_tool() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required tool: $1" >&2
+    echo "$2" >&2
+    exit 1
+  fi
+}
 
-FOLDER_NAME=${PWD##*/}
-# CRATE_NAME=$FOLDER_NAME # assume crate name is the same as the folder name
-CRATE_NAME=rust_robotics_sim # assume crate name is the same as the folder name
-CRATE_NAME_SNAKE_CASE="${CRATE_NAME//-/_}" # for those who name crates with-kebab-case
+require_tool cargo "Install Rust with rustup and add the wasm32-unknown-unknown target."
+require_tool jq "Install jq with your platform package manager."
+require_tool wasm-bindgen "Install wasm-bindgen-cli at the version used by CI."
+if [[ "${FAST}" == false ]]; then
+  require_tool wasm-opt "Install Binaryen or rerun with --fast to skip optimization."
+fi
 
-# This is required to enable the web_sys clipboard API which egui_web uses
-# https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.Clipboard.html
-# https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
+CRATE_NAME=rust_robotics_sim
+CRATE_NAME_SNAKE_CASE="${CRATE_NAME//-/_}"
+
 export RUSTFLAGS=--cfg=web_sys_unstable_apis
 
-# Clear output from old stuff:
 rm -f "docs/${CRATE_NAME_SNAKE_CASE}_bg.wasm"
 rm -rf "docs/vendor/onnxruntime-web"
-mkdir -p "docs/ort"
-mkdir -p "docs/vendor/mujoco"
-mkdir -p "docs/vendor/mujoco/mt"
-mkdir -p "docs/assets/mujoco"
+mkdir -p "docs/ort" "docs/vendor/mujoco/mt" "docs/assets/mujoco"
 
-rm -rf "docs/assets/mujoco/go2"
-rm -rf "docs/assets/mujoco/openduckmini"
+rm -rf "docs/assets/mujoco/go2" "docs/assets/mujoco/openduckmini"
 cp -R "rust_robotics_sim/assets/mujoco/go2" "docs/assets/mujoco/"
 cp -R "rust_robotics_sim/assets/mujoco/openduckmini" "docs/assets/mujoco/"
 
@@ -94,7 +98,6 @@ echo "Building web bundle…"
 BUILD=release
 cargo build -p "${CRATE_NAME}" --release --lib --target wasm32-unknown-unknown
 
-# Get the output directory (in the workspace it is in another location)
 TARGET=$(cargo metadata --format-version=1 | jq --raw-output .target_directory)
 
 echo "Generating JS bindings for wasm…"
@@ -102,9 +105,6 @@ TARGET_NAME="${CRATE_NAME_SNAKE_CASE}.wasm"
 WASM_PATH="${TARGET}/wasm32-unknown-unknown/${BUILD}/${TARGET_NAME}"
 wasm-bindgen "${WASM_PATH}" --out-dir docs --target web --no-typescript
 
-# Jekyll/GitHub Pages commonly drops underscore-prefixed static assets.
-# wasm-bindgen snippet output can include files like `_loader.js` and
-# `_telemetry.js`, so rewrite them to publish-safe names and update imports.
 if [[ -d "docs/snippets" ]]; then
   while IFS= read -r -d '' snippet_dir; do
     if [[ -f "${snippet_dir}/_loader.js" ]]; then
@@ -121,21 +121,19 @@ fi
 
 if [[ "${FAST}" == false ]]; then
   echo "Optimizing wasm…"
-  # to get wasm-opt:  apt/brew/dnf install binaryen
-  wasm-opt "docs/${CRATE_NAME}_bg.wasm" -O2 --fast-math -o "docs/${CRATE_NAME}_bg.wasm" # add -g to get debug symbols
+  wasm-opt "docs/${CRATE_NAME}_bg.wasm" -O2 --fast-math -o "docs/${CRATE_NAME}_bg.wasm"
 fi
 
 echo "Finished web bundle: docs/${CRATE_NAME_SNAKE_CASE}.wasm"
+echo "Serve it with ./start_server.sh and open http://127.0.0.1:3000/"
 
 if [[ "${OPEN}" == true ]]; then
+  url="http://127.0.0.1:3000/"
   if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    # Linux, ex: Fedora
-    xdg-open http://localhost:8080/index.html
+    xdg-open "$url"
   elif [[ "$OSTYPE" == "msys" ]]; then
-    # Windows
-    start http://localhost:8080/index.html
+    start "$url"
   else
-    # Darwin/MacOS, or something else
-    open http://localhost:8080/index.html
+    open "$url"
   fi
 fi

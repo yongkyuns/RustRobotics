@@ -1,15 +1,16 @@
 # Localization Tutorial
 
-Localization is the problem of estimating where the robot is when its motion is
-uncertain and its sensors are noisy. This tutorial focuses on one of the most
-important practical approaches to that problem: the particle filter.
+Localization is the problem of maintaining a belief about robot state when motion and sensing are
+uncertain. This chapter uses a particle filter because the individual hypotheses are visible: you
+can watch uncertainty spread, concentrate, collapse, and recover instead of treating the estimator
+as a black box.
 
 ```{raw} html
 <div class="sim-embed-card">
   <iframe
     class="sim-embed-frame"
     data-sim-mode="localization"
-    data-sim-path="?mode=localization&embed=focused&ui=20260416b"
+    data-sim-path="?mode=localization&embed=focused&ui=20260907a"
     title="Rust Robotics localization simulator"
     loading="lazy"
   ></iframe>
@@ -18,202 +19,191 @@ important practical approaches to that problem: the particle filter.
 
 ## Learning goals
 
-This chapter is meant to help you understand:
+By the end of this chapter, you should be able to:
 
-- why localization is a probabilistic inference problem
-- how particle filters represent uncertainty
-- why resampling is necessary
-- how noise parameters affect estimate quality, diversity, and recovery
-- what the computational and memory cost of a particle filter looks like in practice
+- explain why localization maintains a distribution rather than one exact pose
+- describe predict, weight, normalize, estimate, and resample steps
+- distinguish simulated sensor noise from noise assumed by the filter
+- explain effective sample size and particle degeneracy
+- recognize the repository's practical recovery heuristics as additions to a textbook particle filter
+- compare estimate error, particle spread, and computation rather than relying on visual smoothness
 
-## Where localization is used
+## The concrete estimator used here
 
-Localization appears almost everywhere in robotics:
-
-- mobile robots navigating indoor spaces
-- autonomous vehicles estimating pose relative to maps and sensors
-- drones estimating position and attitude
-- warehouse robots following known layouts
-- consumer robotics that combine odometry, landmarks, or camera information
-
-This tutorial focuses on particle filtering because it makes uncertainty visible
-in a very direct way.
-
-## The estimation problem
-
-Localization asks for the posterior over robot state given controls and sensor
-measurements:
+The reusable particle filter estimates the planar state
 
 $$
-p(x_t \mid z_{1:t}, u_{1:t})
+\mathbf{x} =
+\begin{bmatrix}
+p_x & p_y & \psi & v
+\end{bmatrix}^T,
 $$
 
-The key difficulty is that both motion and measurement are uncertain. The robot
-does not have direct access to the true state; it only has a motion model and
-noisy observations.
+where `p_x` and `p_y` are position, `\psi` is heading, and `v` is speed. Motion input contains
+forward velocity and yaw rate. Landmark observations contain **range to a known landmark
+position**.
 
-Even when the robot receives a control command, the realized motion is only
-approximately known. Even when the robot receives a measurement, the
-measurement is only probabilistically related to the true pose.
+The current algorithm crate uses **100 particles**. That is an implementation choice for this demo,
+not a property of particle filters in general.
 
-That is why localization is fundamentally about belief, not certainty.
-
-## The particle-filter approximation
-
-The particle filter approximates the posterior with weighted samples:
+The target posterior is
 
 $$
-p(x_t \mid z_{1:t}, u_{1:t}) \approx \sum_i w_t^{(i)} \delta(x_t - x_t^{(i)})
+p(x_t \mid z_{1:t},u_{1:t}),
 $$
 
-Each particle is one hypothesis about where the robot might be. The weights
-encode how plausible those hypotheses are after considering the newest
-measurement.
+approximated by weighted samples
 
-Each update has three stages:
+$$
+p(x_t \mid z_{1:t},u_{1:t}) \approx
+\sum_i w_t^{(i)}\,\delta(x_t-x_t^{(i)}).
+$$
 
-1. predict:
-   sample each particle through the motion model
-2. weight:
-   score each particle under the sensor likelihood
-3. resample:
-   concentrate computation on high-likelihood particles
+## One update, step by step
 
-That structure is conceptually simple, but it hides an important engineering
-tradeoff:
+### 1. Predict
 
-- if the filter spreads too much, the estimate becomes vague and noisy
-- if the filter collapses too quickly, it loses diversity and cannot recover
+Each particle is propagated through the motion model with perturbed control input. This spreads the
+belief according to the assumed motion uncertainty.
 
-## How particle filters compare to other estimators
+### 2. Weight
 
-| Method | Representation | Strength | Limitation |
-| --- | --- | --- | --- |
-| Kalman filter / EKF | Gaussian belief | efficient and elegant | limited by Gaussian and model assumptions |
-| Particle filter | weighted samples | handles non-Gaussian and multi-modal beliefs | higher compute and memory cost |
+For each landmark range observation, the predicted range from a particle to that landmark is
+compared with the measured range. Particles that explain the measurement well receive more weight.
 
-The particle filter is especially useful when ambiguity matters. If several
-poses are plausible, a sample-based representation can keep them alive instead
-of collapsing immediately to one mean and covariance.
+### 3. Normalize or recover
 
-## Why particle filters are useful
+Weights are normalized when their sum is usable. The repository also contains explicit recovery
+logic when weights collapse: particles can be regenerated around observations and weights reset.
 
-Particle filters are attractive because they can represent non-Gaussian and
-multi-modal beliefs. If the environment is ambiguous, a filter does not need to
-commit immediately to one Gaussian mean and covariance. It can carry multiple
-plausible pose clusters at once.
+### 4. Estimate
 
-This flexibility is the main reason particle filters remain so important in
-teaching and practice.
+The displayed estimate is formed from the weighted particle cloud. The current implementation also
+applies adaptive smoothing, especially while the cloud is widely spread or recovering.
 
-## Complexity and memory
+### 5. Resample
 
-Let `N` be the number of particles.
+Effective sample size is computed as
 
-- prediction cost: `O(N)`
-- weighting cost: `O(N * C_z)`, where `C_z` depends on the measurement model
-- resampling cost: often `O(N)`
-- memory: `O(N)` for particle states and weights
+$$
+N_{\text{eff}} = \frac{1}{\sum_i w_i^2}.
+$$
 
-This is one of the central tradeoffs of localization:
+When it falls below half the particle count, the implementation performs low-variance resampling.
 
-- more particles improve approximation quality
-- more particles also increase compute and memory cost
+```{admonition} This is a practical demo filter, not a minimal textbook filter
+:class: note-shell
 
-The simulator helps make this visible because particle count affects both the
-estimate and the visual density of the belief.
+The implementation mixes a small uniform component into the likelihood, detects severe weight
+collapse, can reset particles around observations, and smooths the final estimate adaptively.
+Those features make recovery easier to demonstrate, but they also mean you should not attribute
+every behavior you see to the basic particle-filter equations alone.
+```
 
-## Practical tradeoffs
+## Two different kinds of noise
 
-### More particles
+A frequent source of confusion in estimator demos is using one slider called "noise" for two very
+different ideas.
 
-- better approximation of the posterior
-- better recovery from ambiguity
-- higher runtime cost
-- higher memory cost
+**Simulation noise** changes the measurements or motion presented to the estimator. It represents
+what the world/sensors actually do.
 
-### Stronger sensor trust
+**Filter noise parameters** describe what the estimator believes about uncertainty. They determine
+how widely particles propagate and how sharply measurements are scored.
 
-- can sharpen the estimate quickly
-- can also overcommit to bad observations
+A well-tuned estimator does not necessarily assume the smallest possible noise. It should model the
+uncertainty of the data it actually receives.
 
-### Stronger motion noise
+## Experiment 1: motion uncertainty
 
-- can preserve diversity
-- can also make the estimate diffuse and unstable
+**Question:** What happens when the filter believes motion is less predictable?
 
-## What to look for in the simulator
+1. Start with the default localization setup.
+2. Let the vehicle move long enough to establish a compact cloud.
+3. Increase the filter's motion uncertainty while leaving the simulated path and measurement setup
+   otherwise unchanged.
+4. Compare particle spread, estimate lag, and recovery after turns.
 
-- the gap between true pose and estimated pose
-- how tightly or loosely the particles cluster
-- whether the cloud follows motion smoothly or lags
-- whether the filter can recover after the belief becomes diffuse
-- how ambiguity appears as multiple plausible regions
+**Prediction:** the cloud should spread more during prediction. That can improve robustness to
+motion-model mismatch, but it also makes the posterior less concentrated and costs more useful
+particle density around the best hypotheses.
 
-## Sensor model intuition
+## Experiment 2: sensor-model mismatch
 
-The sensor model determines how strongly a measurement should reward or punish a
-particle. If the measurement model is too sharp, the filter may overcommit to a
-bad measurement. If it is too loose, the filter may fail to use informative
-sensing.
+**Question:** Is trusting measurements more always better?
 
-That means more trust in the sensor is not always better. It is better only if
-the model is actually accurate.
+1. Establish a baseline with moderate measurement uncertainty.
+2. Make the filter's assumed observation noise smaller without improving the simulated sensor.
+3. Repeat with a larger assumed observation noise.
+4. Compare the estimate error and cloud behavior, especially after an unusually bad measurement.
 
-## Resampling and degeneracy
+**Prediction:** an overconfident likelihood can collapse the cloud around misleading observations;
+an overly broad likelihood can fail to extract enough information from good observations.
 
-Without resampling, many particles eventually receive negligible weight and stop
-contributing meaningfully to the posterior. This is called particle degeneracy.
+## Experiment 3: degeneracy and resampling
 
-Resampling addresses degeneracy by replicating high-weight particles and
-discarding low-weight ones. But resampling also reduces diversity.
+**Question:** Why not simply keep multiplying weights forever?
 
-So resampling solves one problem while creating another. Good particle-filter
-design is largely about balancing those two effects.
+1. Watch the particle weights/cloud through several informative updates.
+2. Look for a point where only a small fraction of particles remain plausible.
+3. Observe the cloud immediately after resampling.
+4. Compare concentration before and diversity after resampling.
 
-## Try this
+**What this teaches:** resampling redirects computation toward useful hypotheses, but repeated
+resampling can also remove diversity. It solves degeneracy by creating a different tradeoff.
 
-### Experiment 1: Motion uncertainty
+## Experiment 4: recovery is not the same as ordinary tracking
 
-1. Run the default setup and observe the particle cloud during turns.
-2. Increase motion noise.
-3. Watch the cloud spread and the estimate become less certain.
+**Question:** What additional mechanisms help once the belief is badly wrong?
 
-### Experiment 2: Measurement quality
+1. Create a high-uncertainty or temporarily unobservable situation.
+2. Allow the estimate and true state to separate.
+3. Restore informative observations.
+4. Watch the transition back toward a concentrated belief.
 
-1. Reset the scenario.
-2. Increase sensor noise.
-3. Observe how much less tightly the cloud recenters after informative observations.
+Interpret this experiment with the implementation notes above: recovery can include likelihood
+mixing, explicit particle reset, and output smoothing. A recovery success therefore demonstrates
+the whole estimator policy, not only resampling.
 
-### Experiment 3: Recovery behavior
+## Complexity
 
-1. Use a setting with high uncertainty.
-2. Let the filter drift away from the true pose.
-3. Watch whether repeated observations pull the estimate back into place.
+Let `N` be particle count and `M` the number of observations processed in one update.
 
-### Experiment 4: Stability versus responsiveness
+- prediction: `O(N)`
+- measurement weighting: approximately `O(NM)`
+- estimate and effective-sample-size calculations: `O(N)`
+- low-variance resampling: `O(N)`
+- particle storage: `O(N)`
 
-1. Compare a conservative noise setting and an aggressive one.
-2. Notice that one may look smoother while the other adapts faster.
-3. Decide which behavior would be preferable for a specific application.
+The current fixed-size implementation uses `N = 100`. A more complete performance experiment would
+make particle count configurable and measure both estimation quality and update time under the same
+seeded scenario.
 
-## Common mistakes when studying localization
+## What to measure
 
-- interpreting the mean estimate as the whole story
-- ignoring particle diversity
-- assuming a sharper sensor model is always better
-- forgetting that bad motion modeling can dominate the filter
-- overlooking the computational cost of increasing particle count
+When comparing settings, prefer:
 
-## What this chapter is really teaching
+- position error to the simulated truth
+- heading error
+- particle spread or covariance proxy
+- effective sample size before resampling
+- recovery time after loss of useful observations
+- update cost when particle count or observation count changes
 
-Localization is not about guessing position. It is about maintaining and
-updating a distribution over plausible states.
+A visually smooth estimate is not automatically a better estimate. Smoothing can hide uncertainty
+or delay correction.
 
-Once that viewpoint becomes natural, many robotics problems become easier to
-understand:
+## Common mistakes
 
-- uncertainty is explicit
-- sensing quality matters quantitatively
-- compute and memory tradeoffs become visible
-- and recovery is a statistical question, not a purely geometric one
+- interpreting the weighted mean as the whole belief
+- confusing simulation noise with estimator noise assumptions
+- assuming a sharper likelihood is always better
+- treating recovery heuristics as part of the canonical particle-filter derivation
+- judging one randomized run as a deterministic benchmark
+- ignoring how particle count trades compute for approximation quality
+
+## Where to go next
+
+The planning tutorial removes probabilistic state estimation and asks a different question: given a
+representation of free space, how much search is needed to produce a path, and what does
+"better path" actually mean?
