@@ -1,7 +1,6 @@
 /docs/rust_robotics_sim.js
 /docs/rust_robotics_sim_bg.wasm
 /target
-Cargo.lock
 .DS_Store
 slam_*.csv
 node_modules/
