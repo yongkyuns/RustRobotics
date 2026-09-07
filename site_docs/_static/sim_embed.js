@@ -17,6 +17,24 @@ function resolvedSimBase() {
   return new URL("/sim/", window.location.href).toString();
 }
 
+function frameOrigin(frame) {
+  const src = frame.getAttribute("src");
+  if (!src) {
+    return null;
+  }
+
+  try {
+    return new URL(src, window.location.href).origin;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function setEmbedStatus(frame, status) {
+  frame.dataset.embedStatus = status;
+  frame.setAttribute("aria-busy", status === "loading" ? "true" : "false");
+}
+
 function ensureFrameSrc(frame) {
   if (frame.dataset.srcInitialized === "1") {
     return;
@@ -25,6 +43,7 @@ function ensureFrameSrc(frame) {
   const simPath = frame.dataset.simPath;
   if (!simPath) {
     frame.dataset.srcInitialized = "1";
+    setEmbedStatus(frame, "error");
     return;
   }
 
@@ -32,8 +51,9 @@ function ensureFrameSrc(frame) {
     const url = new URL(simPath, resolvedSimBase());
     frame.setAttribute("src", url.toString());
     frame.dataset.srcInitialized = "1";
+    setEmbedStatus(frame, "loading");
   } catch (_error) {
-    // Ignore malformed runtime embed paths.
+    setEmbedStatus(frame, "error");
   }
 }
 
@@ -80,44 +100,6 @@ function updateEmbedFrame(frame) {
   frame.style.height = `${preferredEmbedHeight(width, mode)}px`;
 }
 
-function seedFrameTheme(frame) {
-  if (frame.dataset.themeSeeded === "1") {
-    return;
-  }
-
-  ensureFrameSrc(frame);
-  const src = frame.getAttribute("src");
-  if (!src) {
-    return;
-  }
-
-  try {
-    const url = new URL(src, window.location.href);
-    url.searchParams.set("theme", resolvedHostTheme());
-    frame.dataset.themeSeeded = "1";
-    frame.setAttribute("src", url.toString());
-  } catch (_error) {
-    // Ignore malformed or non-standard iframe src values.
-  }
-}
-
-function bindEmbedFrame(frame) {
-  const update = () => updateEmbedFrame(frame);
-  frame.dataset.heightReported = "";
-  ensureFrameSrc(frame);
-  seedFrameTheme(frame);
-  update();
-  frame.addEventListener("load", () => postThemeToFrame(frame));
-
-  if (typeof ResizeObserver !== "undefined") {
-    const target = frame.parentElement || frame;
-    const observer = new ResizeObserver(update);
-    observer.observe(target);
-  }
-
-  window.addEventListener("resize", update, { passive: true });
-}
-
 function resolvedHostTheme() {
   const candidates = [
     document.documentElement?.dataset?.theme,
@@ -137,14 +119,40 @@ function resolvedHostTheme() {
     : "dark";
 }
 
+function seedFrameTheme(frame) {
+  if (frame.dataset.themeSeeded === "1") {
+    return;
+  }
+
+  ensureFrameSrc(frame);
+  const src = frame.getAttribute("src");
+  if (!src) {
+    return;
+  }
+
+  try {
+    const url = new URL(src, window.location.href);
+    url.searchParams.set("theme", resolvedHostTheme());
+    frame.dataset.themeSeeded = "1";
+    frame.setAttribute("src", url.toString());
+  } catch (_error) {
+    setEmbedStatus(frame, "error");
+  }
+}
+
 function postThemeToFrame(frame) {
+  const origin = frameOrigin(frame);
+  if (!origin) {
+    return;
+  }
+
   try {
     frame.contentWindow?.postMessage(
       {
         type: "rust-robotics-theme",
         theme: resolvedHostTheme(),
       },
-      "*",
+      origin,
     );
   } catch (_error) {
     // Ignore transient cross-document startup races.
@@ -155,26 +163,72 @@ function postThemeToAllFrames() {
   document.querySelectorAll(".sim-embed-frame").forEach(postThemeToFrame);
 }
 
-window.addEventListener("message", (event) => {
-  const data = event.data;
-  if (!data || data.type !== "rust-robotics-embed-size" || typeof data.height !== "number") {
+function bindEmbedFrame(frame) {
+  if (frame.dataset.embedBound === "1") {
     return;
   }
+  frame.dataset.embedBound = "1";
+  frame.dataset.heightReported = "";
 
+  ensureFrameSrc(frame);
+  seedFrameTheme(frame);
+  updateEmbedFrame(frame);
+
+  frame.addEventListener("load", () => {
+    postThemeToFrame(frame);
+    if (frame.dataset.embedStatus !== "ready") {
+      setEmbedStatus(frame, "loaded");
+    }
+  });
+
+  frame.addEventListener("error", () => setEmbedStatus(frame, "error"));
+
+  if (typeof ResizeObserver !== "undefined") {
+    const target = frame.parentElement || frame;
+    const observer = new ResizeObserver(() => updateEmbedFrame(frame));
+    observer.observe(target);
+  }
+
+  window.addEventListener("resize", () => updateEmbedFrame(frame), { passive: true });
+}
+
+function frameForMessage(event) {
   const frames = [...document.querySelectorAll(".sim-embed-frame")];
-  const targetFrames = frames.filter((frame) => {
+  return frames.find((frame) => {
     try {
-      return frame.contentWindow === event.source;
+      return frame.contentWindow === event.source && frameOrigin(frame) === event.origin;
     } catch (_error) {
       return false;
     }
   });
-  const framesToUpdate = targetFrames.length > 0 ? targetFrames : frames;
+}
 
-  for (const frame of framesToUpdate) {
+window.addEventListener("message", (event) => {
+  const frame = frameForMessage(event);
+  if (!frame) {
+    return;
+  }
+
+  const data = event.data;
+  if (!data || typeof data.type !== "string") {
+    return;
+  }
+
+  if (data.type === "rust-robotics-embed-size" && typeof data.height === "number") {
     const reportedHeight = Math.round(clamp(data.height, 480, 2000));
     frame.dataset.heightReported = "1";
     frame.style.height = `${reportedHeight}px`;
+    setEmbedStatus(frame, "ready");
+    return;
+  }
+
+  if (data.type === "rust-robotics-embed-ready") {
+    setEmbedStatus(frame, "ready");
+    return;
+  }
+
+  if (data.type === "rust-robotics-embed-error") {
+    setEmbedStatus(frame, "error");
   }
 });
 
@@ -183,9 +237,7 @@ function initializeEmbedFrames() {
   postThemeToAllFrames();
 
   if (typeof MutationObserver !== "undefined") {
-    const observer = new MutationObserver(() => {
-      postThemeToAllFrames();
-    });
+    const observer = new MutationObserver(() => postThemeToAllFrames());
     if (document.documentElement) {
       observer.observe(document.documentElement, {
         attributes: true,
