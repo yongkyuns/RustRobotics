@@ -1,21 +1,20 @@
 # Control Systems Tutorial
 
-The inverted pendulum is one of the classic teaching systems in robotics and
-control because it sits at the right level of difficulty. It is simple enough
-to derive by hand, but difficult enough to expose the central questions of
-modern control:
+The inverted pendulum is a compact way to study a question that appears throughout robotics:
+how should a controller trade state error against control effort when the plant is unstable and
+its states are coupled?
 
-- how should a controller react to state error?
-- what assumptions are hidden inside a linear model?
-- when does planning outperform fixed feedback?
-- when does a learned policy behave differently from a model-based controller?
+This chapter uses one shared nonlinear cart-pole simulation to compare PID, LQR, MPC, and a PPO
+policy. The goal is not to pick a universal winner. It is to understand what information each
+controller uses, what assumptions it makes, and what changes when those assumptions stop matching
+the plant.
 
 ```{raw} html
 <div class="sim-embed-card">
   <iframe
     class="sim-embed-frame"
     data-sim-mode="inverted_pendulum"
-    data-sim-path="?mode=inverted_pendulum&embed=focused&ui=20260416w"
+    data-sim-path="?mode=inverted_pendulum&embed=focused&ui=20260907a"
     title="Rust Robotics control systems simulator"
     loading="lazy"
   ></iframe>
@@ -24,321 +23,232 @@ modern control:
 
 ## Learning goals
 
-By the end of this chapter, you should be able to explain:
+By the end of this chapter, you should be able to:
 
-- why the inverted pendulum is unstable around the upright equilibrium
-- what information PID, LQR, MPC, and PPO use when choosing control
-- what each method costs computationally
-- when a local linear model is adequate and when it becomes misleading
-- how to read oscillation, overshoot, and settling behavior in the live demo
+- explain why the upright equilibrium is unstable
+- distinguish the nonlinear simulated plant from the linear controller model
+- explain what PID, LQR, MPC, and PPO use when choosing an action
+- compare controllers under the same state, objective, and disturbance assumptions
+- interpret overshoot, settling, cart excursion, and control effort
+- identify when an apparent algorithm comparison is really a tuning or objective comparison
 
-## Where these algorithms are used
+## The exact system used here
 
-The inverted pendulum is a teaching system, but the control ideas are widely
-used in real applications:
-
-- PID:
-  low-level industrial loops, motors, temperature control, simple balancing systems
-- LQR:
-  aerospace control, balancing systems, trajectory stabilization, linearized multivariable regulation
-- MPC:
-  autonomous driving, process control, constrained motion systems, energy systems
-- PPO and related RL policies:
-  learned control in simulation, locomotion, game-like environments, tasks with difficult hand-modeling
-
-The pendulum matters because it lets these methods be compared under one shared
-plant without hiding the core tradeoffs.
-
-## The control problem
-
-The problem is to keep the pole upright while also controlling cart motion. The
-system state is:
+The simulator state is
 
 $$
 \mathbf{x} =
 \begin{bmatrix}
 x & \dot{x} & \theta & \dot{\theta}
-\end{bmatrix}^T
+\end{bmatrix}^T,
 $$
 
-where:
+where `x` is cart position, `\dot{x}` is cart velocity, `\theta` is pole angle, and
+`\dot{\theta}` is pole angular velocity. The control input `u` is horizontal cart force.
 
-- `x` is cart position
-- `\dot{x}` is cart velocity
-- `\theta` is pole angle
-- `\dot{\theta}` is pole angular velocity
-
-The control input is the horizontal force `u` applied to the cart.
-
-Two facts make this system educational:
-
-1. the upright equilibrium is unstable
-2. the state variables are coupled, so correcting the angle affects the cart
-   and correcting the cart affects the angle
-
-That coupling is exactly why multivariable control is more interesting than
-single-loop intuition suggests.
-
-## Linearization and the local model
-
-Around the upright equilibrium, the nonlinear dynamics can be linearized into a
-state-space model:
+The live plant is **nonlinear** and is integrated with fourth-order Runge-Kutta. The fixed
+pendulum simulation step is **0.01 s**. Around the upright equilibrium, the classical model-based
+controllers use the linear approximation
 
 $$
-\dot{\mathbf{x}} = A\mathbf{x} + B\mathbf{u}
+\dot{\mathbf{x}} = A\mathbf{x} + B\mathbf{u},
 $$
 
-This local model is not the full physics of the pendulum. It is an approximation
-valid near the upright position. That approximation is powerful because it makes
-several important tools practical:
-
-- LQR can solve a quadratic optimal control problem in closed form
-- MPC can optimize over a linear prediction model efficiently
-- stability and tuning intuition become easier to reason about analytically
-
-But it also has a limit: far from the operating point, the nonlinear plant
-matters. In practice, this means:
-
-- small disturbances are usually well described by the linear model
-- large excursions reveal the limitations of linear assumptions
-
-The simulator is useful precisely because you can see the difference.
-
-## The controller families in this tutorial
-
-The tutorial exposes four control families on the same plant:
-
-- `PID`
-- `LQR`
-- `MPC`
-- `PPO Policy`
-
-All of them answer the same question:
-
-> Given the current state, what force should be applied now?
-
-The difference is in how they represent the problem and what they optimize.
-
-## High-level comparison
-
-| Method | Main idea | Best fit | Main limitation |
-| --- | --- | --- | --- |
-| PID | correct the observed error directly | simple regulation tasks | weak handling of strong coupling |
-| LQR | compute optimal linear feedback from a model and quadratic cost | local stabilization around an operating point | depends on linear model validity |
-| MPC | solve a finite-horizon optimization problem repeatedly | constrained or anticipatory control | computational cost |
-| PPO | learn a policy from interaction data | hard-to-model or reward-defined tasks | training cost and weaker interpretability |
-
-## PID: error correction without a system model
-
-PID is the most familiar controller because it treats the task as error
-correction:
+which the reusable algorithm crate discretizes with first-order forward Euler:
 
 $$
-u(t) = K_p e(t) + K_i \int e(t)\,dt + K_d \frac{de(t)}{dt}
+A_d \approx I + A_c\Delta t, \qquad B_d \approx B_c\Delta t.
 $$
 
-In discrete time, the implementation approximates the derivative with finite
-differences and accumulates the integral numerically.
+This distinction is deliberate. LQR and MPC therefore control a nonlinear plant using a local
+linear model. Small-angle behavior is a model-matched regime; large excursions reveal model
+mismatch.
 
-### What PID gets right
+```{admonition} Important comparison rule
+:class: note-shell
 
-- intuitive tuning
-- low computational cost
-- effective on many simple regulation problems
+Changing controller type is not enough to create a fair experiment. Cost weights, initial state,
+noise, and constraints can change the result as much as the algorithm family. When comparing two
+controllers, first decide which of those quantities you intend to hold fixed.
+```
 
-### What PID struggles with here
+## A useful measurement set
 
-The pendulum is not a one-variable problem. The pole angle, cart position, and
-their velocities are coupled. A PID loop can still work as a baseline, but it
-does not naturally encode that coupling in an optimal way.
+Do not judge a controller only by whether the pole remains upright. For each experiment, watch:
 
-### Cost profile
-
-- time per update: constant, very small
-- memory: constant
-- tuning burden: potentially high, because gains are hand-chosen
-
-## LQR: optimal linear feedback
-
-LQR starts from the linearized model and chooses a feedback gain that minimizes
-a long-horizon quadratic cost:
-
-$$
-J = \sum_{k=0}^{\infty} \left(x_k^T Q x_k + u_k^T R u_k\right)
-$$
-
-The matrices `Q` and `R` encode what should be expensive:
-
-- large state errors
-- large control effort
-
-The solution comes from the discrete Riccati equation. Once the stabilizing
-matrix `P` is found, the controller is:
-
-$$
-u_k = -K x_k
-$$
-
-### Why LQR matters
-
-LQR is one of the cleanest examples of good engineering through modeling. Once
-the linear model and cost weights are chosen, the controller follows directly.
-
-It also illustrates a larger engineering lesson: a good local model can turn a
-hard control problem into a very clean one.
-
-### Cost profile
-
-- offline work: solve the Riccati equation
-- online work: one matrix-vector multiply per step
-- memory: store model matrices and feedback gain
-
-That makes LQR extremely attractive when the local model is good enough.
-
-## MPC: optimization at runtime
-
-Model predictive control solves a finite-horizon optimization problem at every
-time step:
-
-$$
-\min_{\{x_k, u_k\}} \sum_{k=0}^{N-1} \left(x_k^T Q x_k + u_k^T R u_k\right) + x_N^T P x_N
-$$
-
-subject to dynamics and any relevant constraints.
-
-Only the first control is applied. Then the horizon shifts and the optimization
-is solved again.
-
-### Why MPC often looks smoother or more deliberate
-
-Unlike LQR, MPC is not tied to a single static feedback law. It plans a short
-sequence, then re-plans as the state changes. This is especially valuable when:
-
-- constraints matter
-- finite-horizon behavior matters
-- the best immediate action depends strongly on near-future consequences
-
-### Cost profile
-
-- online work: solve an optimization problem every step
-- memory: store prediction model, horizon data, and solver state
-- tuning burden: cost weights plus horizon and constraint choices
-
-MPC is usually the most computationally expensive controller in this tutorial.
-
-## PPO policy: learned feedback
-
-The PPO controller replaces an explicit analytical control law with a neural
-policy:
-
-$$
-u = \pi_\theta(o)
-$$
-
-where `o` is the observation and `\theta` are learned parameters.
-
-The important distinction is not simply neural network versus equation. The
-real distinction is that PPO learns from repeated interaction and reward design
-rather than directly from a system model and explicit control objective.
-
-### Cost profile
-
-- training cost: high
-- inference cost: usually modest
-- memory: model parameters plus any recurrent or optimizer state during training
-
-Once trained, a policy can be cheap to execute, but the design effort moves from
-model derivation to reward shaping, training setup, and data collection.
-
-## Practical comparison points
-
-### Interpretability
-
-- PID and LQR are highly interpretable
-- MPC is interpretable, but more dependent on optimization setup
-- PPO policies are usually least interpretable
-
-### Tuning burden
-
-- PID often looks simple but can be tedious to tune well
-- LQR replaces gain tuning with cost design
-- MPC adds horizon and solver choices
-- PPO moves the burden toward reward design, training stability, and data collection
-
-### Runtime burden
-
-- PID and LQR are usually cheap enough for tight control loops
-- MPC may require careful engineering for real-time performance
-- PPO inference can be cheap, but only after expensive training
-
-## Complexity and memory summary
-
-| Method | Online time cost | Memory cost | Main strength | Main weakness |
-| --- | --- | --- | --- | --- |
-| PID | very low | very low | simplicity | weak handling of coupled dynamics |
-| LQR | very low | low | principled multivariable feedback | limited to local linear model |
-| MPC | high | moderate | explicit short-horizon optimization | runtime cost |
-| PPO | moderate at inference, high in training | model-dependent | flexible learned behavior | training burden and weaker interpretability |
-
-## What to look at
-
-- angle stabilization and cart stabilization together
-- overshoot after a disturbance
-- settling time
+- peak pole-angle error
+- settling behavior
+- maximum cart excursion
 - residual oscillation
-- control aggressiveness
-- sensitivity to noise or bad parameter choices
+- peak and sustained control effort
+- failure or recovery after a large excursion
 
-A common mistake is to look only at whether the pole stays up. A good controller
-does more than merely avoid failure. It also balances smoothness, effort, and
-recovery behavior.
+The plots make these quantities visible even when two animations look superficially similar.
 
-## Try this
+## PID: reactive error correction
 
-### Experiment 1: Compare local feedback laws
+The pendulum PID baseline acts on pole-angle error:
 
-1. Use `LQR` as a baseline.
-2. Switch to `PID`.
-3. Adjust gains until the response becomes oscillatory or sluggish.
-4. Compare the shape of the recovery, not just the final outcome.
+$$
+u(t) = K_p e(t) + K_i \int e(t)\,dt + K_d \frac{de(t)}{dt}.
+$$
 
-### Experiment 2: Compare planning to fixed feedback
+The default implementation uses gains `Kp = 25`, `Ki = 3`, and `Kd = 3`. It is intentionally a
+simple baseline: the controller directly regulates angle rather than solving a coupled optimal
+control problem over the full state.
 
-1. Switch from `LQR` to `MPC`.
-2. Apply a disturbance or restart from a challenging state.
-3. Watch whether the MPC controller appears more anticipatory.
+That makes PID useful for learning two things. First, very inexpensive feedback can stabilize a
+surprisingly difficult plant. Second, stabilizing the pole is not identical to managing cart
+position, velocity, and control effort well.
 
-### Experiment 3: Compare learned and model-based control
+## LQR: local optimal feedback
 
-1. Select `PPO Policy`.
-2. Compare its corrections to `LQR` and `MPC`.
-3. Look for differences in smoothness, aggressiveness, and repeated micro-corrections.
+LQR starts from the linearized discrete model and minimizes
 
-### Experiment 4: Study robustness
+$$
+J = \sum_{k=0}^{\infty}
+\left(x_k^T Q x_k + u_k^T R u_k\right).
+$$
 
-1. Add observation noise.
-2. Repeat the same experiment across several controllers.
-3. Observe which controllers degrade gracefully and which become brittle.
+The matrices `Q` and `R` determine what the controller considers expensive. Once the Riccati
+solution and feedback gain are prepared, the familiar LQR runtime law is
 
-## Common pitfalls
+$$
+u_k = -Kx_k.
+$$
 
-- confusing local stability with global stability
-- over-tuning for one initial condition
-- treating low overshoot as the only marker of quality
-- ignoring control effort
-- comparing learned and analytical controllers without considering training cost
+In the current reusable implementation, `K` is recomputed when `control()` is called rather than
+cached as a prepared controller. That is convenient for a small educational system but is not the
+runtime structure you would normally choose for a fixed embedded control loop. Treat the
+complexity discussion here as the algorithmic structure of LQR, not a claim that this current API
+has already optimized away controller preparation.
 
-## What this chapter is really teaching
+The default model uses
 
-The inverted pendulum is not important because pendulums are common industrial
-systems. It is important because it reveals a general lesson:
+$$
+Q = \operatorname{diag}(0, 1, 1, 0), \qquad R = 0.01.
+$$
 
-different controllers encode different beliefs about the world.
+Notice that default cart-position error has zero direct state cost. This is a useful tuning lesson:
+a controller can be very good at the objective you gave it while looking bad under an objective
+you never encoded.
 
-- PID assumes reactive error correction is enough
-- LQR assumes a local linear model is the right abstraction
-- MPC assumes online planning is worth the cost
-- PPO assumes a policy can be learned effectively from interaction
+## MPC: finite-horizon optimization at runtime
 
-Once you understand those differences here, you can recognize the same ideas in
-larger robotic systems.
+MPC repeatedly solves
+
+$$
+\min_{\{x_k,u_k\}}
+\sum_{k=0}^{N-1}
+\left(x_k^TQx_k + u_k^TRu_k\right) + x_N^TPx_N
+$$
+
+subject to its prediction model and constraints. Only the first control action is applied before
+the problem is solved again.
+
+The pendulum demo currently uses a horizon of **12** in the focused web controls. Its default stage
+cost is not identical to the default LQR cost: the simulator sets MPC state weights to
+`diag(1, 1, 10, 1)`. That means a default LQR-versus-MPC run compares both the method **and** the
+objective. This is fine for exploring tuned behavior, but it should not be interpreted as a
+controlled algorithm-only benchmark.
+
+MPC also has a qualitatively different failure mode: an optimizer can fail to produce a usable
+solution. A production controller should expose that status and define a deliberate fallback
+rather than treating solver failure as ordinary control output.
+
+## PPO: learned feedback
+
+The PPO controller evaluates a learned policy
+
+$$
+u = \pi_\theta(o).
+$$
+
+The main distinction is not simply "neural network versus equation." The policy is produced by a
+training process and reward design rather than directly by solving a model-based control problem.
+Training cost, reproducibility, action bounds, checkpoint semantics, and policy readiness therefore
+belong to the comparison just as much as inference cost does.
+
+The PPO path in this repository should be treated as an evolving educational feature while the
+tracked policy-objective and bounded-action correctness work is completed. Do not use one short
+training run as evidence that PPO is inherently better or worse than the classical controllers.
+
+## Experiment 1: separate stabilization from cart regulation
+
+**Question:** Can the pole look well controlled while the cart objective is poor?
+
+1. Reset the pendulum and select LQR.
+2. Disable added noise.
+3. Observe pole angle, cart position, and control effort under the default weights.
+4. Increase the cart-position weight while leaving the other weights unchanged.
+5. Reset and compare the new response.
+
+**Prediction:** increasing cart-position cost should make the controller care more explicitly about
+cart excursion. The exact trajectory varies because the current reset path randomizes the initial
+pole angle, so compare several resets rather than treating one run as a deterministic benchmark.
+
+**What this teaches:** "optimal" always means optimal for a specified model and objective.
+
+## Experiment 2: expose local-model limits
+
+**Question:** When does the linear controller model stop describing the nonlinear plant well?
+
+1. Select LQR and begin from an ordinary small-angle reset.
+2. Observe the recovery.
+3. Repeat from progressively more challenging pole angles or disturbances.
+4. Compare recovery time, peak force, and whether the pole leaves the local stabilization region.
+
+**Prediction:** behavior should degrade as the trajectory spends more time far from the upright
+linearization point.
+
+**What this teaches:** local linear control can be excellent without being globally valid.
+
+## Experiment 3: compare objectives before algorithms
+
+**Question:** Is MPC's visible behavior caused by planning, or by different cost weights?
+
+1. Record the active LQR `Q` and `R` values.
+2. Record the active MPC `Q`, `R`, and horizon.
+3. Compare the default responses and note that both method and objective changed.
+4. Then make the state/control costs as similar as the current UI permits and repeat.
+
+**Prediction:** part of the default visual difference should disappear when the objectives become
+more comparable. Any remaining difference is a more meaningful place to discuss finite-horizon
+optimization versus static feedback.
+
+## Experiment 4: robustness under measurement and actuation noise
+
+**Question:** Which controller degrades gracefully under the same disturbance model?
+
+1. Choose a controller and establish a no-noise baseline.
+2. Enable noise at a low level.
+3. Increase it gradually without changing controller tuning.
+4. Repeat for the other controllers.
+5. Compare angle error, cart excursion, control effort, and failure rate across multiple resets.
+
+The simulator perturbs both measured state and applied force when pendulum noise is enabled. This
+is therefore a combined sensing-and-actuation robustness experiment, not a pure sensor-noise test.
+
+## Complexity and implementation reality
+
+| Method | Algorithmic online work after preparation | Current demo caveat | Main tradeoff |
+| --- | --- | --- | --- |
+| PID | constant scalar arithmetic | angle-focused baseline | simple but weakly expresses coupling |
+| LQR | matrix-vector multiply | current API recomputes the Riccati solution/gain | excellent local linear feedback |
+| MPC | optimization every step | horizon and objective differ from default LQR | constraints and anticipation at runtime cost |
+| PPO | neural-policy inference | correctness/reproducibility work is still tracked | flexible learned behavior after training |
+
+## Common mistakes
+
+- comparing controller names while silently changing objectives
+- calling local stabilization "global stability"
+- looking only at pole survival and ignoring cart excursion or effort
+- drawing conclusions from one randomized reset
+- comparing PPO inference cost without including training and reproducibility
+- treating solver fallback as though it were an intended MPC action
+
+## Where to go next
+
+After this chapter, use the localization tutorial to see the same experimental discipline applied
+to uncertainty: define the state and sensor model, change one assumption at a time, and measure how
+the estimator responds rather than relying only on visual plausibility.
