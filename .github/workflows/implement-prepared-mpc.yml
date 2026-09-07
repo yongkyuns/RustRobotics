@@ -14,10 +14,11 @@ jobs:
   implement:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: improve/prepared-mpc-runtime
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -40,9 +41,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
           echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-      - name: Implement and validate prepared MPC
+      - name: Capture reference outputs and implement prepared MPC
+        run: python3 .github/scripts/validate_prepared_mpc.py
+      - name: Validate prepared MPC and simulator cache lifecycle
         run: |
-          python3 .github/scripts/implement_prepared_mpc.py
           cargo fmt --all
           cargo test -p rust_robotics_algo control::inverted_pendulum::mpc
           cargo clippy -p rust_robotics_algo --all-targets -- -D warnings
@@ -53,5 +55,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add rust_robotics_algo/src/control/inverted_pendulum/mpc.rs rust_robotics_sim/src/simulator/pendulum/domain.rs rust_robotics_sim/src/simulator/pendulum/tests.rs
-          git commit -m "Prepare MPC problem data for runtime reuse"
+          git commit -m "Prepare MPC data with reference and cache lifecycle regressions"
           git push origin HEAD:improve/prepared-mpc-runtime
