@@ -149,8 +149,8 @@ impl LoopClosureDetector {
             current_pose_idx.saturating_sub(self.config.min_temporal_separation);
         let mut closures = Vec::new();
 
-        for candidate_idx in 0..=max_candidate_idx.min(poses.len().saturating_sub(1)) {
-            let candidate_pose = &poses[candidate_idx];
+        let candidate_count = max_candidate_idx.min(poses.len().saturating_sub(1)) + 1;
+        for (candidate_idx, candidate_pose) in poses.iter().enumerate().take(candidate_count) {
             let dx = current_pose.x - candidate_pose.x;
             let dy = current_pose.y - candidate_pose.y;
             if (dx * dx + dy * dy).sqrt() > self.config.proximity_threshold {
@@ -681,11 +681,13 @@ mod tests {
         add_observations_from_pose(&mut graph, 0, poses[0], &landmarks, &covariance);
         add_observations_from_pose(&mut graph, 4, poses[4], &landmarks, &covariance);
 
-        let mut config = LoopClosureConfig::default();
-        config.proximity_threshold = 1.0;
-        config.min_temporal_separation = 3;
-        config.landmark_observation_gap = 3;
-        config.min_common_landmarks = 3;
+        let config = LoopClosureConfig {
+            proximity_threshold: 1.0,
+            min_temporal_separation: 3,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
         let closures = LoopClosureDetector::with_config(config).detect(
             &graph.poses,
             &graph.landmarks,
@@ -730,11 +732,13 @@ mod tests {
         );
         add_observations_from_pose(&mut graph, 4, ground_truth_current, &landmarks, &covariance);
 
-        let mut config = LoopClosureConfig::default();
-        config.proximity_threshold = 0.1;
-        config.min_temporal_separation = 3;
-        config.landmark_observation_gap = 3;
-        config.min_common_landmarks = 3;
+        let config = LoopClosureConfig {
+            proximity_threshold: 0.1,
+            min_temporal_separation: 3,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
         let closures = LoopClosureDetector::with_config(config).detect(
             &graph.poses,
             &graph.landmarks,
@@ -794,10 +798,12 @@ mod tests {
                 &covariance,
             );
         }
-        let mut config = LoopClosureConfig::default();
-        config.proximity_threshold = 0.1;
-        config.landmark_observation_gap = 3;
-        config.min_common_landmarks = 3;
+        let config = LoopClosureConfig {
+            proximity_threshold: 0.1,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
         assert!(LoopClosureDetector::with_config(config)
             .detect(
                 &graph.poses,
@@ -829,11 +835,13 @@ mod tests {
             .expect("fixture observation")
             .is_outlier = true;
 
-        let mut config = LoopClosureConfig::default();
-        config.proximity_threshold = 20.0;
-        config.min_temporal_separation = 3;
-        config.landmark_observation_gap = 3;
-        config.min_common_landmarks = 3;
+        let config = LoopClosureConfig {
+            proximity_threshold: 20.0,
+            min_temporal_separation: 3,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
         let closures = LoopClosureDetector::with_config(config).detect(
             &graph.poses,
             &graph.landmarks,
@@ -899,8 +907,10 @@ mod tests {
 
     #[test]
     fn chi_square_gate_uses_fitted_residual_degrees_of_freedom() {
-        let mut config = LoopClosureConfig::default();
-        config.chi2_confidence = 0.99;
+        let config = LoopClosureConfig {
+            chi2_confidence: 0.99,
+            ..Default::default()
+        };
         let detector = LoopClosureDetector::with_config(config);
         assert_eq!(LoopClosureDetector::alignment_degrees_of_freedom(3), 3);
         assert!(
