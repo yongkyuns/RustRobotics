@@ -32,6 +32,13 @@ jobs:
       - name: Audit Rust dependencies
         run: cargo audit
 
+      - name: Upload resolved lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolved-cargo-lock
+          path: Cargo.lock
+          if-no-files-found: error
+
   docs-javascript:
     name: Tutorial JavaScript syntax
     runs-on: ubuntu-latest
