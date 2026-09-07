@@ -1,66 +1,55 @@
 //! Loop closure detection for Graph SLAM
 //!
-//! Loop closure is essential for correcting accumulated drift when the robot
-//! revisits a previously mapped area. This module provides:
-//!
-//! 1. **Proximity search**: Find candidate poses within a spatial threshold
-//! 2. **Landmark matching**: Find common landmarks between current and candidate poses
-//! 3. **Transform estimation**: Compute relative transform from matched landmarks
-//! 4. **Validation**: Chi-squared test to reject false positives
-//!
-//! ## Algorithm Overview
-//!
-//! 1. For the current pose, find all poses within `proximity_threshold` distance
-//! 2. Filter out recent poses (within `min_temporal_separation`)
-//! 3. For each candidate, find common observed landmarks
-//! 4. If enough common landmarks (≥3), estimate relative transform using SVD
-//! 5. Validate the closure using chi-squared test
-//! 6. Add validated closures as odometry constraints
-//!
-//! ## References
-//! - [Real-Time Loop Closure in 2D LIDAR SLAM](https://research.google/pubs/pub45466/)
-//! - [slam_toolbox Loop Closure](https://github.com/SteveMacenski/slam_toolbox)
+//! Loop closures are estimated directly from matched range/bearing observations so
+//! that the measurement remains independent of drifted graph poses and landmark
+//! estimates. Rejected/down-weighted observations are excluded, the rigid fit is
+//! covariance weighted, and the final consistency gate uses the residual degrees
+//! of freedom of the fitted 2D rigid transform.
 
-use nalgebra::{Matrix3, Vector2, Vector3};
+use crate::slam::robust_kernels::chi_squared;
+use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 
-/// A detected loop closure between two poses
+/// A detected loop closure between two poses.
 #[derive(Debug, Clone)]
 pub struct LoopClosure {
-    /// Index of the candidate (older) pose
+    /// Index of the candidate (older) pose.
     pub from_pose_idx: usize,
-    /// Index of the current (newer) pose
+    /// Index of the current (newer) pose.
     pub to_pose_idx: usize,
-    /// Relative transform (dx, dy, dtheta) from candidate to current in candidate's frame
+    /// Relative transform `(dx, dy, dtheta)` from candidate to current in the
+    /// candidate frame.
     pub transform: Vector3<f32>,
-    /// Confidence score (higher is better)
+    /// Confidence score (higher is better).
     pub confidence: f32,
-    /// Number of matched landmarks
+    /// Number of matched usable landmarks.
     pub num_matches: usize,
-    /// Mean matched-observation Mahalanobis error (lower is better fit)
+    /// Total matched-observation chi-squared statistic after fitting the 2D rigid
+    /// transform. Lower is better; acceptance accounts for `2N - 3` residual DOF.
     pub mahalanobis_sq: f32,
 }
 
-/// Configuration for loop closure detection
+/// Configuration for loop closure detection.
 #[derive(Debug, Clone)]
 pub struct LoopClosureConfig {
-    /// Maximum distance to consider a candidate pose (meters)
+    /// Maximum distance to consider a candidate pose (meters).
     pub proximity_threshold: f32,
-    /// Minimum number of poses between current and candidate
+    /// Minimum number of poses between current and candidate.
     pub min_temporal_separation: usize,
-    /// Minimum number of common landmarks for matching
+    /// Minimum number of common usable landmarks for matching.
     pub min_common_landmarks: usize,
-    /// Chi-squared confidence level for validation (0.95 or 0.99)
+    /// Chi-squared confidence level for observation-consistency validation.
     pub chi2_confidence: f64,
-    /// Maximum mean matched-observation Mahalanobis error for acceptance
+    /// Additional upper bound on reduced chi-squared (`chi2 / DOF`). This is kept
+    /// for API compatibility; the DOF-aware chi-squared gate is the primary test.
     pub max_mahalanobis_sq: f32,
-    /// Covariance for loop closure constraints
+    /// Covariance for loop closure constraints added to the graph.
     pub closure_covariance: Matrix3<f32>,
-    /// Enable landmark-based loop closure (works even with pose drift)
+    /// Enable landmark-based loop closure (works even with pose drift).
     pub enable_landmark_based: bool,
-    /// Minimum gap in pose indices since last observation of a landmark
-    /// to trigger landmark-based loop closure
+    /// Minimum gap in pose indices since last observation of a landmark to trigger
+    /// landmark-based loop closure.
     pub landmark_observation_gap: usize,
 }
 
@@ -71,7 +60,9 @@ impl Default for LoopClosureConfig {
             min_temporal_separation: 10,
             min_common_landmarks: 3,
             chi2_confidence: 0.95,
-            max_mahalanobis_sq: 11.345, // Chi-squared 3 DOF at 99%
+            // Deliberately loose as a secondary reduced-statistic safety cap. The
+            // primary gate is chi_squared::is_outlier with the fitted residual DOF.
+            max_mahalanobis_sq: 11.345,
             closure_covariance: Matrix3::from_diagonal(&Vector3::new(0.2, 0.2, 0.05)),
             enable_landmark_based: true,
             landmark_observation_gap: 15,
@@ -80,10 +71,6 @@ impl Default for LoopClosureConfig {
 }
 
 /// Loop-closure detector for graph SLAM.
-///
-/// The detector combines simple spatial heuristics with landmark-consistency
-/// checks so that revisiting a previously mapped region can add a corrective
-/// long-range constraint to the graph.
 pub struct LoopClosureDetector {
     config: LoopClosureConfig,
 }
@@ -102,14 +89,12 @@ impl LoopClosureDetector {
         }
     }
 
-    /// Creates a detector with a caller-provided configuration.
+    /// Creates a detector with caller-provided configuration.
     pub fn with_config(config: LoopClosureConfig) -> Self {
         Self { config }
     }
 
-    /// Detect loop closures for the current pose
-    ///
-    /// Returns a list of validated loop closures that can be added to the graph.
+    /// Detects validated loop closures for `current_pose_idx`.
     pub fn detect(
         &self,
         poses: &[super::Pose2D],
@@ -117,25 +102,13 @@ impl LoopClosureDetector {
         observation_constraints: &[super::ObservationConstraint],
         current_pose_idx: usize,
     ) -> Vec<LoopClosure> {
-        let mut closures = Vec::new();
+        let mut closures =
+            self.detect_proximity_based(poses, observation_constraints, current_pose_idx);
 
-        // Try proximity-based detection
-        closures.extend(self.detect_proximity_based(
-            poses,
-            observation_constraints,
-            current_pose_idx,
-        ));
-
-        // Try landmark-based detection (works even with pose drift)
         if self.config.enable_landmark_based {
-            closures.extend(self.detect_landmark_based(
-                poses,
-                observation_constraints,
-                current_pose_idx,
-            ));
+            closures.extend(self.detect_landmark_based(observation_constraints, current_pose_idx));
         }
 
-        // Remove duplicates (same from/to pose pair)
         closures.sort_by(|a, b| {
             a.from_pose_idx
                 .cmp(&b.from_pose_idx)
@@ -143,86 +116,73 @@ impl LoopClosureDetector {
         });
         closures
             .dedup_by(|a, b| a.from_pose_idx == b.from_pose_idx && a.to_pose_idx == b.to_pose_idx);
-
-        // Sort by confidence (highest first)
-        closures.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-
+        closures.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         closures
     }
 
-    /// Proximity-based loop closure detection (original algorithm)
     fn detect_proximity_based(
         &self,
         poses: &[super::Pose2D],
         observation_constraints: &[super::ObservationConstraint],
         current_pose_idx: usize,
     ) -> Vec<LoopClosure> {
-        if current_pose_idx < self.config.min_temporal_separation {
+        if current_pose_idx >= poses.len() || current_pose_idx < self.config.min_temporal_separation
+        {
             return Vec::new();
         }
 
         let current_pose = &poses[current_pose_idx];
-        let mut closures = Vec::new();
-
-        // Build pose-to-landmarks map
         let pose_landmarks = self.build_pose_landmarks_map(observation_constraints);
-
-        // Get landmarks visible from current pose
-        let current_landmarks: HashSet<usize> = pose_landmarks
+        let current_landmarks = pose_landmarks
             .get(&current_pose_idx)
             .cloned()
             .unwrap_or_default();
-
         if current_landmarks.len() < self.config.min_common_landmarks {
             return Vec::new();
         }
 
-        // Find candidate poses
         let max_candidate_idx =
             current_pose_idx.saturating_sub(self.config.min_temporal_separation);
+        let mut closures = Vec::new();
 
-        for (candidate_idx, candidate_pose) in poses.iter().enumerate().take(max_candidate_idx + 1)
-        {
-            // Proximity check
+        let candidate_count = max_candidate_idx.min(poses.len().saturating_sub(1)) + 1;
+        for (candidate_idx, candidate_pose) in poses.iter().enumerate().take(candidate_count) {
             let dx = current_pose.x - candidate_pose.x;
             let dy = current_pose.y - candidate_pose.y;
-            let dist = (dx * dx + dy * dy).sqrt();
-
-            if dist > self.config.proximity_threshold {
+            if (dx * dx + dy * dy).sqrt() > self.config.proximity_threshold {
                 continue;
             }
 
-            // Find common landmarks
-            let candidate_landmarks: HashSet<usize> = pose_landmarks
+            let candidate_landmarks = pose_landmarks
                 .get(&candidate_idx)
                 .cloned()
                 .unwrap_or_default();
-
             let common: Vec<usize> = current_landmarks
                 .intersection(&candidate_landmarks)
-                .cloned()
+                .copied()
                 .collect();
-
             if common.len() < self.config.min_common_landmarks {
                 continue;
             }
 
-            // Estimate an independent relative transform directly from the
-            // two poses' matched range/bearing observations.
-            if let Some((transform, confidence, mahalanobis_sq)) = self.estimate_transform(
+            if let Some((transform, confidence, chi2, num_matches)) = self.estimate_transform(
                 &common,
                 observation_constraints,
                 candidate_idx,
                 current_pose_idx,
             ) {
-                if mahalanobis_sq <= self.config.max_mahalanobis_sq {
+                if self.alignment_is_acceptable(chi2, num_matches) {
                     closures.push(LoopClosure {
                         from_pose_idx: candidate_idx,
                         to_pose_idx: current_pose_idx,
                         transform,
                         confidence,
-                        num_matches: common.len(),
-                        mahalanobis_sq,
+                        num_matches,
+                        mahalanobis_sq: chi2,
                     });
                 }
             }
@@ -231,103 +191,83 @@ impl LoopClosureDetector {
         closures
     }
 
-    /// Landmark-based loop closure detection
-    ///
-    /// This detects when we see landmarks that we haven't seen for a while,
-    /// which indicates returning to a previously visited area. This works
-    /// even when pose estimates have drifted significantly.
     fn detect_landmark_based(
         &self,
-        _poses: &[super::Pose2D],
         observation_constraints: &[super::ObservationConstraint],
         current_pose_idx: usize,
     ) -> Vec<LoopClosure> {
-        let mut closures = Vec::new();
-
         if current_pose_idx < self.config.landmark_observation_gap {
             return Vec::new();
         }
 
-        // Build landmark-to-poses map (which poses observed each landmark)
         let mut landmark_poses: HashMap<usize, Vec<usize>> = HashMap::new();
-        for c in observation_constraints {
+        for c in observation_constraints
+            .iter()
+            .filter(|c| Self::observation_is_usable(c))
+        {
             landmark_poses
                 .entry(c.landmark_idx)
                 .or_default()
                 .push(c.pose_idx);
         }
+        for observing_poses in landmark_poses.values_mut() {
+            observing_poses.sort_unstable();
+            observing_poses.dedup();
+        }
 
-        // Get landmarks visible from current pose
         let current_landmarks: HashSet<usize> = observation_constraints
             .iter()
-            .filter(|c| c.pose_idx == current_pose_idx)
+            .filter(|c| c.pose_idx == current_pose_idx && Self::observation_is_usable(c))
             .map(|c| c.landmark_idx)
             .collect();
-
-        if current_landmarks.is_empty() {
+        if current_landmarks.len() < self.config.min_common_landmarks {
             return Vec::new();
         }
 
-        // For each landmark we see now, check if there's a gap in observations
-        // This indicates we left the area and came back
+        let mut closures = Vec::new();
         for &lm_idx in &current_landmarks {
             let Some(observing_poses) = landmark_poses.get(&lm_idx) else {
                 continue;
             };
-
-            // Find the most recent pose (before current) that saw this landmark
-            let mut last_observation_pose = None;
-            for &pose_idx in observing_poses.iter().rev() {
-                if pose_idx < current_pose_idx {
-                    last_observation_pose = Some(pose_idx);
-                    break;
-                }
-            }
-
-            let Some(last_pose_idx) = last_observation_pose else {
-                continue; // First time seeing this landmark
+            let Some(last_pose_idx) = observing_poses
+                .iter()
+                .rev()
+                .copied()
+                .find(|pose_idx| *pose_idx < current_pose_idx)
+            else {
+                continue;
             };
-
-            // Check if there's a significant gap (we were "blind" for a while)
-            let gap = current_pose_idx - last_pose_idx;
-            if gap < self.config.landmark_observation_gap {
-                continue; // Not enough gap to be considered a "return"
+            if current_pose_idx - last_pose_idx < self.config.landmark_observation_gap {
+                continue;
             }
 
-            // We have a landmark-based loop closure candidate!
-            // Find all landmarks we currently see that were also seen from last_pose_idx
             let last_pose_landmarks: HashSet<usize> = observation_constraints
                 .iter()
-                .filter(|c| c.pose_idx == last_pose_idx)
+                .filter(|c| c.pose_idx == last_pose_idx && Self::observation_is_usable(c))
                 .map(|c| c.landmark_idx)
                 .collect();
-
             let common: Vec<usize> = current_landmarks
                 .intersection(&last_pose_landmarks)
-                .cloned()
+                .copied()
                 .collect();
-
             if common.len() < self.config.min_common_landmarks {
                 continue;
             }
 
-            // Landmark-based detection is deliberately independent of the
-            // drifted graph poses, so it uses the same observation-consistency
-            // gate rather than a relaxed pose-error threshold.
-            if let Some((transform, confidence, mahalanobis_sq)) = self.estimate_transform(
+            if let Some((transform, confidence, chi2, num_matches)) = self.estimate_transform(
                 &common,
                 observation_constraints,
                 last_pose_idx,
                 current_pose_idx,
             ) {
-                if mahalanobis_sq <= self.config.max_mahalanobis_sq {
+                if self.alignment_is_acceptable(chi2, num_matches) {
                     closures.push(LoopClosure {
                         from_pose_idx: last_pose_idx,
                         to_pose_idx: current_pose_idx,
                         transform,
                         confidence: confidence * 0.8,
-                        num_matches: common.len(),
-                        mahalanobis_sq,
+                        num_matches,
+                        mahalanobis_sq: chi2,
                     });
                 }
             }
@@ -336,261 +276,325 @@ impl LoopClosureDetector {
         closures
     }
 
-    /// Build a map from pose index to set of observed landmark indices
     fn build_pose_landmarks_map(
         &self,
         observation_constraints: &[super::ObservationConstraint],
     ) -> HashMap<usize, HashSet<usize>> {
-        let mut map: HashMap<usize, HashSet<usize>> = HashMap::new();
-
-        for c in observation_constraints {
-            map.entry(c.pose_idx).or_default().insert(c.landmark_idx);
+        let mut map = HashMap::new();
+        for c in observation_constraints
+            .iter()
+            .filter(|c| Self::observation_is_usable(c))
+        {
+            map.entry(c.pose_idx)
+                .or_insert_with(HashSet::new)
+                .insert(c.landmark_idx);
         }
-
         map
     }
 
-    /// Estimate candidate-to-current relative pose directly from matched observations.
-    ///
-    /// For a shared landmark, let `p_candidate` and `p_current` be its Cartesian
-    /// coordinates reconstructed from range/bearing measurements in each robot
-    /// frame. The relative robot transform satisfies:
-    ///
-    /// `p_candidate = R(candidate_to_current) * p_current + t`.
-    ///
-    /// Aligning current-frame points onto candidate-frame points therefore gives
-    /// the loop-closure measurement without consulting the graph pose estimates
-    /// or the globally estimated landmark positions.
+    fn observation_is_usable(c: &super::ObservationConstraint) -> bool {
+        !c.is_outlier
+            && c.robust_weight.is_finite()
+            && c.robust_weight > 0.0
+            && c.measurement[0].is_finite()
+            && c.measurement[1].is_finite()
+            && c.measurement[0] > 0.0
+    }
+
+    /// Estimates candidate-to-current relative pose directly from matched observations.
     fn estimate_transform(
         &self,
         common_landmarks: &[usize],
         observation_constraints: &[super::ObservationConstraint],
         candidate_idx: usize,
         current_idx: usize,
-    ) -> Option<(Vector3<f32>, f32, f32)> {
-        if common_landmarks.len() < 2 {
-            return None;
-        }
-
+    ) -> Option<(Vector3<f32>, f32, f32, usize)> {
+        let common: HashSet<usize> = common_landmarks.iter().copied().collect();
         let candidate_obs: HashMap<usize, &super::ObservationConstraint> = observation_constraints
             .iter()
-            .filter(|c| c.pose_idx == candidate_idx && common_landmarks.contains(&c.landmark_idx))
+            .filter(|c| {
+                c.pose_idx == candidate_idx
+                    && common.contains(&c.landmark_idx)
+                    && Self::observation_is_usable(c)
+            })
             .map(|c| (c.landmark_idx, c))
             .collect();
         let current_obs: HashMap<usize, &super::ObservationConstraint> = observation_constraints
             .iter()
-            .filter(|c| c.pose_idx == current_idx && common_landmarks.contains(&c.landmark_idx))
+            .filter(|c| {
+                c.pose_idx == current_idx
+                    && common.contains(&c.landmark_idx)
+                    && Self::observation_is_usable(c)
+            })
             .map(|c| (c.landmark_idx, c))
             .collect();
 
         let mut points_candidate = Vec::with_capacity(common_landmarks.len());
         let mut points_current = Vec::with_capacity(common_landmarks.len());
+        let mut weights = Vec::with_capacity(common_landmarks.len());
         let mut matched_observations = Vec::with_capacity(common_landmarks.len());
 
         for &lm_idx in common_landmarks {
-            let candidate = *candidate_obs.get(&lm_idx)?;
-            let current = *current_obs.get(&lm_idx)?;
+            let (Some(candidate), Some(current)) =
+                (candidate_obs.get(&lm_idx), current_obs.get(&lm_idx))
+            else {
+                continue;
+            };
+            let candidate = *candidate;
+            let current = *current;
+            let weight = Self::observation_pair_weight(candidate, current)?;
             points_candidate.push(Self::observation_point(candidate)?);
             points_current.push(Self::observation_point(current)?);
+            weights.push(weight);
             matched_observations.push((candidate, current));
         }
 
-        // Source=current, target=candidate. This directly estimates the robot
-        // transform from candidate pose to current pose in the candidate frame.
+        let num_matches = matched_observations.len();
+        if num_matches < self.config.min_common_landmarks.max(2) {
+            return None;
+        }
+
+        // Source=current, target=candidate. Aligning current-frame landmark points
+        // onto candidate-frame points yields the candidate->current robot transform.
         let (rotation, translation) =
-            self.compute_rigid_transform(&points_current, &points_candidate)?;
-        let residual = self.compute_alignment_residual(
+            self.compute_weighted_rigid_transform(&points_current, &points_candidate, &weights)?;
+        let residual = self.compute_weighted_alignment_residual(
             &points_current,
             &points_candidate,
+            &weights,
             rotation,
             &translation,
-        );
-        let mahalanobis_sq =
+        )?;
+        let chi2 =
             self.compute_alignment_mahalanobis(&matched_observations, rotation, &translation)?;
         let confidence = 1.0 / (1.0 + residual);
 
         Some((
             Vector3::new(translation.x, translation.y, normalize_angle(rotation)),
             confidence,
-            mahalanobis_sq,
+            chi2,
+            num_matches,
         ))
     }
 
-    /// Compute rigid transform (rotation angle, translation) using SVD
-    fn compute_rigid_transform(
-        &self,
-        source: &[Vector2<f32>],
-        target: &[Vector2<f32>],
-    ) -> Option<(f32, Vector2<f32>)> {
-        if source.len() < 2 || source.len() != target.len() {
+    fn observation_point(c: &super::ObservationConstraint) -> Option<Vector2<f32>> {
+        if !Self::observation_is_usable(c) {
             return None;
         }
-
-        let n = source.len() as f32;
-
-        // Compute centroids
-        let mut src_centroid = Vector2::zeros();
-        let mut tgt_centroid = Vector2::zeros();
-        for (s, t) in source.iter().zip(target.iter()) {
-            src_centroid += s;
-            tgt_centroid += t;
-        }
-        src_centroid /= n;
-        tgt_centroid /= n;
-
-        // Center the point sets
-        let src_centered: Vec<Vector2<f32>> = source.iter().map(|p| p - src_centroid).collect();
-        let tgt_centered: Vec<Vector2<f32>> = target.iter().map(|p| p - tgt_centroid).collect();
-
-        // Compute cross-covariance matrix H
-        let mut h = nalgebra::Matrix2::zeros();
-        for (s, t) in src_centered.iter().zip(tgt_centered.iter()) {
-            h += s * t.transpose();
-        }
-
-        // SVD
-        let svd = h.svd(true, true);
-        let u = svd.u?;
-        let v_t = svd.v_t?;
-
-        // Rotation matrix R = V * U^T
-        let r = v_t.transpose() * u.transpose();
-
-        // Handle reflection
-        let det = r.determinant();
-        let r = if det < 0.0 {
-            let mut v_t_corrected = v_t;
-            v_t_corrected[(1, 0)] *= -1.0;
-            v_t_corrected[(1, 1)] *= -1.0;
-            v_t_corrected.transpose() * u.transpose()
-        } else {
-            r
-        };
-
-        // Extract rotation angle
-        let rotation = r[(1, 0)].atan2(r[(0, 0)]);
-
-        // Compute translation
-        let translation = tgt_centroid - r * src_centroid;
-
-        Some((rotation, translation))
-    }
-
-    /// Compute alignment residual (RMS error after transform)
-    fn compute_alignment_residual(
-        &self,
-        source: &[Vector2<f32>],
-        target: &[Vector2<f32>],
-        rotation: f32,
-        translation: &Vector2<f32>,
-    ) -> f32 {
-        let cos_r = rotation.cos();
-        let sin_r = rotation.sin();
-
-        let mut sum_sq = 0.0;
-        for (s, t) in source.iter().zip(target.iter()) {
-            let transformed = Vector2::new(
-                cos_r * s.x - sin_r * s.y + translation.x,
-                sin_r * s.x + cos_r * s.y + translation.y,
-            );
-            let diff = transformed - t;
-            sum_sq += diff.dot(&diff);
-        }
-
-        (sum_sq / source.len() as f32).sqrt()
-    }
-
-    fn observation_point(c: &super::ObservationConstraint) -> Option<Vector2<f32>> {
         let range = c.measurement[0];
         let bearing = c.measurement[1];
-        if !range.is_finite() || !bearing.is_finite() || range <= 0.0 {
-            return None;
-        }
         Some(Vector2::new(range * bearing.cos(), range * bearing.sin()))
     }
 
-    fn observation_cartesian_covariance(
-        c: &super::ObservationConstraint,
-    ) -> Option<nalgebra::Matrix2<f32>> {
-        let range = c.measurement[0];
-        let bearing = c.measurement[1];
-        if !range.is_finite() || !bearing.is_finite() || range <= 0.0 {
+    fn observation_cartesian_covariance(c: &super::ObservationConstraint) -> Option<Matrix2<f32>> {
+        if !Self::observation_is_usable(c) {
             return None;
         }
+        let range = c.measurement[0];
+        let bearing = c.measurement[1];
         let polar_covariance = c.information.try_inverse()?;
-        let jacobian = nalgebra::Matrix2::new(
+        let jacobian = Matrix2::new(
             bearing.cos(),
             -range * bearing.sin(),
             bearing.sin(),
             range * bearing.cos(),
         );
-        Some(jacobian * polar_covariance * jacobian.transpose())
+        let covariance = jacobian * polar_covariance * jacobian.transpose();
+        covariance
+            .iter()
+            .all(|v| v.is_finite())
+            .then_some(covariance)
     }
 
-    /// Mean covariance-normalized point-alignment error for matched observations.
-    ///
-    /// This is independent of the graph pose estimates. Each residual covariance
-    /// combines the candidate observation covariance with the current observation
-    /// covariance rotated into the candidate frame.
+    /// Scalar precision used by weighted Procrustes. Trace is rotation invariant,
+    /// so it gives a stable combined Cartesian variance before the rotation is known.
+    fn observation_pair_weight(
+        candidate: &super::ObservationConstraint,
+        current: &super::ObservationConstraint,
+    ) -> Option<f32> {
+        let candidate_covariance = Self::observation_cartesian_covariance(candidate)?;
+        let current_covariance = Self::observation_cartesian_covariance(current)?;
+        let combined_variance = candidate_covariance.trace() + current_covariance.trace();
+        let robust_weight = candidate.robust_weight.min(current.robust_weight) as f32;
+        if !combined_variance.is_finite()
+            || combined_variance <= f32::EPSILON
+            || !robust_weight.is_finite()
+            || robust_weight <= 0.0
+        {
+            return None;
+        }
+        Some(robust_weight / combined_variance)
+    }
+
+    fn compute_weighted_rigid_transform(
+        &self,
+        source: &[Vector2<f32>],
+        target: &[Vector2<f32>],
+        weights: &[f32],
+    ) -> Option<(f32, Vector2<f32>)> {
+        if source.len() < 2 || source.len() != target.len() || source.len() != weights.len() {
+            return None;
+        }
+
+        let total_weight: f32 = weights.iter().copied().sum();
+        if !total_weight.is_finite() || total_weight <= f32::EPSILON {
+            return None;
+        }
+
+        let mut source_centroid = Vector2::zeros();
+        let mut target_centroid = Vector2::zeros();
+        for ((source_point, target_point), weight) in source
+            .iter()
+            .zip(target.iter())
+            .zip(weights.iter().copied())
+        {
+            if !weight.is_finite() || weight <= 0.0 {
+                return None;
+            }
+            source_centroid += source_point * weight;
+            target_centroid += target_point * weight;
+        }
+        source_centroid /= total_weight;
+        target_centroid /= total_weight;
+
+        let mut h = Matrix2::zeros();
+        for ((source_point, target_point), weight) in source
+            .iter()
+            .zip(target.iter())
+            .zip(weights.iter().copied())
+        {
+            let source_centered = source_point - source_centroid;
+            let target_centered = target_point - target_centroid;
+            h += weight * source_centered * target_centered.transpose();
+        }
+
+        let svd = h.svd(true, true);
+        let u = svd.u?;
+        let v_t = svd.v_t?;
+        let mut r = v_t.transpose() * u.transpose();
+        if r.determinant() < 0.0 {
+            let mut v_t_corrected = v_t;
+            v_t_corrected[(1, 0)] *= -1.0;
+            v_t_corrected[(1, 1)] *= -1.0;
+            r = v_t_corrected.transpose() * u.transpose();
+        }
+
+        let rotation = r[(1, 0)].atan2(r[(0, 0)]);
+        let translation = target_centroid - r * source_centroid;
+        if rotation.is_finite() && translation.iter().all(|v| v.is_finite()) {
+            Some((rotation, translation))
+        } else {
+            None
+        }
+    }
+
+    fn compute_weighted_alignment_residual(
+        &self,
+        source: &[Vector2<f32>],
+        target: &[Vector2<f32>],
+        weights: &[f32],
+        rotation: f32,
+        translation: &Vector2<f32>,
+    ) -> Option<f32> {
+        if source.is_empty() || source.len() != target.len() || source.len() != weights.len() {
+            return None;
+        }
+        let rotation_matrix = Matrix2::new(
+            rotation.cos(),
+            -rotation.sin(),
+            rotation.sin(),
+            rotation.cos(),
+        );
+        let total_weight: f32 = weights.iter().copied().sum();
+        if !total_weight.is_finite() || total_weight <= f32::EPSILON {
+            return None;
+        }
+        let weighted_sum = source
+            .iter()
+            .zip(target.iter())
+            .zip(weights.iter().copied())
+            .map(|((source_point, target_point), weight)| {
+                let error = rotation_matrix * source_point + *translation - target_point;
+                weight * error.norm_squared()
+            })
+            .sum::<f32>();
+        Some((weighted_sum / total_weight).sqrt())
+    }
+
     fn compute_alignment_mahalanobis(
         &self,
         matches: &[(&super::ObservationConstraint, &super::ObservationConstraint)],
         rotation: f32,
         translation: &Vector2<f32>,
     ) -> Option<f32> {
-        if matches.is_empty() {
+        if matches.len() < 2 {
             return None;
         }
 
-        let cos_r = rotation.cos();
-        let sin_r = rotation.sin();
-        let rotation_matrix = nalgebra::Matrix2::new(cos_r, -sin_r, sin_r, cos_r);
+        let rotation_matrix = Matrix2::new(
+            rotation.cos(),
+            -rotation.sin(),
+            rotation.sin(),
+            rotation.cos(),
+        );
         let mut total = 0.0;
-
         for &(candidate, current) in matches {
             let candidate_point = Self::observation_point(candidate)?;
             let current_point = Self::observation_point(current)?;
-            let predicted_candidate = rotation_matrix * current_point + *translation;
-            let error = predicted_candidate - candidate_point;
-
+            let error = rotation_matrix * current_point + *translation - candidate_point;
             let candidate_covariance = Self::observation_cartesian_covariance(candidate)?;
             let current_covariance = Self::observation_cartesian_covariance(current)?;
             let residual_covariance = candidate_covariance
                 + rotation_matrix * current_covariance * rotation_matrix.transpose();
             let information = residual_covariance.try_inverse()?;
-            total += error.dot(&(information * error));
+            let contribution = error.dot(&(information * error));
+            if !contribution.is_finite() || contribution < 0.0 {
+                return None;
+            }
+            total += contribution;
         }
-
-        Some(total / matches.len() as f32)
+        total.is_finite().then_some(total)
     }
 
-    /// Validate loop closures using chain consistency
-    ///
-    /// If A-B and B-C closures exist, verify A-C consistency
+    fn alignment_degrees_of_freedom(num_matches: usize) -> usize {
+        // Each match contributes a 2D residual; fitting SE(2) consumes 3 parameters.
+        num_matches.saturating_mul(2).saturating_sub(3).max(1)
+    }
+
+    fn alignment_is_acceptable(&self, chi2: f32, num_matches: usize) -> bool {
+        if !chi2.is_finite() || num_matches < self.config.min_common_landmarks {
+            return false;
+        }
+        let dof = Self::alignment_degrees_of_freedom(num_matches);
+        let reduced_chi2 = chi2 / dof as f32;
+        reduced_chi2 <= self.config.max_mahalanobis_sq
+            && !chi_squared::is_outlier(chi2 as f64, dof, self.config.chi2_confidence)
+    }
+
+    /// Validates loop closures using chain consistency. Individual closures have
+    /// already passed observation consistency; transitive chain checks are a future
+    /// extension.
     pub fn validate_chain_consistency(
         &self,
         closures: &[LoopClosure],
         _poses: &[super::Pose2D],
     ) -> Vec<LoopClosure> {
-        // Simple validation: just return closures that pass individual tests
-        // Full chain validation would check transitivity
         closures.to_vec()
     }
 }
 
-/// Normalize angle to [-π, π]
 fn normalize_angle(angle: f32) -> f32 {
-    let mut a = angle;
-    while a > PI {
-        a -= 2.0 * PI;
+    let mut angle = angle;
+    while angle > PI {
+        angle -= 2.0 * PI;
     }
-    while a < -PI {
-        a += 2.0 * PI;
+    while angle < -PI {
+        angle += 2.0 * PI;
     }
-    a
+    angle
 }
 
-/// Helper to add loop closure constraints to a graph
+/// Adds a detected loop closure to the graph as an odometry-style constraint.
 pub fn add_loop_closure_to_graph(
     graph: &mut super::GraphSlam,
     closure: &LoopClosure,
@@ -608,104 +612,6 @@ pub fn add_loop_closure_to_graph(
 mod tests {
     use super::*;
     use crate::slam::{GraphSlam, Landmark2D, Pose2D};
-    use nalgebra::{Matrix2, Vector2};
-
-    #[test]
-    fn test_loop_closure_detection_square() {
-        // Robot drives in a square and returns to start
-        let mut graph = GraphSlam::new();
-        graph.config.enable_robust_kernel = false;
-        graph.config.use_sparse_solver = false;
-
-        // Square trajectory: start -> right -> up -> left -> back to start area
-        let poses = vec![
-            Pose2D::new(0.0, 0.0, 0.0),
-            Pose2D::new(5.0, 0.0, PI / 2.0),
-            Pose2D::new(5.0, 5.0, PI),
-            Pose2D::new(0.0, 5.0, -PI / 2.0),
-            Pose2D::new(0.2, 0.3, 0.1), // Back near start with some drift
-        ];
-
-        for pose in &poses {
-            graph.add_pose(*pose);
-        }
-
-        // Add 4 landmarks at corners of a smaller square
-        let landmarks = vec![
-            Landmark2D::new(2.0, 2.0),
-            Landmark2D::new(3.0, 2.0),
-            Landmark2D::new(3.0, 3.0),
-            Landmark2D::new(2.0, 3.0),
-        ];
-
-        for lm in &landmarks {
-            graph.add_landmark(*lm);
-        }
-
-        // Add observations from pose 0 and pose 4 to all landmarks
-        // (They're both near the center area)
-        let obs_cov = Matrix2::from_diagonal(&Vector2::new(0.1, 0.01));
-        for (lm_idx, lm) in landmarks.iter().enumerate().take(4) {
-            // Pose 0 observations
-            let dx = lm.x - poses[0].x;
-            let dy = lm.y - poses[0].y;
-            let r = (dx * dx + dy * dy).sqrt();
-            let b = dy.atan2(dx) - poses[0].theta;
-            graph.add_observation(0, lm_idx, r, normalize_angle(b), &obs_cov);
-
-            // Pose 4 observations (same landmarks)
-            let dx = lm.x - poses[4].x;
-            let dy = lm.y - poses[4].y;
-            let r = (dx * dx + dy * dy).sqrt();
-            let b = dy.atan2(dx) - poses[4].theta;
-            graph.add_observation(4, lm_idx, r, normalize_angle(b), &obs_cov);
-        }
-
-        // Detect loop closures
-        let config = LoopClosureConfig {
-            proximity_threshold: 1.0, // Pose 4 is ~0.36m from pose 0
-            min_temporal_separation: 3,
-            min_common_landmarks: 3,
-            ..Default::default()
-        };
-
-        let detector = LoopClosureDetector::with_config(config);
-        let closures = detector.detect(
-            &graph.poses,
-            &graph.landmarks,
-            &graph.observation_constraints,
-            4, // Current pose
-        );
-
-        println!("\n=== Loop Closure Detection Test ===");
-        println!("Number of poses: {}", graph.poses.len());
-        println!("Number of landmarks: {}", graph.landmarks.len());
-        println!("Closures detected: {}", closures.len());
-
-        for (i, c) in closures.iter().enumerate() {
-            println!(
-                "  Closure {}: pose {} -> pose {}",
-                i, c.from_pose_idx, c.to_pose_idx
-            );
-            println!(
-                "    Transform: ({:.3}, {:.3}, {:.3}°)",
-                c.transform.x,
-                c.transform.y,
-                c.transform.z.to_degrees()
-            );
-            println!(
-                "    Matches: {}, Confidence: {:.3}, Mahalanobis: {:.3}",
-                c.num_matches, c.confidence, c.mahalanobis_sq
-            );
-        }
-
-        assert!(
-            !closures.is_empty(),
-            "Should detect loop closure between pose 0 and 4"
-        );
-        assert_eq!(closures[0].from_pose_idx, 0);
-        assert_eq!(closures[0].to_pose_idx, 4);
-    }
 
     fn add_observations_from_pose(
         graph: &mut GraphSlam,
@@ -714,12 +620,12 @@ mod tests {
         landmarks: &[Landmark2D],
         covariance: &Matrix2<f32>,
     ) {
-        for (lm_idx, landmark) in landmarks.iter().enumerate() {
+        for (landmark_idx, landmark) in landmarks.iter().enumerate() {
             let dx = landmark.x - ground_truth_pose.x;
             let dy = landmark.y - ground_truth_pose.y;
             let range = (dx * dx + dy * dy).sqrt();
             let bearing = normalize_angle(dy.atan2(dx) - ground_truth_pose.theta);
-            graph.add_observation(pose_idx, lm_idx, range, bearing, covariance);
+            graph.add_observation(pose_idx, landmark_idx, range, bearing, covariance);
         }
     }
 
@@ -735,72 +641,7 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_landmark_loop_closure_recovers_ground_truth_despite_pose_drift() {
-        let mut graph = GraphSlam::new();
-
-        // Deliberately wrong graph estimates. Pose 4 is nowhere near pose 0, so
-        // only landmark-based detection can find the revisit.
-        for pose in [
-            Pose2D::new(-3.0, 2.0, -0.5),
-            Pose2D::new(2.0, 1.0, 0.1),
-            Pose2D::new(4.0, 0.0, 0.5),
-            Pose2D::new(6.0, -2.0, 1.0),
-            Pose2D::new(8.0, -5.0, 1.5),
-        ] {
-            graph.add_pose(pose);
-        }
-
-        let landmarks = vec![
-            Landmark2D::new(3.0, 1.0),
-            Landmark2D::new(2.0, -2.0),
-            Landmark2D::new(-1.0, 2.0),
-            Landmark2D::new(4.0, 3.0),
-        ];
-        for landmark in &landmarks {
-            graph.add_landmark(*landmark);
-        }
-
-        let ground_truth_candidate = Pose2D::new(0.5, -0.5, 0.4);
-        let ground_truth_current = Pose2D::new(1.2, 0.3, 0.8);
-        let obs_cov = Matrix2::from_diagonal(&Vector2::new(0.01, 0.001));
-        add_observations_from_pose(&mut graph, 0, ground_truth_candidate, &landmarks, &obs_cov);
-        add_observations_from_pose(&mut graph, 4, ground_truth_current, &landmarks, &obs_cov);
-
-        let config = LoopClosureConfig {
-            proximity_threshold: 0.1,
-            min_temporal_separation: 3,
-            landmark_observation_gap: 3,
-            min_common_landmarks: 3,
-            ..Default::default()
-        };
-        let detector = LoopClosureDetector::with_config(config);
-
-        let closures = detector.detect(
-            &graph.poses,
-            &graph.landmarks,
-            &graph.observation_constraints,
-            4,
-        );
-        let closure = closures
-            .iter()
-            .find(|closure| closure.from_pose_idx == 0 && closure.to_pose_idx == 4)
-            .expect("landmark observations should recover the revisit despite pose drift");
-
-        let expected = relative_pose(ground_truth_candidate, ground_truth_current);
-        assert!((closure.transform.x - expected.x).abs() < 1e-3);
-        assert!((closure.transform.y - expected.y).abs() < 1e-3);
-        assert!(normalize_angle(closure.transform.z - expected.z).abs() < 1e-3);
-
-        let drifted_estimate = relative_pose(graph.poses[0], graph.poses[4]);
-        assert!(
-            (closure.transform - drifted_estimate).norm() > 1.0,
-            "closure measurement must be independent of the drifted pose estimates"
-        );
-    }
-
-    #[test]
-    fn test_inconsistent_landmark_geometry_is_rejected() {
+    fn five_pose_graph() -> GraphSlam {
         let mut graph = GraphSlam::new();
         for pose in [
             Pose2D::new(0.0, 0.0, 0.0),
@@ -811,6 +652,113 @@ mod tests {
         ] {
             graph.add_pose(pose);
         }
+        graph
+    }
+
+    #[test]
+    fn test_loop_closure_detection_square() {
+        let mut graph = GraphSlam::new();
+        let poses = vec![
+            Pose2D::new(0.0, 0.0, 0.0),
+            Pose2D::new(5.0, 0.0, PI / 2.0),
+            Pose2D::new(5.0, 5.0, PI),
+            Pose2D::new(0.0, 5.0, -PI / 2.0),
+            Pose2D::new(0.2, 0.3, 0.1),
+        ];
+        for pose in &poses {
+            graph.add_pose(*pose);
+        }
+        let landmarks = vec![
+            Landmark2D::new(2.0, 2.0),
+            Landmark2D::new(3.0, 2.0),
+            Landmark2D::new(3.0, 3.0),
+            Landmark2D::new(2.0, 3.0),
+        ];
+        for landmark in &landmarks {
+            graph.add_landmark(*landmark);
+        }
+        let covariance = Matrix2::from_diagonal(&Vector2::new(0.1, 0.01));
+        add_observations_from_pose(&mut graph, 0, poses[0], &landmarks, &covariance);
+        add_observations_from_pose(&mut graph, 4, poses[4], &landmarks, &covariance);
+
+        let config = LoopClosureConfig {
+            proximity_threshold: 1.0,
+            min_temporal_separation: 3,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
+        let closures = LoopClosureDetector::with_config(config).detect(
+            &graph.poses,
+            &graph.landmarks,
+            &graph.observation_constraints,
+            4,
+        );
+        assert!(closures
+            .iter()
+            .any(|closure| closure.from_pose_idx == 0 && closure.to_pose_idx == 4));
+    }
+
+    #[test]
+    fn test_landmark_loop_closure_recovers_ground_truth_despite_pose_drift() {
+        let mut graph = GraphSlam::new();
+        for pose in [
+            Pose2D::new(-3.0, 2.0, -0.5),
+            Pose2D::new(2.0, 1.0, 0.1),
+            Pose2D::new(4.0, 0.0, 0.5),
+            Pose2D::new(6.0, -2.0, 1.0),
+            Pose2D::new(8.0, -5.0, 1.5),
+        ] {
+            graph.add_pose(pose);
+        }
+        let landmarks = vec![
+            Landmark2D::new(3.0, 1.0),
+            Landmark2D::new(2.0, -2.0),
+            Landmark2D::new(-1.0, 2.0),
+            Landmark2D::new(4.0, 3.0),
+        ];
+        for landmark in &landmarks {
+            graph.add_landmark(*landmark);
+        }
+        let ground_truth_candidate = Pose2D::new(0.5, -0.5, 0.4);
+        let ground_truth_current = Pose2D::new(1.2, 0.3, 0.8);
+        let covariance = Matrix2::from_diagonal(&Vector2::new(0.01, 0.001));
+        add_observations_from_pose(
+            &mut graph,
+            0,
+            ground_truth_candidate,
+            &landmarks,
+            &covariance,
+        );
+        add_observations_from_pose(&mut graph, 4, ground_truth_current, &landmarks, &covariance);
+
+        let config = LoopClosureConfig {
+            proximity_threshold: 0.1,
+            min_temporal_separation: 3,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
+        let closures = LoopClosureDetector::with_config(config).detect(
+            &graph.poses,
+            &graph.landmarks,
+            &graph.observation_constraints,
+            4,
+        );
+        let closure = closures
+            .iter()
+            .find(|closure| closure.from_pose_idx == 0 && closure.to_pose_idx == 4)
+            .expect("observation geometry should recover the revisit despite pose drift");
+        let expected = relative_pose(ground_truth_candidate, ground_truth_current);
+        assert!((closure.transform.x - expected.x).abs() < 1e-3);
+        assert!((closure.transform.y - expected.y).abs() < 1e-3);
+        assert!(normalize_angle(closure.transform.z - expected.z).abs() < 1e-3);
+        assert!((closure.transform - relative_pose(graph.poses[0], graph.poses[4])).norm() > 1.0);
+    }
+
+    #[test]
+    fn test_inconsistent_landmark_geometry_is_rejected() {
+        let mut graph = five_pose_graph();
         for landmark in [
             Landmark2D::new(2.0, 0.0),
             Landmark2D::new(0.0, 2.0),
@@ -819,8 +767,7 @@ mod tests {
         ] {
             graph.add_landmark(landmark);
         }
-
-        let obs_cov = Matrix2::from_diagonal(&Vector2::new(0.001, 0.0001));
+        let covariance = Matrix2::from_diagonal(&Vector2::new(0.001, 0.0001));
         let candidate_points: [Vector2<f32>; 4] = [
             Vector2::new(2.0, 0.0),
             Vector2::new(0.0, 2.0),
@@ -833,22 +780,69 @@ mod tests {
             Vector2::new(1.0, 1.0),
             Vector2::new(-1.0, -1.0),
         ];
-        for (lm_idx, point) in candidate_points.iter().enumerate() {
-            graph.add_observation(0, lm_idx, point.norm(), point.y.atan2(point.x), &obs_cov);
+        for (landmark_idx, point) in candidate_points.iter().enumerate() {
+            graph.add_observation(
+                0,
+                landmark_idx,
+                point.norm(),
+                point.y.atan2(point.x),
+                &covariance,
+            );
         }
-        for (lm_idx, point) in current_points.iter().enumerate() {
-            graph.add_observation(4, lm_idx, point.norm(), point.y.atan2(point.x), &obs_cov);
+        for (landmark_idx, point) in current_points.iter().enumerate() {
+            graph.add_observation(
+                4,
+                landmark_idx,
+                point.norm(),
+                point.y.atan2(point.x),
+                &covariance,
+            );
         }
-
         let config = LoopClosureConfig {
             proximity_threshold: 0.1,
             landmark_observation_gap: 3,
             min_common_landmarks: 3,
             ..Default::default()
         };
-        let detector = LoopClosureDetector::with_config(config);
+        assert!(LoopClosureDetector::with_config(config)
+            .detect(
+                &graph.poses,
+                &graph.landmarks,
+                &graph.observation_constraints,
+                4,
+            )
+            .is_empty());
+    }
 
-        let closures = detector.detect(
+    #[test]
+    fn rejected_observations_do_not_participate_in_loop_closure() {
+        let mut graph = five_pose_graph();
+        let landmarks = vec![
+            Landmark2D::new(2.0, 1.0),
+            Landmark2D::new(2.0, -1.0),
+            Landmark2D::new(-2.0, 1.0),
+        ];
+        for landmark in &landmarks {
+            graph.add_landmark(*landmark);
+        }
+        let covariance = Matrix2::from_diagonal(&Vector2::new(0.01, 0.001));
+        add_observations_from_pose(&mut graph, 0, Pose2D::origin(), &landmarks, &covariance);
+        add_observations_from_pose(&mut graph, 4, Pose2D::origin(), &landmarks, &covariance);
+        graph
+            .observation_constraints
+            .iter_mut()
+            .find(|constraint| constraint.pose_idx == 4 && constraint.landmark_idx == 2)
+            .expect("fixture observation")
+            .is_outlier = true;
+
+        let config = LoopClosureConfig {
+            proximity_threshold: 20.0,
+            min_temporal_separation: 3,
+            landmark_observation_gap: 3,
+            min_common_landmarks: 3,
+            ..Default::default()
+        };
+        let closures = LoopClosureDetector::with_config(config).detect(
             &graph.poses,
             &graph.landmarks,
             &graph.observation_constraints,
@@ -856,15 +850,79 @@ mod tests {
         );
         assert!(
             closures.is_empty(),
-            "non-rigidly inconsistent shared observations must not create a closure"
+            "flagged observations must not satisfy the common-landmark minimum"
         );
+    }
+
+    #[test]
+    fn covariance_weighted_fit_resists_noisy_landmark() {
+        let mut graph = five_pose_graph();
+        let landmarks = vec![
+            Landmark2D::new(3.0, 0.0),
+            Landmark2D::new(0.0, 3.0),
+            Landmark2D::new(-3.0, 0.0),
+            Landmark2D::new(0.0, -3.0),
+        ];
+        for landmark in &landmarks {
+            graph.add_landmark(*landmark);
+        }
+        let precise = Matrix2::from_diagonal(&Vector2::new(1e-4, 1e-5));
+        let noisy = Matrix2::from_diagonal(&Vector2::new(100.0, 10.0));
+        let candidate = Pose2D::origin();
+        let current = Pose2D::new(1.0, 0.0, 0.0);
+        add_observations_from_pose(&mut graph, 0, candidate, &landmarks, &precise);
+        for (landmark_idx, landmark) in landmarks.iter().enumerate() {
+            if landmark_idx == 3 {
+                let corrupted_point: Vector2<f32> = Vector2::new(15.0, 12.0);
+                graph.add_observation(
+                    4,
+                    landmark_idx,
+                    corrupted_point.norm(),
+                    corrupted_point.y.atan2(corrupted_point.x),
+                    &noisy,
+                );
+            } else {
+                let dx = landmark.x - current.x;
+                let dy = landmark.y - current.y;
+                graph.add_observation(
+                    4,
+                    landmark_idx,
+                    (dx * dx + dy * dy).sqrt(),
+                    dy.atan2(dx),
+                    &precise,
+                );
+            }
+        }
+
+        let detector = LoopClosureDetector::new();
+        let common = vec![0, 1, 2, 3];
+        let (transform, _, _, _) = detector
+            .estimate_transform(&common, &graph.observation_constraints, 0, 4)
+            .expect("weighted fit should remain solvable");
+        let expected = relative_pose(candidate, current);
+        assert!((transform.x - expected.x).abs() < 0.05);
+        assert!((transform.y - expected.y).abs() < 0.05);
+        assert!(normalize_angle(transform.z - expected.z).abs() < 0.02);
+    }
+
+    #[test]
+    fn chi_square_gate_uses_fitted_residual_degrees_of_freedom() {
+        let config = LoopClosureConfig {
+            chi2_confidence: 0.99,
+            ..Default::default()
+        };
+        let detector = LoopClosureDetector::with_config(config);
+        assert_eq!(LoopClosureDetector::alignment_degrees_of_freedom(3), 3);
+        assert!(
+            !detector.alignment_is_acceptable(20.0, 3),
+            "three matches leave 3 residual DOF, so chi2=20 must exceed the 99% gate"
+        );
+        assert!(detector.alignment_is_acceptable(1.0, 3));
     }
 
     #[test]
     fn test_rigid_transform_estimation() {
         let detector = LoopClosureDetector::new();
-
-        // Simple translation test
         let source = vec![
             Vector2::new(0.0, 0.0),
             Vector2::new(1.0, 0.0),
@@ -872,57 +930,35 @@ mod tests {
         ];
         let target = vec![
             Vector2::new(1.0, 1.0),
-            Vector2::new(2.0, 1.0),
+            Vector2::<f32>::new(2.0, 1.0),
             Vector2::new(2.0, 2.0),
         ];
-
-        let result = detector.compute_rigid_transform(&source, &target);
-        assert!(result.is_some());
-
-        let (rotation, translation) = result.unwrap();
-        println!(
-            "Rotation: {:.3}°, Translation: ({:.3}, {:.3})",
-            rotation.to_degrees(),
-            translation.x,
-            translation.y
-        );
-
-        assert!(rotation.abs() < 0.1, "Rotation should be near zero");
-        assert!(
-            (translation.x - 1.0).abs() < 0.1,
-            "Translation X should be ~1"
-        );
-        assert!(
-            (translation.y - 1.0).abs() < 0.1,
-            "Translation Y should be ~1"
-        );
+        let weights = vec![1.0; source.len()];
+        let (rotation, translation) = detector
+            .compute_weighted_rigid_transform(&source, &target, &weights)
+            .expect("rigid transform");
+        assert!(rotation.abs() < 0.1);
+        assert!((translation.x - 1.0).abs() < 0.1);
+        assert!((translation.y - 1.0).abs() < 0.1);
     }
 
     #[test]
     fn test_rigid_transform_with_rotation() {
         let detector = LoopClosureDetector::new();
-
-        // 90 degree rotation
         let source = vec![
             Vector2::new(1.0, 0.0),
             Vector2::new(2.0, 0.0),
-            Vector2::new(2.0, 1.0),
+            Vector2::<f32>::new(2.0, 1.0),
         ];
         let target = vec![
             Vector2::new(0.0, 1.0),
             Vector2::new(0.0, 2.0),
             Vector2::new(-1.0, 2.0),
         ];
-
-        let result = detector.compute_rigid_transform(&source, &target);
-        assert!(result.is_some());
-
-        let (rotation, _translation) = result.unwrap();
-        println!("Rotation: {:.3}° (expected ~90°)", rotation.to_degrees());
-
-        assert!(
-            (rotation - PI / 2.0).abs() < 0.1,
-            "Rotation should be ~90 degrees"
-        );
+        let weights = vec![1.0; source.len()];
+        let (rotation, _) = detector
+            .compute_weighted_rigid_transform(&source, &target, &weights)
+            .expect("rigid transform");
+        assert!((rotation - PI / 2.0).abs() < 0.1);
     }
 }
