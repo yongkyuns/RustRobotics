@@ -137,6 +137,8 @@ def main():
         assert endpoint.count("PpoTrainerConfig::default()") == 2
         replacement = "PpoTrainerConfig { action_std: 4.0, ..PpoTrainerConfig::default() }"
         TEST.write_text(text[:start] + endpoint.replace("PpoTrainerConfig::default()", replacement) + text[end:])
+        # Keep both independent metadata assertions strict for the candidate.
+        TEST.write_text(replace_once(TEST.read_text(), "assert_eq!(shared.policy.action_std, 2.0);", "assert_eq!(shared.policy.action_std, 4.0);"))
         READER.write_text(replace_once(READER.read_text(), "assert values[:2] == (20.0, 2.0)", "assert values[:2] == (20.0, 4.0)"))
         run("format-candidate", ["cargo", "fmt", "--all"])
         changed = set(subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines())
