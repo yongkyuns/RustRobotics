@@ -1,13 +1,11 @@
+# Setup-only repair; frozen numerical fixtures and reference recipes unchanged.
 name: Independent PPO pipeline audit
-
 on:
   push:
     branches: ["audit/ppo-reference-pipeline"]
     paths: [".github/workflows/ppo-reference-audit.yml"]
-
 permissions:
   contents: read
-
 jobs:
   rust:
     name: Export actual Rust updates and stable-start control
@@ -17,15 +15,11 @@ jobs:
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
+        with: {persist-credentials: false, fetch-depth: 0}
       - uses: dtolnay/rust-toolchain@1.98.1
-        with:
-          components: rustfmt, clippy
+        with: {components: 'rustfmt, clippy'}
       - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ppo-learning-release-v1
+        with: {shared-key: ppo-learning-release-v1}
       - name: Preserve baseline and add observational hooks
         shell: bash
         run: |
@@ -80,7 +74,6 @@ jobs:
           name: ppo-rust-audit
           path: ${{ runner.temp }}/ppo-audit/
           retention-days: 30
-
   torch:
     name: Independent PyTorch gradient and optimizer comparison
     needs: rust
@@ -88,11 +81,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+        with: {persist-credentials: false}
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+        with: {python-version: '3.11'}
       - uses: actions/download-artifact@v4
         with:
           name: ppo-rust-audit
@@ -114,7 +105,6 @@ jobs:
             ${{ runner.temp }}/audit/torch.log
             ${{ runner.temp }}/audit/torch-requirements.txt
           retention-days: 30
-
   reference:
     name: Reference PPO seed ${{ matrix.seed }} on actual Rust env
     needs: rust
@@ -124,16 +114,12 @@ jobs:
       fail-fast: false
       matrix:
         seed: [201, 202, 203, 204]
-    env:
-      OMP_NUM_THREADS: 1
-      MKL_NUM_THREADS: 1
+    env: {OMP_NUM_THREADS: 1, MKL_NUM_THREADS: 1}
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+        with: {persist-credentials: false}
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+        with: {python-version: '3.11'}
       - uses: actions/download-artifact@v4
         with:
           name: ppo-rust-audit
