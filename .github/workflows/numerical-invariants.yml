@@ -45,6 +45,9 @@ jobs:
       - name: Run seeded EKF consistency ensembles
         run: cargo test --locked -p rust_robotics_algo --test ekf_consistency -- --show-output
 
+      - name: Run seeded legacy EKF regressions
+        run: cargo test --locked -p rust_robotics_algo --lib slam::ekf_slam::tests:: -- --show-output
+
       - name: Qualify bounded numerical mutations in an isolated worktree
         run: python3 scripts/check_numerical_mutations.py --output "${{ runner.temp }}/numerical-mutation-evidence"
 
