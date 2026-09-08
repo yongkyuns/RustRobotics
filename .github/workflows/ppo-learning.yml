@@ -25,6 +25,8 @@ jobs:
           shared-key: ppo-learning-release-v1
       - name: Test fail-closed evidence validation
         run: python3 -m unittest discover -s scripts -p 'test_qualify_ppo_learning.py'
+      - name: Test development diagnostic evidence reader
+        run: python3 -m unittest discover -s scripts -p 'test_diagnose_ppo_balancing.py'
       - name: Qualify held-out improvement and same-build replay
         run: python3 scripts/qualify_ppo_learning.py --output "$RUNNER_TEMP/ppo-learning-evidence"
       - name: Preserve all outcomes and provenance
