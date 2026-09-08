@@ -1,0 +1,116 @@
+name: Default PPO actor KL stopping experiment
+
+on:
+  push:
+    branches: ["experiment/ppo-kl-stopping"]
+    paths: [".github/workflows/ppo-kl-experiment.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Prepare guarded test-only instrumentation
+        shell: bash
+        run: |
+          export PPO_KL_DIR="$RUNNER_TEMP/ppo-kl-controls"
+          echo "PPO_KL_DIR=$PPO_KL_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$PPO_KL_DIR"
+          git rev-parse HEAD > "$PPO_KL_DIR/commit.txt"
+          rustc -Vv > "$PPO_KL_DIR/rustc.txt"
+          python -m py_compile scripts/run_ppo_kl_experiment.py
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/model.rs rust_robotics_train/src/env.rs Cargo.lock
+          python scripts/run_ppo_kl_experiment.py prepare
+      - name: Test actor stopping, retained Adam state, critic continuation and mutations
+        run: python scripts/run_ppo_kl_experiment.py qualify
+      - name: Preserve evidence and restore original production source
+        if: always()
+        shell: bash
+        run: |
+          python scripts/run_ppo_kl_experiment.py preserve
+          git restore -- rust_robotics_train/src/trainer.rs
+          git diff --exit-code -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/model.rs rust_robotics_train/src/env.rs Cargo.lock
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-kl-controls
+          path: ${{ runner.temp }}/ppo-kl-controls/
+          if-no-files-found: error
+          retention-days: 30
+
+  paired:
+    name: Paired default and KL-controlled PPO seed ${{ matrix.seed }}
+    needs: controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [201, 202, 203, 204]
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      PPO_KL_SEED: ${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-balancing-diagnostics
+          run-id: 34232741415
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/prior
+      - name: Freeze provenance and prepare identical instrumentation
+        shell: bash
+        run: |
+          export PPO_KL_DIR="$RUNNER_TEMP/ppo-kl-${PPO_KL_SEED}"
+          export PPO_KL_PRIOR="$RUNNER_TEMP/prior/measurements"
+          echo "PPO_KL_DIR=$PPO_KL_DIR" >> "$GITHUB_ENV"
+          echo "PPO_KL_PRIOR=$PPO_KL_PRIOR" >> "$GITHUB_ENV"
+          mkdir -p "$PPO_KL_DIR/prior"
+          git rev-parse HEAD > "$PPO_KL_DIR/commit.txt"
+          rustc -Vv > "$PPO_KL_DIR/rustc.txt"
+          cp "$PPO_KL_PRIOR/episodes.tsv" "$PPO_KL_PRIOR/traces.tsv" "$PPO_KL_PRIOR/snapshots.tsv" "$PPO_KL_PRIOR/metrics.tsv" "$PPO_KL_PRIOR/config.txt" "$PPO_KL_DIR/prior/"
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/model.rs rust_robotics_train/src/env.rs Cargo.lock
+          python scripts/run_ppo_kl_experiment.py prepare
+      - name: Run both frozen arms; require baseline replay before candidate
+        run: python scripts/run_ppo_kl_experiment.py measure
+      - name: Preserve every outcome and restore production source
+        if: always()
+        shell: bash
+        run: |
+          python scripts/run_ppo_kl_experiment.py preserve
+          git restore -- rust_robotics_train/src/trainer.rs
+          git diff --exit-code -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/model.rs rust_robotics_train/src/env.rs Cargo.lock
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-kl-${{ matrix.seed }}
+          path: ${{ runner.temp }}/ppo-kl-${{ matrix.seed }}/
+          if-no-files-found: error
+          retention-days: 30
