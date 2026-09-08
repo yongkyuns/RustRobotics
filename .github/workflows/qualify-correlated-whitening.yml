@@ -1,0 +1,150 @@
+name: Qualify correlated Graph SLAM whitening
+
+on:
+  push:
+    branches: ["fix/graph-slam-correlated-whitening"]
+    paths: [".github/workflows/qualify-correlated-whitening.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  numerical-invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust_robotics_algo
+      - name: Prove baseline failures, fix whitening, and check mutations
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'correlated-whitening-evidence'
+          evidence.mkdir()
+          dense = Path('rust_robotics_algo/src/slam/graph_slam.rs')
+          sparse = Path('rust_robotics_algo/src/slam/sparse_solver.rs')
+          original_dense = dense.read_text()
+          assert original_dense.count('.map(|ch| ch.l())') == 2
+          module = '\n#[cfg(test)]\n#[path = "graph_slam_numerical_tests.rs"]\nmod numerical_tests;\n'
+          assert 'mod numerical_tests;' not in original_dense
+          dense.write_text(original_dense + module)
+          subprocess.run(['cargo', 'fmt', '--all'], check=True)
+          prefix = 'slam::graph_slam::numerical_tests::'
+          results = []
+
+          def run(label, test=None, failures=()):
+              command = ['cargo', 'test', '--locked', '-p', 'rust_robotics_algo', '--lib', prefix + (test or ''), '--']
+              if test:
+                  command.append('--exact')
+              command.append('--nocapture')
+              completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
+              output = completed.stdout
+              (evidence / (label + '.log')).write_text(output)
+              print(output, flush=True)
+              failed = set(re.findall(r'^test ' + re.escape(prefix) + r'(\w+) \.\.\. FAILED$', output, re.MULTILINE))
+              count = 1 if test else 8
+              assert f'running {count} test' in output, (label, 'tests did not execute')
+              if failures:
+                  assert completed.returncode == 101 and 'test result: FAILED.' in output, (label, completed.returncode)
+                  assert failed == set(failures), (label, failed, failures)
+              else:
+                  assert completed.returncode == 0 and f'test result: ok. {count} passed;' in output, (label, completed.returncode)
+              results.append({'label': label, 'exit_status': completed.returncode, 'expected_failures': list(failures), 'observed_failures': sorted(failed)})
+              (evidence / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
+
+          run('before', failures=(
+              'dense_correlated_odometry_metric',
+              'dense_correlated_observation_metric',
+              'dense_correlated_normal_equations_match_finite_differences',
+              'dense_sparse_correlated_linear_systems_agree',
+              'correlated_odometry_optimization_reaches_closed_form_solution',
+          ))
+          text = dense.read_text()
+          anchor = '            let sqrt_info = c\n                .information\n                .cholesky()\n                .map(|ch| ch.l())'
+          assert text.count(anchor) == 2
+          replacement = ('            // information = L L^T; whitening requires W^T W = information,\n'
+                         '            // hence W = L^T for both residuals and Jacobians.\n'
+                         '            let sqrt_info = c\n                .information\n                .cholesky()\n                .map(|ch| ch.l().transpose())')
+          dense.write_text(text.replace(anchor, replacement))
+          run('after')
+          fixed = dense.read_text()
+          transpose = '.map(|ch| ch.l().transpose())'
+          old = '.map(|ch| ch.l())'
+          positions = [m.start() for m in re.finditer(re.escape(transpose), fixed)]
+          assert len(positions) == 2
+          mutants = []
+          for index, kind in enumerate(('odometry', 'observation')):
+              pos = positions[index]
+              mutant = fixed[:pos] + old + fixed[pos + len(transpose):]
+              mutants.append((f'mutant-dense-{kind}-whitening', dense, mutant, f'dense_correlated_{kind}_metric'))
+          sign = 'jacobian[(res_idx + i, pose_idx + j)] = -wjp[(i, j)] as f64;'
+          assert fixed.count(sign) == 1
+          mutants.append(('mutant-dense-jacobian-sign', dense, fixed.replace(sign, sign.replace('= -wjp', '= wjp')), 'dense_correlated_normal_equations_match_finite_differences'))
+          sparse_text = sparse.read_text()
+          sign = 'let val = -wjp[(i, j)] as f64;'
+          assert sparse_text.count(sign) == 1
+          mutants.append(('mutant-sparse-jacobian-sign', sparse, sparse_text.replace(sign, sign.replace('= -wjp', '= wjp')), 'sparse_correlated_normal_equations_match_finite_differences'))
+          for label, path, mutant, test in mutants:
+              saved = path.read_bytes()
+              try:
+                  path.write_text(mutant)
+                  run(label, test, failures=(test,))
+              finally:
+                  path.write_bytes(saved)
+          run('restored')
+          assert dense.read_text() == fixed
+          assert sparse.read_text() == sparse_text
+          subprocess.run(['cargo', 'test', '--locked', '-p', 'rust_robotics_algo', '--test', 'numerical_invariants'], check=True)
+          workflow = Path('.github/workflows/numerical-invariants.yml')
+          text = workflow.read_text()
+          anchor = '      - name: Run numerical invariant tests\n'
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, '      - name: Run correlated Graph SLAM numerical oracles\n        run: cargo test --locked -p rust_robotics_algo --lib slam::graph_slam::numerical_tests --verbose\n\n' + anchor)
+          workflow.write_text(text)
+          Path('.github/workflows/qualify-correlated-whitening.yml').unlink()
+          subprocess.run(['cargo', 'fmt', '--all', '--', '--check'], check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          allowed = {str(dense), 'rust_robotics_algo/src/slam/graph_slam_numerical_tests.rs', str(workflow), '.github/workflows/qualify-correlated-whitening.yml'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed <= allowed, changed
+          print('QUALIFICATION COMPLETE: baseline failed, eight fixed oracles passed, four targeted mutants killed, sources restored.', flush=True)
+          PY
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: correlated-whitening-evidence
+          path: ${{ runner.temp }}/correlated-whitening-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Commit only the qualified fix on this feature branch
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/fix/graph-slam-correlated-whitening'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- rust_robotics_algo/src/slam/graph_slam.rs rust_robotics_algo/src/slam/graph_slam_numerical_tests.rs .github/workflows/numerical-invariants.yml .github/workflows/qualify-correlated-whitening.yml
+          git diff --cached --stat
+          git diff --cached --check
+          git commit -m 'fix: whiten dense Graph SLAM with the transposed Cholesky factor'
+          auth=$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/graph-slam-correlated-whitening
+          git rev-parse HEAD
