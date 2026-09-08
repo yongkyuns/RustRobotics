@@ -76,7 +76,10 @@ pub struct PolicySnapshot {
 }
 
 impl PolicySnapshot {
-    /// Returns the exploration standard deviation used during PPO training.
+    /// Returns the pre-squash exploration scale in force units.
+    ///
+    /// Training uses latent standard deviation `action_std / action_limit`
+    /// before `tanh`; this is not the realized bounded-action deviation.
     ///
     /// The simulator currently uses deterministic inference, but surfacing this
     /// value is still useful for UI, debugging, and future replay tooling.
@@ -88,7 +91,8 @@ impl PolicySnapshot {
     ///
     /// The observation ordering is `[x, x_dot, theta, theta_dot]`.
     ///
-    /// This is effectively the mean-action branch of the trained PPO actor:
+    /// This squashes the latent Gaussian mean, not the expectation of the
+    /// nonlinear bounded-action distribution:
     ///
     /// 1. affine transform into hidden layer 0
     /// 2. ReLU activation
@@ -138,7 +142,8 @@ pub struct PpoMetrics {
 /// The simulator's multi-replica coordinator averages these dense tensors and
 /// redistributes the merged result. Keeping the actor and critic bundled
 /// together avoids accidental shape mismatches between independently updated
-/// models.
+/// models. This is weight-transfer state, not an exact-resume checkpoint:
+/// optimizer moments, environment state, RNG state and metrics are not included.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PpoSharedState {
     pub policy: PolicySnapshot,

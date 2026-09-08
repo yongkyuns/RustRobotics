@@ -15,7 +15,9 @@ pub struct PpoConfig {
     pub gamma: f32,
     pub gae_lambda: f32,
     pub clip_epsilon: f32,
+    /// Nonnegative multiplier of critic MSE; zero freezes critic Adam updates.
     pub value_loss_coef: f32,
+    /// Nonnegative bonus for the current tanh-squashed policy entropy.
     pub entropy_coef: f32,
     pub learning_rate: f64,
 }
