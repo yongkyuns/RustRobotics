@@ -1,0 +1,114 @@
+name: Prepare PPO balancing diagnostics (temporary)
+
+on:
+  push:
+    branches: ["investigate/ppo-balancing-baseline"]
+    paths: [".github/workflows/prepare-ppo-balancing.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format and validate diagnostic controls
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, os, re, subprocess
+          directory = Path(os.environ['RUNNER_TEMP']) / 'ppo-balancing-evidence'
+          directory.mkdir()
+          source = Path('rust_robotics_train/tests/ppo_balancing_diagnostics.rs')
+          report = {'input_commit': os.environ['GITHUB_SHA'], 'commands': []}
+          def run(label, command, count=None, failing=None, marker=None):
+              p = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+              (directory / (label + '.log')).write_text(p.stdout)
+              print(p.stdout, flush=True)
+              entry = {'label': label, 'command': command, 'returncode': p.returncode, 'count': count, 'failing': failing, 'marker': marker}
+              report['commands'].append(entry)
+              if failing:
+                  assert p.returncode == 101, entry
+                  assert re.search(r'^test ' + re.escape(failing) + r' \.\.\. FAILED$', p.stdout, re.MULTILINE), entry
+                  assert 'test result: FAILED. 0 passed; 1 failed; 0 ignored;' in p.stdout, entry
+                  assert 'panicked at' in p.stdout and marker in p.stdout, entry
+              else:
+                  assert p.returncode == 0, entry
+                  if count is not None:
+                      assert f'test result: ok. {count} passed; 0 failed;' in p.stdout, entry
+              entry['validated'] = True
+          try:
+              expected = {'rust_robotics_train/src/trainer.rs': '515bf5e3f6f2875234d7711200e6f7019aad5123', 'rust_robotics_train/src/model.rs': '7805d67ae070e7b6a42ef7db4c85a386e236ba37', 'rust_robotics_train/src/env.rs': 'c87d55f9affc0685e24dc3c6fc77718da4f0c4e5'}
+              for name, sha in expected.items():
+                  data = Path(name).read_bytes()
+                  assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == sha, name
+              # Remove a new unused import identified in review before execution.
+              text = source.read_text()
+              assert text.count('PendulumEnv, PendulumEnvConfig, PolicySnapshot, PpoSharedState,') == 1
+              source.write_text(text.replace('PendulumEnv, PendulumEnvConfig, PolicySnapshot, PpoSharedState,', 'PendulumEnv, PendulumEnvConfig, PpoSharedState,'))
+              run('format', ['cargo', 'fmt', '--all'])
+              command = ['cargo', 'test', '--locked', '-p', 'rust_robotics_train', '--test', 'ppo_balancing_diagnostics']
+              run('controls-baseline', command + ['--', '--skip', 'measure_default_balancing_development_panel', '--test-threads=1', '--show-output'], 7)
+              fixed = source.read_bytes()
+              for label, old, new, test, marker in [
+                  ('double-reward', 'total_return += f64::from(result.reward);', 'total_return += 2.0 * f64::from(result.reward);', 'accounting_matches_exact_stationary_rewards_and_timeout', 'reward must be counted once'),
+                  ('privileged-state-control', 'let action = policy(observation);', 'let x = env.state(); let action = policy([x[0], x[1], x[2], x[3]]);', 'noisy_observation_control_matches_explicit_environment_loop', 'noisy policy rollout reference'),
+                  ('failure-misclassified-as-timeout', '(true, true) => Some(Ending::Both),', '(true, true) => Some(Ending::Timeout),', 'failure_labels_respect_strict_limits_and_precedence', 'left: Some(Timeout)'),
+              ]:
+                  try:
+                      text = source.read_text()
+                      assert text.count(old) == 1, (label, text.count(old))
+                      source.write_text(text.replace(old, new))
+                      run(label, command + [test, '--', '--exact', '--test-threads=1', '--show-output'], failing=test, marker=marker)
+                  finally:
+                      source.write_bytes(fixed)
+              run('controls-restored', command + ['--', '--skip', 'measure_default_balancing_development_panel', '--test-threads=1', '--show-output'], 7)
+              run('all-training-tests', ['cargo', 'test', '--locked', '-p', 'rust_robotics_train'], 55)
+              run('strict-clippy', ['cargo', 'clippy', '--locked', '-p', 'rust_robotics_train', '--all-targets', '--', '-D', 'warnings'])
+              run('format-check', ['cargo', 'fmt', '--all', '--', '--check'])
+              run('diff-check', ['git', 'diff', '--check'])
+              changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+              assert changed == {str(source)}, changed
+              report['controls_validated'] = True
+          except Exception as error:
+              report['error'] = repr(error)
+              raise
+          finally:
+              (directory / 'control-results.json').write_text(json.dumps(report, indent=2) + '\n')
+              (directory / 'diagnostic-source.rs').write_bytes(source.read_bytes())
+          PY
+      - name: Publish only control-validated diagnostic formatting
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/investigate/ppo-balancing-baseline'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- rust_robotics_train/tests/ppo_balancing_diagnostics.rs
+          git diff --cached --check
+          git commit -m 'test: format validated PPO balancing diagnostics'
+          auth=$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/investigate/ppo-balancing-baseline
+      - name: Measure every predeclared development checkpoint
+        run: python3 scripts/diagnose_ppo_balancing.py --output "${{ runner.temp }}/ppo-balancing-evidence/measurements"
+      - name: Preserve controls and all measurement outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-balancing-diagnostics
+          path: ${{ runner.temp }}/ppo-balancing-evidence/
+          if-no-files-found: error
+          retention-days: 30
