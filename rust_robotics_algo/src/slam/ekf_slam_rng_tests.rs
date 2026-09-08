@@ -16,7 +16,11 @@ fn seeded_observations_preserve_noise_formula_and_draw_order() {
     let mut rng = StdRng::seed_from_u64(0xe4f1_0001);
     let mut reference = rng.clone();
     let pose = Vector3::zeros();
-    let landmarks = [Vector2::new(3.0, 4.0), Vector2::new(100.0, 100.0), Vector2::new(-4.0, 3.0)];
+    let landmarks = [
+        Vector2::new(3.0, 4.0),
+        Vector2::new(100.0, 100.0),
+        Vector2::new(-4.0, 3.0),
+    ];
     let config = EkfSlamConfig::default();
     let observations = generate_observations_with_rng(&pose, &landmarks, &config, true, &mut rng);
     assert_eq!(observations.len(), 2);
@@ -25,11 +29,26 @@ fn seeded_observations_preserve_noise_formula_and_draw_order() {
         // Preserve the existing uniform noise law and two draws per visible
         // landmark. This is deliberately not a Gaussian-noise retuning.
         let range = 5.0 + rand(&mut reference) * config.observation_noise[(0, 0)].sqrt() * 0.5;
-        let bearing = normalize_angle(landmarks[*id][1].atan2(landmarks[*id][0]) + rand(&mut reference) * config.observation_noise[(1, 1)].sqrt() * 0.5);
-        assert_eq!(obs.range.to_bits(), range.to_bits(), "seeded observation range");
-        assert_eq!(obs.bearing.to_bits(), bearing.to_bits(), "seeded observation bearing");
+        let bearing = normalize_angle(
+            landmarks[*id][1].atan2(landmarks[*id][0])
+                + rand(&mut reference) * config.observation_noise[(1, 1)].sqrt() * 0.5,
+        );
+        assert_eq!(
+            obs.range.to_bits(),
+            range.to_bits(),
+            "seeded observation range"
+        );
+        assert_eq!(
+            obs.bearing.to_bits(),
+            bearing.to_bits(),
+            "seeded observation bearing"
+        );
     }
-    assert_eq!(rng.next_u64(), reference.next_u64(), "invisible landmarks must not consume noise draws");
+    assert_eq!(
+        rng.next_u64(),
+        reference.next_u64(),
+        "invisible landmarks must not consume noise draws"
+    );
 }
 
 #[test]
@@ -55,9 +74,17 @@ fn seeded_step_replays_the_explicit_prediction_observation_update_sequence() {
     let mut truth = Vector3::zeros();
     for _ in 0..50 {
         truth = motion_model(&truth, 1.0, 0.1, 0.1);
-        step_with_rng(&mut a, &config, &truth, &landmarks, (1.0, 0.1, 0.1), &mut rng_a);
+        step_with_rng(
+            &mut a,
+            &config,
+            &truth,
+            &landmarks,
+            (1.0, 0.1, 0.1),
+            &mut rng_a,
+        );
         predict(&mut b, &config, 1.0, 0.1, 0.1);
-        let observations = generate_observations_with_rng(&truth, &landmarks, &config, true, &mut rng_b);
+        let observations =
+            generate_observations_with_rng(&truth, &landmarks, &config, true, &mut rng_b);
         update(&mut b, &config, &observations);
         assert_eq!(a.mu, b.mu);
         assert_eq!(a.sigma, b.sigma);

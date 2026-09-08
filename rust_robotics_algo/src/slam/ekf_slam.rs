@@ -35,8 +35,8 @@ use nalgebra::{DMatrix, DVector, Matrix2, Matrix3, Vector2, Vector3};
 use crate::prelude::*;
 
 /// Generate random float between [-1.0, 1.0]
-fn rand() -> f32 {
-    2.0 * (rand::random::<f32>() - 0.5)
+fn rand<R: rand::Rng + ?Sized>(rng: &mut R) -> f32 {
+    2.0 * (rng.gen::<f32>() - 0.5)
 }
 
 /// EKF-SLAM state containing the mean and covariance of the state estimate
@@ -900,6 +900,23 @@ pub fn generate_observations(
     config: &EkfSlamConfig,
     add_noise: bool,
 ) -> Vec<(usize, Observation)> {
+    generate_observations_with_rng(
+        robot_pose,
+        true_landmarks,
+        config,
+        add_noise,
+        &mut rand::thread_rng(),
+    )
+}
+
+// Keep random state caller-owned in tests; the public demo API remains entropy-backed.
+fn generate_observations_with_rng<R: rand::Rng + ?Sized>(
+    robot_pose: &Vector3<f32>,
+    true_landmarks: &[Vector2<f32>],
+    config: &EkfSlamConfig,
+    add_noise: bool,
+    rng: &mut R,
+) -> Vec<(usize, Observation)> {
     let mut observations = Vec::new();
 
     for (idx, landmark) in true_landmarks.iter().enumerate() {
@@ -914,8 +931,8 @@ pub fn generate_observations(
             let obs = if add_noise {
                 // Add noise scaled by std dev (sqrt of variance)
                 // Using rand() which gives uniform [-1, 1], scaled to approximate Gaussian
-                let range_noise = rand() * config.observation_noise[(0, 0)].sqrt() * 0.5;
-                let bearing_noise = rand() * config.observation_noise[(1, 1)].sqrt() * 0.5;
+                let range_noise = rand(rng) * config.observation_noise[(0, 0)].sqrt() * 0.5;
+                let bearing_noise = rand(rng) * config.observation_noise[(1, 1)].sqrt() * 0.5;
                 Observation {
                     range: range + range_noise,
                     bearing: normalize_angle(bearing + bearing_noise),
@@ -944,11 +961,30 @@ pub fn step(
     w: f32,
     dt: f32,
 ) {
+    step_with_rng(
+        state,
+        config,
+        true_pose,
+        true_landmarks,
+        (v, w, dt),
+        &mut rand::thread_rng(),
+    );
+}
+
+fn step_with_rng<R: rand::Rng + ?Sized>(
+    state: &mut EkfSlamState,
+    config: &EkfSlamConfig,
+    true_pose: &Vector3<f32>,
+    true_landmarks: &[Vector2<f32>],
+    control: (f32, f32, f32),
+    rng: &mut R,
+) {
+    let (v, w, dt) = control;
     // 1. Prediction step
     predict(state, config, v, w, dt);
 
     // 2. Generate observations from true pose
-    let observations = generate_observations(true_pose, true_landmarks, config, true);
+    let observations = generate_observations_with_rng(true_pose, true_landmarks, config, true, rng);
 
     // 3. Update step with observations
     update(state, config, &observations);
@@ -957,10 +993,13 @@ pub fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     /// Compare EKF vs Dead Reckoning performance
     #[test]
     fn test_ekf_vs_dr() {
+        let mut rng = StdRng::seed_from_u64(0xe4f00000);
+        println!("seed=0xe4f00000");
         let mut state = EkfSlamState::new();
         let config = EkfSlamConfig::default();
 
@@ -993,13 +1032,14 @@ mod tests {
             true_pose = motion_model(&true_pose, v, w, dt);
 
             // Dead reckoning (with BIASED noise - causes consistent drift)
-            let v_noisy = v * v_bias + rand() * 0.1;
-            let w_noisy = w + w_bias + rand() * 0.02;
+            let v_noisy = v * v_bias + rand(&mut rng) * 0.1;
+            let w_noisy = w + w_bias + rand(&mut rng) * 0.02;
             dr_pose = motion_model(&dr_pose, v_noisy, w_noisy, dt);
 
             // EKF-SLAM (uses true v, w for prediction, noisy observations)
             predict(&mut state, &config, v, w, dt);
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
             update(&mut state, &config, &observations);
 
             if step % 400 == 0 {
@@ -1047,6 +1087,8 @@ mod tests {
 
     #[test]
     fn test_slam_performance() {
+        let mut rng = StdRng::seed_from_u64(0xe4f00001);
+        println!("seed=0xe4f00001");
         // Run multiple trials to account for random noise
         let mut total_pos_err = 0.0;
         let mut total_lm_err = 0.0;
@@ -1071,7 +1113,8 @@ mod tests {
             for _step in 0..500 {
                 true_pose = motion_model(&true_pose, v, w, dt);
                 predict(&mut state, &config, v, w, dt);
-                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+                let observations =
+                    generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
                 update(&mut state, &config, &observations);
             }
 
@@ -1119,6 +1162,8 @@ mod tests {
     /// Test without observation noise to verify algorithm correctness
     #[test]
     fn test_slam_no_noise() {
+        let mut rng = StdRng::seed_from_u64(0xe4f00002);
+        println!("seed=0xe4f00002");
         let mut state = EkfSlamState::new();
         let config = EkfSlamConfig::default();
 
@@ -1140,7 +1185,8 @@ mod tests {
             true_pose = motion_model(&true_pose, v, w, dt);
             predict(&mut state, &config, v, w, dt);
             // No noise in observations
-            let observations = generate_observations(&true_pose, &landmarks, &config, false);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, false, &mut rng);
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
@@ -1175,6 +1221,8 @@ mod tests {
     /// Test when landmarks change mid-simulation (simulating UI change)
     #[test]
     fn test_slam_landmarks_change() {
+        let mut rng = StdRng::seed_from_u64(0xe4f00003);
+        println!("seed=0xe4f00003");
         let mut state = EkfSlamState::new();
         let config = EkfSlamConfig::default();
 
@@ -1198,7 +1246,8 @@ mod tests {
         for step in 0..300 {
             true_pose = motion_model(&true_pose, v, w, dt);
             predict(&mut state, &config, v, w, dt);
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
@@ -1229,7 +1278,8 @@ mod tests {
         for step in 300..600 {
             true_pose = motion_model(&true_pose, v, w, dt);
             predict(&mut state, &config, v, w, dt);
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
@@ -1271,7 +1321,8 @@ mod tests {
         for step in 600..900 {
             true_pose = motion_model(&true_pose, v, w, dt);
             predict(&mut state, &config, v, w, dt);
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
@@ -1306,7 +1357,8 @@ mod tests {
         for step in 900..1200 {
             true_pose = motion_model(&true_pose, v, w, dt);
             predict(&mut state, &config, v, w, dt);
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
@@ -1347,6 +1399,8 @@ mod tests {
     /// Test with landmarks going in and out of range
     #[test]
     fn test_slam_range_transitions() {
+        let mut rng = StdRng::seed_from_u64(0xe4f00004);
+        println!("seed=0xe4f00004");
         let mut state = EkfSlamState::new();
         let config = EkfSlamConfig {
             max_range: 20.0, // Reasonable range
@@ -1379,7 +1433,8 @@ mod tests {
         for step in 0..1500 {
             true_pose = motion_model(&true_pose, v, w, dt);
             predict(&mut state, &config, v, w, dt);
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
 
             if observations.is_empty() {
                 zero_obs_count += 1;
@@ -1485,6 +1540,8 @@ mod tests {
 
     #[test]
     fn test_ekf_slam_cycle() {
+        let mut rng = StdRng::seed_from_u64(0xe4f00009);
+        println!("seed=0xe4f00009");
         let mut state = EkfSlamState::new();
         let config = EkfSlamConfig::default();
 
@@ -1501,7 +1558,14 @@ mod tests {
             true_pose = motion_model(&true_pose, v, w, dt);
 
             // Run EKF-SLAM
-            step(&mut state, &config, &true_pose, &landmarks, v, w, dt);
+            step_with_rng(
+                &mut state,
+                &config,
+                &true_pose,
+                &landmarks,
+                (v, w, dt),
+                &mut rng,
+            );
         }
 
         // Should have discovered at least one landmark
@@ -1516,6 +1580,8 @@ mod tests {
     /// Test that discovering a new landmark doesn't corrupt existing landmark estimates
     #[test]
     fn test_new_landmark_preserves_existing() {
+        let mut rng = StdRng::seed_from_u64(0xe4f0000a);
+        println!("seed=0xe4f0000a");
         let mut state = EkfSlamState::new();
         let config = EkfSlamConfig {
             max_range: 15.0, // Limited range so we can control when landmarks are seen
@@ -1545,7 +1611,13 @@ mod tests {
         for step in 0..500 {
             true_pose = motion_model(&true_pose, v, w, dt);
             predict(&mut state, &config, v, w, dt);
-            let observations = generate_observations(&true_pose, &close_landmarks, &config, true);
+            let observations = generate_observations_with_rng(
+                &true_pose,
+                &close_landmarks,
+                &config,
+                true,
+                &mut rng,
+            );
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
@@ -1597,7 +1669,8 @@ mod tests {
         for step in 500..800 {
             true_pose = motion_model(&true_pose, v_straight, w_straight, dt);
             predict(&mut state, &config, v_straight, w_straight, dt);
-            let observations = generate_observations(&true_pose, &all_landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &all_landmarks, &config, true, &mut rng);
 
             // Check if we just discovered the far landmark
             if observations.len() > state.n_landmarks && state.n_landmarks == n_landmarks_before {
@@ -1699,11 +1772,16 @@ mod tests {
     }
 
     /// Helper to generate random landmarks in a ring around origin
-    fn generate_random_landmarks_ring(n: usize, min_dist: f32, max_dist: f32) -> Vec<Vector2<f32>> {
+    fn generate_random_landmarks_ring(
+        n: usize,
+        min_dist: f32,
+        max_dist: f32,
+        rng: &mut StdRng,
+    ) -> Vec<Vector2<f32>> {
         let mut landmarks = Vec::with_capacity(n);
         for _ in 0..n {
-            let angle = rand::random::<f32>() * 2.0 * PI;
-            let dist = min_dist + rand::random::<f32>() * (max_dist - min_dist);
+            let angle = rng.gen::<f32>() * 2.0 * PI;
+            let dist = min_dist + rng.gen::<f32>() * (max_dist - min_dist);
             landmarks.push(Vector2::new(dist * angle.cos(), dist * angle.sin()));
         }
         landmarks
@@ -1712,6 +1790,8 @@ mod tests {
     /// Randomized test: check if new landmarks corrupt existing estimates with 8+ landmarks
     #[test]
     fn test_randomized_new_landmark_with_many_existing() {
+        let mut rng = StdRng::seed_from_u64(0xe4f0000b);
+        println!("seed=0xe4f0000b");
         const N_TRIALS: usize = 5;
         const N_INITIAL_LANDMARKS: usize = 10;
         const N_NEW_LANDMARKS: usize = 4;
@@ -1737,10 +1817,12 @@ mod tests {
             };
 
             // Generate initial landmarks in a ring close to origin
-            let initial_landmarks = generate_random_landmarks_ring(N_INITIAL_LANDMARKS, 5.0, 15.0);
+            let initial_landmarks =
+                generate_random_landmarks_ring(N_INITIAL_LANDMARKS, 5.0, 15.0, &mut rng);
 
             // Generate new landmarks that will be discovered later (further out)
-            let new_landmarks = generate_random_landmarks_ring(N_NEW_LANDMARKS, 30.0, 45.0);
+            let new_landmarks =
+                generate_random_landmarks_ring(N_NEW_LANDMARKS, 30.0, 45.0, &mut rng);
 
             let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
             let v = 1.5;
@@ -1751,8 +1833,13 @@ mod tests {
             for _ in 0..400 {
                 true_pose = motion_model(&true_pose, v, w, dt);
                 predict(&mut state, &config, v, w, dt);
-                let observations =
-                    generate_observations(&true_pose, &initial_landmarks, &config, true);
+                let observations = generate_observations_with_rng(
+                    &true_pose,
+                    &initial_landmarks,
+                    &config,
+                    true,
+                    &mut rng,
+                );
                 update(&mut state, &config, &observations);
             }
 
@@ -1784,7 +1871,13 @@ mod tests {
             for _ in 0..500 {
                 true_pose = motion_model(&true_pose, v_out, w_out, dt);
                 predict(&mut state, &config, v_out, w_out, dt);
-                let observations = generate_observations(&true_pose, &all_landmarks, &config, true);
+                let observations = generate_observations_with_rng(
+                    &true_pose,
+                    &all_landmarks,
+                    &config,
+                    true,
+                    &mut rng,
+                );
                 update(&mut state, &config, &observations);
             }
 
@@ -1871,6 +1964,8 @@ mod tests {
     /// Stress test: rapidly add many landmarks and check stability
     #[test]
     fn test_stress_rapid_landmark_addition() {
+        let mut rng = StdRng::seed_from_u64(0xe4f0000c);
+        println!("seed=0xe4f0000c");
         const N_TRIALS: usize = 3;
 
         let mut failures = Vec::new();
@@ -1885,8 +1980,8 @@ mod tests {
             // Generate 15 landmarks at various distances
             let mut landmarks: Vec<Vector2<f32>> = Vec::new();
             for i in 0..15 {
-                let angle = (i as f32 / 15.0) * 2.0 * PI + rand::random::<f32>() * 0.3;
-                let dist = 8.0 + (i as f32) * 2.0 + rand::random::<f32>() * 3.0;
+                let angle = (i as f32 / 15.0) * 2.0 * PI + rng.gen::<f32>() * 0.3;
+                let dist = 8.0 + (i as f32) * 2.0 + rng.gen::<f32>() * 3.0;
                 landmarks.push(Vector2::new(dist * angle.cos(), dist * angle.sin()));
             }
 
@@ -1902,7 +1997,8 @@ mod tests {
             for step in 0..400 {
                 true_pose = motion_model(&true_pose, v, w, dt);
                 predict(&mut state, &config, v, w, dt);
-                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+                let observations =
+                    generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
 
                 let n_before = state.n_landmarks;
                 update(&mut state, &config, &observations);
@@ -1989,6 +2085,8 @@ mod tests {
     /// Test: check specific edge case where landmark is added at boundary of sensor range
     #[test]
     fn test_landmark_at_sensor_boundary() {
+        let mut rng = StdRng::seed_from_u64(0xe4f0000d);
+        println!("seed=0xe4f0000d");
         const N_TRIALS: usize = 4;
 
         let mut failures = Vec::new();
@@ -2004,14 +2102,14 @@ mod tests {
             let mut landmarks: Vec<Vector2<f32>> = Vec::new();
             for i in 0..8 {
                 let angle = (i as f32 / 8.0) * 2.0 * PI;
-                let dist = 10.0 + rand::random::<f32>() * 2.0;
+                let dist = 10.0 + rng.gen::<f32>() * 2.0;
                 landmarks.push(Vector2::new(dist * angle.cos(), dist * angle.sin()));
             }
 
             // Add landmarks right at the sensor boundary (will flicker in/out)
             for i in 0..4 {
-                let angle = (i as f32 / 4.0) * 2.0 * PI + rand::random::<f32>() * 0.5;
-                let dist = config.max_range - 1.0 + rand::random::<f32>() * 2.0; // Right at boundary
+                let angle = (i as f32 / 4.0) * 2.0 * PI + rng.gen::<f32>() * 0.5;
+                let dist = config.max_range - 1.0 + rng.gen::<f32>() * 2.0; // Right at boundary
                 landmarks.push(Vector2::new(dist * angle.cos(), dist * angle.sin()));
             }
 
@@ -2028,7 +2126,8 @@ mod tests {
             for step in 0..300 {
                 true_pose = motion_model(&true_pose, v, w, dt);
                 predict(&mut state, &config, v, w, dt);
-                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+                let observations =
+                    generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
 
                 // Track visibility changes (landmarks going in/out of view)
                 if observations.len() != prev_n_landmarks {
@@ -2084,6 +2183,8 @@ mod tests {
     /// Focus on detecting error SPIKES when new landmarks are added, not gradual drift.
     #[test]
     fn test_numerical_stability_large_state() {
+        let mut rng = StdRng::seed_from_u64(0xe4f0000e);
+        println!("seed=0xe4f0000e");
         const N_TRIALS: usize = 3;
         const N_LANDMARKS: usize = 20;
 
@@ -2097,7 +2198,7 @@ mod tests {
             };
 
             // Generate many landmarks in a ring - all should be visible from origin
-            let landmarks = generate_random_landmarks_ring(N_LANDMARKS, 10.0, 40.0);
+            let landmarks = generate_random_landmarks_ring(N_LANDMARKS, 10.0, 40.0, &mut rng);
 
             let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
             let v = 2.0;
@@ -2112,7 +2213,8 @@ mod tests {
             for step in 0..200 {
                 true_pose = motion_model(&true_pose, v, w, dt);
                 predict(&mut state, &config, v, w, dt);
-                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+                let observations =
+                    generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
 
                 let n_before = state.n_landmarks;
                 update(&mut state, &config, &observations);
@@ -2171,6 +2273,8 @@ mod tests {
     /// Runs multiple simulations and checks if landmarks appear rotated
     #[test]
     fn test_landmark_rotation_issue() {
+        let mut rng = StdRng::seed_from_u64(0xe4f0000f);
+        println!("seed=0xe4f0000f");
         const N_TRIALS: usize = 5;
         const N_LANDMARKS: usize = 20;
         const N_STEPS: usize = 200;
@@ -2188,7 +2292,7 @@ mod tests {
             };
 
             // Generate 20 landmarks in a ring
-            let landmarks = generate_random_landmarks_ring(N_LANDMARKS, 8.0, 30.0);
+            let landmarks = generate_random_landmarks_ring(N_LANDMARKS, 8.0, 30.0, &mut rng);
 
             let mut true_pose = Vector3::new(0.0, 0.0, 0.0);
             let v = 2.0;
@@ -2199,7 +2303,8 @@ mod tests {
             for _ in 0..N_STEPS {
                 true_pose = motion_model(&true_pose, v, w, dt);
                 predict(&mut state, &config, v, w, dt);
-                let observations = generate_observations(&true_pose, &landmarks, &config, true);
+                let observations =
+                    generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
                 update(&mut state, &config, &observations);
             }
 
@@ -2316,6 +2421,8 @@ mod tests {
     /// causing drift, and then should recover when landmarks become visible again.
     #[test]
     fn test_out_of_sight_and_recovery() {
+        let mut rng = StdRng::seed_from_u64(0xe4f00010);
+        println!("seed=0xe4f00010");
         println!("\n=== Out of Sight and Recovery Test ===");
         println!("Simulates: visible -> out of range (drift) -> back in range (recovery?)");
 
@@ -2364,15 +2471,16 @@ mod tests {
             true_pose = motion_model(&true_pose, v, w, dt);
 
             // Noisy control (simulating odometry)
-            let v_noisy = v * v_bias + rand() * 0.1;
-            let w_noisy = w + w_bias + rand() * 0.02;
+            let v_noisy = v * v_bias + rand(&mut rng) * 0.1;
+            let w_noisy = w + w_bias + rand(&mut rng) * 0.02;
 
             // Dead reckoning
             dr_pose = motion_model(&dr_pose, v_noisy, w_noisy, dt);
 
             // EKF uses noisy control
             predict(&mut state, &config, v_noisy, w_noisy, dt);
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
             update(&mut state, &config, &observations);
 
             if step % 100 == 0 {
@@ -2419,13 +2527,14 @@ mod tests {
         for step in 300..700 {
             true_pose = motion_model(&true_pose, v_away, w_away, dt);
 
-            let v_noisy = v_away * v_bias + rand() * 0.1;
-            let w_noisy = w_away + w_bias + rand() * 0.02;
+            let v_noisy = v_away * v_bias + rand(&mut rng) * 0.1;
+            let w_noisy = w_away + w_bias + rand(&mut rng) * 0.02;
 
             dr_pose = motion_model(&dr_pose, v_noisy, w_noisy, dt);
             predict(&mut state, &config, v_noisy, w_noisy, dt);
 
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
             if observations.is_empty() {
                 zero_obs_steps += 1;
             }
@@ -2478,13 +2587,14 @@ mod tests {
         for step in 700..1200 {
             true_pose = motion_model(&true_pose, v_back, w_back, dt);
 
-            let v_noisy = v_back * v_bias + rand() * 0.1;
-            let w_noisy = w_back + w_bias + rand() * 0.02;
+            let v_noisy = v_back * v_bias + rand(&mut rng) * 0.1;
+            let w_noisy = w_back + w_bias + rand(&mut rng) * 0.02;
 
             dr_pose = motion_model(&dr_pose, v_noisy, w_noisy, dt);
             predict(&mut state, &config, v_noisy, w_noisy, dt);
 
-            let observations = generate_observations(&true_pose, &landmarks, &config, true);
+            let observations =
+                generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
 
             // Record when we first see landmarks again
             if !observations.is_empty() && first_obs_step.is_none() {
@@ -2515,7 +2625,10 @@ mod tests {
                     step,
                     ekf_err,
                     dr_err,
-                    generate_observations(&true_pose, &landmarks, &config, false).len(),
+                    generate_observations_with_rng(
+                        &true_pose, &landmarks, &config, false, &mut rng
+                    )
+                    .len(),
                     dist_from_origin
                 );
             }
@@ -2597,7 +2710,8 @@ mod tests {
 
         // Diagnostic: check observation association
         println!("\n=== Diagnostic: Current Observation Positions ===");
-        let current_observations = generate_observations(&true_pose, &landmarks, &config, true);
+        let current_observations =
+            generate_observations_with_rng(&true_pose, &landmarks, &config, true, &mut rng);
         println!("Current observations: {}", current_observations.len());
 
         for (true_idx, obs) in &current_observations {
@@ -2636,3 +2750,7 @@ mod tests {
 #[cfg(test)]
 #[path = "ekf_slam_numerical_tests.rs"]
 mod numerical_tests;
+
+#[cfg(test)]
+#[path = "ekf_slam_rng_tests.rs"]
+mod rng_tests;
