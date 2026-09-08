@@ -1,0 +1,186 @@
+name: Retained PPO feedback diagnosis
+
+on:
+  push:
+    branches: ["diagnose/ppo-feedback-replay"]
+    paths: [".github/workflows/ppo-feedback-replay.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: never
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 34240275488
+          name: ppo-exploration-ablation
+          path: ${{ runner.temp }}/retained-input
+      - name: Replay frozen final snapshots and verify all archived outcomes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import csv
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          inputs = root / 'retained-input'
+          output = root / 'ppo-feedback-replay'
+          output.mkdir()
+          report = {'input_run': 34240275488, 'input_artifact': 10062074830, 'commands': []}
+          generated = Path('rust_robotics_train/tests/ppo_feedback_replay.rs')
+          original = Path('rust_robotics_train/tests/ppo_balancing_diagnostics.rs')
+          source = original.read_bytes()
+          assert hashlib.sha1(b'blob ' + str(len(source)).encode() + b'\0' + source).hexdigest() == 'db3d8b8c1b892c33829e17654c4388780d39b55d'
+          for arm in ['std2', 'ablation/std4']:
+              folder = inputs / arm
+              evidence = json.loads((folder / 'results.json').read_text())
+              for path, digest in evidence['source_sha256'].items():
+                  assert hashlib.sha256((folder / 'sources' / path).read_bytes()).hexdigest() == digest
+                  if path.startswith(('rust_robotics_train/src/', 'rust_robotics_core/src/', 'rust_robotics_algo/src/')) or path == 'Cargo.lock':
+                      assert Path(path).read_bytes() == (folder / 'sources' / path).read_bytes(), path
+              for path, digest in evidence['evidence_sha256'].items():
+                  assert hashlib.sha256((folder / path).read_bytes()).hexdigest() == digest
+          generated.write_bytes(source)
+          with generated.open('a') as f:
+              f.write(r'''
+
+          fn retained_shared(folder: &Path, seed: u64) -> PpoSharedState {
+              use rust_robotics_train::{LinearSnapshot, PolicySnapshot};
+              let table = fs::read_to_string(folder.join("snapshots.tsv")).unwrap();
+              let decode = |kind: &str| -> Vec<f32> {
+                  let matches: Vec<_> = table.lines().skip(1).filter_map(|line| {
+                      let fields: Vec<_> = line.split('\t').collect();
+                      (fields[0].parse::<u64>().unwrap() == seed && fields[1] == "2048" && fields[2] == kind).then_some(fields[3])
+                  }).collect();
+                  assert_eq!(matches.len(), 1, "one retained snapshot required");
+                  let hex = matches[0];
+                  assert_eq!(hex.len() % 8, 0);
+                  (0..hex.len()).step_by(8).map(|i| {
+                      let value = f32::from_bits(u32::from_str_radix(&hex[i..i + 8], 16).unwrap());
+                      assert!(value.is_finite()); value
+                  }).collect()
+              };
+              let layers = |numbers: &[f32]| {
+                  let mut i = 0;
+                  let mut layer = |in_dim, out_dim| {
+                      let weight = numbers[i..i + in_dim * out_dim].to_vec();
+                      i += in_dim * out_dim;
+                      let bias = numbers[i..i + out_dim].to_vec(); i += out_dim;
+                      LinearSnapshot { in_dim, out_dim, weight, bias }
+                  };
+                  let result = (layer(4, 64), layer(64, 64), layer(64, 1));
+                  assert_eq!(i, numbers.len()); result
+              };
+              let actor = decode("actor"); let critic = decode("critic");
+              assert_eq!(actor.len(), 4547); assert_eq!(critic.len(), 4545);
+              let (input, hidden, output) = layers(&actor[2..]);
+              let policy = PolicySnapshot { input, hidden, output, action_limit: actor[0], action_std: actor[1] };
+              let (input, hidden, output) = layers(&critic);
+              PpoSharedState { policy, value: ValueSnapshot { input, hidden, output } }
+          }
+
+          #[test]
+          #[ignore = "retained snapshot replay, not training or new evaluation cohort"]
+          fn replay_retained_final_policies() -> io::Result<()> {
+              let input = std::env::var_os("PPO_RETAINED_INPUT").expect("input required");
+              let output = std::env::var_os("PPO_REPLAY_OUTPUT").expect("output required");
+              let c = evaluation_config();
+              for (label, subdir, std) in [("std2", "std2", 2.0), ("std4", "ablation/std4", 4.0)] {
+                  let directory = Path::new(&output).join(label); fs::create_dir_all(&directory)?;
+                  let mut scores = crate::output(&directory, "episodes.tsv", "controller\ttraining_seed\tupdates\tepisode\tevaluation_seed\treturn\tdiscounted_return\tsteps\tending\tabs_force_sum\tnear_limit_steps\tinitial_value\tinitial_observation\tfinal_state\tmax_abs_state")?;
+                  let mut traces = crate::output(&directory, "traces.tsv", "controller\ttraining_seed\tupdates\tepisode\tevaluation_seed\tstep\tbefore_state\tobservation\taction\treward\tafter_state\tdone\ttruncated")?;
+                  for seed in SEEDS {
+                      let shared = retained_shared(&Path::new(&input).join(subdir), seed);
+                      assert_eq!(shared.policy.action_limit, 20.0); assert_eq!(shared.policy.action_std, std);
+                      for index in 0..EPISODES {
+                          let key = format!("ppo\t{seed}\t2048\t{index}");
+                          let result = episode(c, episode_seed(seed, index), |obs| shared.policy.act(obs), Some(&shared.value), &mut traces, (seed == 201).then_some(key.as_str()))?;
+                          emit_episode(&mut scores, &key, episode_seed(seed, index), &result)?;
+                      }
+                  }
+                  scores.flush()?; traces.flush()?;
+              }
+              Ok(())
+          }
+          ''')
+
+          def run(label, args, extra=None):
+              result = subprocess.run(args, env={**os.environ, **(extra or {})}, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+              (output / (label + '.log')).write_text(result.stdout)
+              print(result.stdout, flush=True)
+              report['commands'].append({'label': label, 'args': args, 'returncode': result.returncode})
+              assert result.returncode == 0, label
+              return result.stdout
+
+          def rows(path):
+              with path.open(newline='') as f: return list(csv.DictReader(f, delimiter='\t'))
+
+          try:
+              report['commit'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+              report['rustc'] = subprocess.check_output(['rustc', '-Vv'], text=True)
+              run('format', ['rustfmt', '--edition', '2021', str(generated)])
+              log = run('controls', ['cargo', 'test', '--locked', '-p', 'rust_robotics_train', '--test', 'ppo_feedback_replay'])
+              assert 'test result: ok. 7 passed; 0 failed; 2 ignored;' in log
+              run('clippy', ['cargo', 'clippy', '--locked', '-p', 'rust_robotics_train', '--test', 'ppo_feedback_replay', '--', '-D', 'warnings'])
+              log = run('replay', ['cargo', 'test', '--locked', '--release', '-p', 'rust_robotics_train', '--test', 'ppo_feedback_replay', 'replay_retained_final_policies', '--', '--ignored', '--exact', '--test-threads=1', '--show-output'], {'PPO_RETAINED_INPUT': str(inputs), 'PPO_REPLAY_OUTPUT': str(output)})
+              assert re.search(r'^test replay_retained_final_policies \.\.\. ok$', log, re.M)
+              assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in log
+              report['panels'] = {}
+              for label, subdir in [('std2', 'std2'), ('std4', 'ablation/std4')]:
+                  prior = [r for r in rows(inputs/subdir/'episodes.tsv') if r['controller']=='ppo' and r['updates']=='2048']
+                  now = rows(output/label/'episodes.tsv')
+                  assert len(now)==128 and now==prior, 'every episode field must replay exactly'
+                  trace = rows(output/label/'traces.tsv')
+                  expected = {(r['training_seed'],r['episode']):int(r['steps']) for r in now if r['training_seed']=='201'}
+                  by_key = {}
+                  for r in trace:
+                      key=(r['training_seed'],r['episode']); assert key in expected
+                      group=by_key.setdefault(key,[]); assert int(r['step'])==len(group)+1;group.append(r)
+                  assert set(by_key)==set(expected)
+                  for key, group in by_key.items(): assert len(group)==expected[key] and group[-1]['done']=='true'
+                  old_trace=[r for r in rows(inputs/subdir/'traces.tsv') if r['controller']=='ppo' and r['updates']=='2048' and r['training_seed']=='201']
+                  assert [r for r in trace if int(r['episode'])<2]==old_trace
+                  report['panels'][label]={'identical_episode_records':len(now),'trace_episodes':len(by_key),'trace_rows':len(trace),'original_traces_identical':True}
+              report['completed']=True
+          except Exception as exc:
+              report['error']=repr(exc); raise
+          finally:
+              (output/'ppo_feedback_replay.rs').write_bytes(generated.read_bytes())
+              generated.unlink()
+              result=subprocess.run(['git','diff','--exit-code'],capture_output=True,text=True)
+              report['tracked_sources_clean']=result.returncode==0
+              report['file_sha256']={str(p.relative_to(output)):hashlib.sha256(p.read_bytes()).hexdigest() for p in output.rglob('*') if p.is_file() and p.name!='results.json'}
+              (output/'results.json').write_text(json.dumps(report,indent=2)+'\n')
+              assert report['tracked_sources_clean']
+          PY
+      - name: Preserve replay and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-feedback-replay
+          path: ${{ runner.temp }}/ppo-feedback-replay/
+          retention-days: 30
+          if-no-files-found: error
