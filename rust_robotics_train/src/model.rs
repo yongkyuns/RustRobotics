@@ -44,8 +44,9 @@ impl<B: Backend> Mlp<B> {
 
 /// Actor network used by PPO for pendulum control.
 ///
-/// The actor predicts a mean action, then squashes it with `tanh` and scales it
-/// by `action_limit`. Exploration noise is applied outside this module.
+/// Deterministic inference squashes the latent MLP mean and scales by
+/// `action_limit`. The trainer adds Gaussian exploration to the latent mean
+/// *before* squashing; the resulting action distribution is not Gaussian.
 #[derive(Module, Debug)]
 pub struct PolicyNetwork<B: Backend> {
     pub mlp: Mlp<B>,
@@ -64,7 +65,12 @@ impl<B: Backend> PolicyNetwork<B> {
 
     /// Runs deterministic actor inference.
     pub fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
-        activation::tanh(self.mlp.forward(input)).mul_scalar(self.action_limit)
+        activation::tanh(self.latent_mean(input)).mul_scalar(self.action_limit)
+    }
+
+    /// Unsquashed, dimensionless mean used by the training distribution.
+    pub(crate) fn latent_mean(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
+        self.mlp.forward(input)
     }
 
     /// Converts the actor into a portable snapshot consumable by the simulator.

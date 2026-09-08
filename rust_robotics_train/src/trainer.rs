@@ -26,6 +26,10 @@ use rand::{seq::SliceRandom, Rng};
 use rust_robotics_core::{PolicySnapshot, PpoMetrics, PpoSharedState};
 use serde::{Deserialize, Serialize};
 
+#[path = "ppo_distribution.rs"]
+mod distribution;
+use distribution::{standard_normal, SquashedGaussian};
+
 const OBS_DIM: usize = 4;
 
 /// Configuration for a pendulum PPO training session.
@@ -43,6 +47,8 @@ pub struct PpoTrainerConfig {
     pub env: PendulumEnvConfig,
     pub ppo: PpoConfig,
     pub hidden_dim: usize,
+    /// Pre-squash exploration scale in force units, finite and positive.
+    /// The latent Gaussian standard deviation is `action_std / env.max_force`.
     pub action_std: f32,
     pub sync_policy_each_update: bool,
 }
@@ -66,7 +72,7 @@ impl Default for PpoTrainerConfig {
 #[derive(Debug, Clone)]
 struct RolloutBatch {
     observations: Vec<[f32; 4]>,
-    actions: Vec<f32>,
+    latent_actions: Vec<f32>,
     old_log_probs: Vec<f32>,
     returns: Vec<f32>,
     advantages: Vec<f32>,
@@ -99,6 +105,15 @@ pub struct PpoTrainerSession {
 impl PpoTrainerSession {
     /// Creates a new trainer session with fresh actor and critic networks.
     pub fn new(config: PpoTrainerConfig) -> Self {
+        SquashedGaussian::new(config.action_std, config.env.max_force);
+        assert!(
+            config.ppo.entropy_coef.is_finite() && config.ppo.entropy_coef >= 0.0,
+            "entropy_coef must be finite and nonnegative"
+        );
+        assert!(
+            config.ppo.value_loss_coef.is_finite() && config.ppo.value_loss_coef >= 0.0,
+            "value_loss_coef must be finite and nonnegative"
+        );
         let device = Default::default();
         let env = PendulumEnv::new(Default::default(), config.env);
         let current_observation = env.observation();
@@ -147,8 +162,17 @@ impl PpoTrainerSession {
     /// Replaces the actor and critic with externally provided shared state.
     ///
     /// Optimizers are reinitialized because their internal moments are tied to
-    /// the old parameter tensors.
+    /// the old parameter tensors. This is a weight-transfer warm start, not an
+    /// exact-resume checkpoint: environment state, RNG and metrics are retained.
+    /// The saved exploration scale is adopted; the action limit must match the
+    /// receiving environment so it cannot silently clip a different policy.
     pub fn load_shared_state(&mut self, state: &PpoSharedState) {
+        assert_eq!(
+            state.policy.action_limit, self.config.env.max_force,
+            "shared policy action limit must match the environment"
+        );
+        SquashedGaussian::new(state.policy.action_std, state.policy.action_limit);
+        self.config.action_std = state.policy.action_std;
         self.actor = policy_network_from_snapshot(&state.policy, &self.device);
         self.critic = value_network_from_snapshot(&state.value, &self.device);
         self.actor_optimizer = AdamConfig::new().init();
@@ -178,25 +202,26 @@ impl PpoTrainerSession {
     fn collect_rollout(&mut self) -> RolloutBatch {
         let rollout_steps = self.config.ppo.rollout_steps;
         let mut observations = Vec::with_capacity(rollout_steps);
-        let mut actions = Vec::with_capacity(rollout_steps);
+        let mut latent_actions = Vec::with_capacity(rollout_steps);
         let mut old_log_probs = Vec::with_capacity(rollout_steps);
         let mut rewards = Vec::with_capacity(rollout_steps);
         let mut values = Vec::with_capacity(rollout_steps);
         let mut terminals = Vec::with_capacity(rollout_steps);
 
         let mut episode_return = 0.0;
+        let distribution = SquashedGaussian::new(self.config.action_std, self.actor.action_limit);
+        let mut rng = rand::thread_rng();
 
         for _ in 0..rollout_steps {
             let observation = self.current_observation;
-            let mean = self.policy_mean(observation);
+            let mean = self.policy_latent_mean(observation);
             let value = self.value_estimate(observation);
-            let action = self.sample_action(mean);
-            let log_prob = gaussian_log_prob(action, mean, self.config.action_std);
-            let step = self.env.step(action);
+            let sample = distribution.sample(mean, &mut rng);
+            let step = self.env.step(sample.action);
 
             observations.push(observation);
-            actions.push(action);
-            old_log_probs.push(log_prob);
+            latent_actions.push(sample.latent);
+            old_log_probs.push(sample.log_prob);
             rewards.push(step.reward);
             values.push(value);
             terminals.push(step.done);
@@ -242,7 +267,7 @@ impl PpoTrainerSession {
 
         RolloutBatch {
             observations,
-            actions,
+            latent_actions,
             old_log_probs,
             returns,
             advantages,
@@ -256,43 +281,56 @@ impl PpoTrainerSession {
     /// `min(r_t * A_t, clip(r_t, 1-eps, 1+eps) * A_t)`
     ///
     /// where `r_t` is the ratio of new to old action probability. The critic
-    /// uses a plain mean-squared error objective against bootstrapped returns.
+    /// uses configured MSE weighting. Entropy uses fresh current-policy samples,
+    /// not negative log likelihood of actions from the old rollout policy.
     fn optimize(&mut self, rollout: &RolloutBatch) {
+        self.optimize_with_rng(rollout, &mut rand::thread_rng());
+    }
+
+    fn optimize_with_rng<R: Rng + ?Sized>(&mut self, rollout: &RolloutBatch, rng: &mut R) {
+        let distribution = SquashedGaussian::new(self.config.action_std, self.actor.action_limit);
         let mut indices = (0..rollout.observations.len()).collect::<Vec<_>>();
         let batch_size = self.config.ppo.mini_batch_size.max(1);
-        let mut rng = rand::thread_rng();
         let mut last_policy_loss = 0.0;
         let mut last_value_loss = 0.0;
 
         for _ in 0..self.config.ppo.epochs_per_update {
-            indices.shuffle(&mut rng);
+            indices.shuffle(rng);
 
             for chunk in indices.chunks(batch_size) {
                 let observations = gather_observations(&rollout.observations, chunk);
-                let actions = gather_scalars(&rollout.actions, chunk);
+                let latents = gather_scalars(&rollout.latent_actions, chunk);
                 let old_log_probs = gather_scalars(&rollout.old_log_probs, chunk);
                 let returns = gather_scalars(&rollout.returns, chunk);
                 let advantages = gather_scalars(&rollout.advantages, chunk);
 
                 let observations = obs_tensor::<AutodiffBackend>(&self.device, &observations);
 
-                let new_means = self.actor.forward(observations.clone());
-                let actions = scalar_tensor::<AutodiffBackend>(&self.device, &actions);
+                let new_means = self.actor.latent_mean(observations.clone());
+                let latents = scalar_tensor::<AutodiffBackend>(&self.device, &latents);
                 let old_log_probs = scalar_tensor::<AutodiffBackend>(&self.device, &old_log_probs);
                 let returns = scalar_tensor::<AutodiffBackend>(&self.device, &returns);
                 let advantages = scalar_tensor::<AutodiffBackend>(&self.device, &advantages);
 
-                let new_log_probs =
-                    gaussian_log_prob_tensor(new_means, actions.clone(), self.config.action_std);
-                let ratios = (new_log_probs - old_log_probs).exp();
-                let unclipped = ratios.clone() * advantages.clone();
-                let clipped = ratios.clamp(
-                    1.0 - self.config.ppo.clip_epsilon,
-                    1.0 + self.config.ppo.clip_epsilon,
-                ) * advantages;
-                let policy_loss = unclipped.min_pair(clipped).mean().mul_scalar(-1.0);
+                let new_log_probs = distribution.log_prob_tensor(new_means.clone(), latents);
+                let policy_loss = clipped_surrogate(
+                    new_log_probs,
+                    old_log_probs,
+                    advantages,
+                    self.config.ppo.clip_epsilon,
+                );
                 let policy_loss_scalar = tensor_scalar(&policy_loss);
-                let actor_grads = GradientsParams::from_grads(policy_loss.backward(), &self.actor);
+                let actor_loss = if self.config.ppo.entropy_coef == 0.0 {
+                    policy_loss
+                } else {
+                    let noise = (0..chunk.len())
+                        .map(|_| standard_normal(rng))
+                        .collect::<Vec<_>>();
+                    let noise = scalar_tensor::<AutodiffBackend>(&self.device, &noise);
+                    let entropy = distribution.entropy(new_means, noise);
+                    policy_loss - entropy.mul_scalar(self.config.ppo.entropy_coef)
+                };
+                let actor_grads = GradientsParams::from_grads(actor_loss.backward(), &self.actor);
                 self.actor = self.actor_optimizer.step(
                     self.config.ppo.learning_rate,
                     self.actor.clone(),
@@ -302,12 +340,19 @@ impl PpoTrainerSession {
                 let values = self.critic.forward(observations);
                 let value_loss = (values - returns).square().mean();
                 let value_loss_scalar = tensor_scalar(&value_loss);
-                let critic_grads = GradientsParams::from_grads(value_loss.backward(), &self.critic);
-                self.critic = self.critic_optimizer.step(
-                    self.config.ppo.learning_rate,
-                    self.critic.clone(),
-                    critic_grads,
-                );
+                // Skipping Adam is necessary at zero: a zero gradient alone
+                // would still move parameters using earlier optimizer moments.
+                if self.config.ppo.value_loss_coef > 0.0 {
+                    let objective =
+                        weighted_value_loss(value_loss, self.config.ppo.value_loss_coef);
+                    let critic_grads =
+                        GradientsParams::from_grads(objective.backward(), &self.critic);
+                    self.critic = self.critic_optimizer.step(
+                        self.config.ppo.learning_rate,
+                        self.critic.clone(),
+                        critic_grads,
+                    );
+                }
 
                 last_policy_loss = policy_loss_scalar;
                 last_value_loss = value_loss_scalar;
@@ -318,13 +363,13 @@ impl PpoTrainerSession {
         self.metrics.last_value_loss = last_value_loss;
     }
 
-    /// Computes the deterministic mean action predicted by the actor.
-    fn policy_mean(&self, observation: [f32; 4]) -> f32 {
+    /// Computes the unsquashed Gaussian mean predicted by the actor.
+    fn policy_latent_mean(&self, observation: [f32; 4]) -> f32 {
         let policy = self.actor.valid();
         let tensor = obs_tensor::<
             <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
         >(&self.device, &[observation]);
-        tensor_scalar(&policy.forward(tensor))
+        tensor_scalar(&policy.latent_mean(tensor))
     }
 
     /// Computes the critic's scalar value estimate for one observation.
@@ -334,14 +379,6 @@ impl PpoTrainerSession {
             <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
         >(&self.device, &[observation]);
         tensor_scalar(&critic.forward(tensor))
-    }
-
-    /// Samples a bounded scalar action from the actor mean and configured
-    /// Gaussian exploration noise.
-    fn sample_action(&self, mean: f32) -> f32 {
-        let std = self.config.action_std.max(1.0e-3);
-        (mean + sample_standard_normal() * std)
-            .clamp(-self.config.env.max_force, self.config.env.max_force)
     }
 }
 
@@ -353,23 +390,23 @@ fn gather_scalars(source: &[f32], indices: &[usize]) -> Vec<f32> {
     indices.iter().map(|index| source[*index]).collect()
 }
 
-fn gaussian_log_prob(action: f32, mean: f32, std: f32) -> f32 {
-    let var = std * std;
-    let diff = action - mean;
-    -0.5 * ((diff * diff) / var + (2.0 * std::f32::consts::PI * var).ln())
+fn clipped_surrogate<B: burn::tensor::backend::Backend>(
+    new_log_probs: burn::tensor::Tensor<B, 2>,
+    old_log_probs: burn::tensor::Tensor<B, 2>,
+    advantages: burn::tensor::Tensor<B, 2>,
+    epsilon: f32,
+) -> burn::tensor::Tensor<B, 1> {
+    let ratios = (new_log_probs - old_log_probs).exp();
+    let unclipped = ratios.clone() * advantages.clone();
+    let clipped = ratios.clamp(1.0 - epsilon, 1.0 + epsilon) * advantages;
+    unclipped.min_pair(clipped).mean().mul_scalar(-1.0)
 }
 
-fn gaussian_log_prob_tensor<B: burn::tensor::backend::Backend>(
-    mean: burn::tensor::Tensor<B, 2>,
-    action: burn::tensor::Tensor<B, 2>,
-    std: f32,
-) -> burn::tensor::Tensor<B, 2> {
-    let var = std * std;
-    let diff = action - mean;
-    diff.square()
-        .div_scalar(var)
-        .add_scalar((2.0 * std::f32::consts::PI * var).ln())
-        .mul_scalar(-0.5)
+fn weighted_value_loss<B: burn::tensor::backend::Backend>(
+    mse: burn::tensor::Tensor<B, 1>,
+    coefficient: f32,
+) -> burn::tensor::Tensor<B, 1> {
+    mse.mul_scalar(coefficient)
 }
 
 fn compute_gae(
@@ -430,13 +467,6 @@ fn push_recent(values: &mut Vec<f32>, value: f32, max_len: usize) {
     }
 }
 
-fn sample_standard_normal() -> f32 {
-    let mut rng = rand::thread_rng();
-    let u1 = rng.gen_range(f32::EPSILON..1.0);
-    let u2 = rng.gen_range(0.0..1.0);
-    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
-}
-
 fn tensor_scalar<B: burn::tensor::backend::Backend, const D: usize>(
     tensor: &burn::tensor::Tensor<B, D>,
 ) -> f32 {
@@ -458,3 +488,7 @@ mod tests {
         assert!(session.snapshot().act([0.0, 0.0, 0.1, 0.0]).is_finite());
     }
 }
+
+#[cfg(test)]
+#[path = "ppo_objective_tests.rs"]
+mod objective_tests;

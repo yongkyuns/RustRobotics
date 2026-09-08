@@ -70,11 +70,7 @@ impl SquashedGaussian {
     /// Reparameterized Monte Carlo entropy of the *current bounded* policy.
     /// The caller supplies fresh standard-normal noise, not old rollout actions.
     /// Gaussian entropy is analytic; only the expected log-Jacobian is sampled.
-    pub fn entropy<B: Backend>(
-        &self,
-        means: Tensor<B, 2>,
-        noise: Tensor<B, 2>,
-    ) -> Tensor<B, 1> {
+    pub fn entropy<B: Backend>(&self, means: Tensor<B, 2>, noise: Tensor<B, 2>) -> Tensor<B, 1> {
         let latents = means + noise.mul_scalar(self.std);
         log_tanh_jacobian_tensor(latents)
             .add_scalar(
@@ -96,7 +92,12 @@ fn log_tanh_jacobian(latent: f32) -> f32 {
 
 fn log_tanh_jacobian_tensor<B: Backend>(latents: Tensor<B, 2>) -> Tensor<B, 2> {
     let magnitude = latents.abs();
-    let correction = magnitude.clone().mul_scalar(-2.0).exp().add_scalar(1.0).log();
+    let correction = magnitude
+        .clone()
+        .mul_scalar(-2.0)
+        .exp()
+        .add_scalar(1.0)
+        .log();
     (magnitude.neg().add_scalar(std::f32::consts::LN_2) - correction).mul_scalar(2.0)
 }
 
