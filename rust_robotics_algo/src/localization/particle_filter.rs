@@ -26,14 +26,20 @@ pub type PW = Matrix<f32, U1, U100, ArrayStorage<f32, 1, 100>>;
 
 /// Generate random float between [-1.0, 1.0]
 pub fn rand() -> f32 {
-    2.0 * (rand::random::<f32>() - 0.5)
+    rand_with_rng(&mut rand::thread_rng())
+}
+
+fn rand_with_rng<R: rand::Rng + ?Sized>(rng: &mut R) -> f32 {
+    2.0 * (rng.gen::<f32>() - 0.5)
 }
 
 /// Samples a uniform random value in `[low, high)`.
 pub fn rand_unifrom(low: f32, high: f32) -> f32 {
-    use rand::Rng;
+    uniform_with_rng(low, high, &mut rand::thread_rng())
+}
+
+fn uniform_with_rng<R: rand::Rng + ?Sized>(low: f32, high: f32, rng: &mut R) -> f32 {
     let lim = rand::distributions::Uniform::new(low, high);
-    let mut rng = rand::thread_rng();
     rng.sample(lim)
 }
 
@@ -54,6 +60,26 @@ pub fn observation(
     dt: f32,
     max_range: f32,
 ) -> (Vec<Vector3>, Vector2) {
+    observation_with_rng(
+        x_true,
+        xd,
+        u,
+        rf_id,
+        (dt, max_range),
+        &mut rand::thread_rng(),
+    )
+}
+
+fn observation_with_rng<R: rand::Rng + ?Sized>(
+    x_true: &mut Vector4,
+    xd: &mut Vector4,
+    u: Vector2,
+    rf_id: &[Vector2],
+    sensing: (f32, f32),
+    rng: &mut R,
+) -> (Vec<Vector3>, Vector2) {
+    let (dt, max_range) = sensing;
+
     *x_true = motion_model(*x_true, u, dt);
 
     let Q_sim = diag![0.2];
@@ -65,13 +91,13 @@ pub fn observation(
         let dy = x_true.y() - rf_id.y();
         let d = hypot(dx, dy);
         if d <= max_range {
-            let dn = d + rand() * sqrt(Q_sim[0]);
+            let dn = d + rand_with_rng(rng) * sqrt(Q_sim[0]);
             let zi = Vector3::new(dn, rf_id.x(), rf_id.y());
             z.push(zi);
         }
     }
-    let ud1 = u.x() + rand() * sqrt(R_sim.get_diagonal(0));
-    let ud2 = u.y() + rand() * sqrt(R_sim.get_diagonal(1));
+    let ud1 = u.x() + rand_with_rng(rng) * sqrt(R_sim.get_diagonal(0));
+    let ud2 = u.y() + rand_with_rng(rng) * sqrt(R_sim.get_diagonal(1));
     let ud = Vector2::new(ud1, ud2);
 
     *xd = motion_model(*xd, ud, dt);
@@ -91,6 +117,26 @@ pub fn observation_from_state(
     dt: f32,
     max_range: f32,
 ) -> (Vec<Vector3>, Vector2) {
+    observation_from_state_with_rng(
+        x_true,
+        xd,
+        u,
+        rf_id,
+        (dt, max_range),
+        &mut rand::thread_rng(),
+    )
+}
+
+fn observation_from_state_with_rng<R: rand::Rng + ?Sized>(
+    x_true: &Vector4,
+    xd: &mut Vector4,
+    u: Vector2,
+    rf_id: &[Vector2],
+    sensing: (f32, f32),
+    rng: &mut R,
+) -> (Vec<Vector3>, Vector2) {
+    let (dt, max_range) = sensing;
+
     let Q_sim = diag![0.2];
     let R_sim = diag![1.0, (30_f32).to_radians()];
     let mut z = Vec::new();
@@ -100,13 +146,13 @@ pub fn observation_from_state(
         let dy = x_true.y() - rf_id.y();
         let d = hypot(dx, dy);
         if d <= max_range {
-            let dn = d + rand() * sqrt(Q_sim[0]);
+            let dn = d + rand_with_rng(rng) * sqrt(Q_sim[0]);
             let zi = Vector3::new(dn, rf_id.x(), rf_id.y());
             z.push(zi);
         }
     }
-    let ud1 = u.x() + rand() * sqrt(R_sim.get_diagonal(0));
-    let ud2 = u.y() + rand() * sqrt(R_sim.get_diagonal(1));
+    let ud1 = u.x() + rand_with_rng(rng) * sqrt(R_sim.get_diagonal(0));
+    let ud2 = u.y() + rand_with_rng(rng) * sqrt(R_sim.get_diagonal(1));
     let ud = Vector2::new(ud1, ud2);
 
     *xd = motion_model(*xd, ud, dt);
@@ -238,6 +284,29 @@ pub fn pf_localization_with_state(
     state: &mut PFState,
     noise: &PFNoiseParams,
 ) -> Matrix3 {
+    pf_localization_with_rng(
+        x_est,
+        px,
+        pw,
+        z,
+        (u, dt),
+        (state, noise),
+        &mut rand::thread_rng(),
+    )
+}
+
+fn pf_localization_with_rng<R: rand::Rng + ?Sized>(
+    x_est: &mut Vector4,
+    px: &mut PX,
+    pw: &mut PW,
+    z: Vec<Vector3>,
+    control: (Vector2, f32),
+    context: (&mut PFState, &PFNoiseParams),
+    rng: &mut R,
+) -> Matrix3 {
+    let (u, dt) = control;
+    let (state, noise) = context;
+
     // Use configurable noise parameters
     let Q = diag![noise.obs_noise];
     let R = diag![noise.motion_noise_v, noise.motion_noise_yaw];
@@ -260,8 +329,8 @@ pub fn pf_localization_with_state(
         let x = px.column(ip).into_owned();
         let mut w = pw[(0, ip)];
 
-        let ud1 = u[0] + rand() * sqrt(R[(0, 0)]);
-        let ud2 = u[1] + rand() * sqrt(R[(1, 1)]);
+        let ud1 = u[0] + rand_with_rng(rng) * sqrt(R[(0, 0)]);
+        let ud2 = u[1] + rand_with_rng(rng) * sqrt(R[(1, 1)]);
         let ud = vector![ud1, ud2];
         let x = motion_model(x, ud, dt);
 
@@ -281,7 +350,7 @@ pub fn pf_localization_with_state(
     // Check for divergence: if weight sum is too small, reset particles
     if w_sum < DIVERGENCE_THRESHOLD && has_observations {
         // Reset particles around observed landmarks
-        reset_particles_around_observations(px, pw, &z, x_est);
+        reset_particles_with_rng(px, pw, &z, x_est, rng);
         state.recovery_count = 1; // Start recovery phase
     } else if w_sum > 0.0 {
         *pw /= w_sum;
@@ -320,25 +389,31 @@ pub fn pf_localization_with_state(
 
     let N_eff = 1. / (*pw * pw.transpose())[0];
     if N_eff < NTh {
-        re_sampling(px, pw);
+        re_sampling_with_rng(px, pw, rng);
     }
     p_est
 }
 
 /// Reset particles around observed landmarks when filter has diverged
-fn reset_particles_around_observations(px: &mut PX, pw: &mut PW, z: &[Vector3], x_est: &Vector4) {
+fn reset_particles_with_rng<R: rand::Rng + ?Sized>(
+    px: &mut PX,
+    pw: &mut PW,
+    z: &[Vector3],
+    x_est: &Vector4,
+    rng: &mut R,
+) {
     for ip in 0..NP {
         // Pick a random observation to reset around
         let zi = &z[ip % z.len()];
         // The observation gives distance to landmark at (zi.x(), zi.y())
         // Place particle at random angle from landmark at observed distance
-        let angle = rand() * 2.0 * PI; // Full circle
-        let dist = zi.d() + rand() * RESET_SPREAD;
+        let angle = rand_with_rng(rng) * 2.0 * PI; // Full circle
+        let dist = zi.d() + rand_with_rng(rng) * RESET_SPREAD;
         let new_particle = vector![
             zi.x() + dist * cos(angle),
             zi.y() + dist * sin(angle),
-            x_est[2] + rand() * 0.3, // Keep approximate heading with small noise
-            x_est[3]                 // Keep velocity
+            x_est[2] + rand_with_rng(rng) * 0.3, // Keep approximate heading with small noise
+            x_est[3]                             // Keep velocity
         ];
         px.set_column(ip, &new_particle);
     }
@@ -347,6 +422,10 @@ fn reset_particles_around_observations(px: &mut PX, pw: &mut PW, z: &[Vector3], 
 
 /// Performs low-variance resampling over the particle set.
 pub fn re_sampling(px: &mut PX, pw: &mut PW) {
+    re_sampling_with_rng(px, pw, &mut rand::thread_rng())
+}
+
+fn re_sampling_with_rng<R: rand::Rng + ?Sized>(px: &mut PX, pw: &mut PW, rng: &mut R) {
     let w_cum: Vec<f32> = pw
         .as_slice()
         .iter()
@@ -357,7 +436,9 @@ pub fn re_sampling(px: &mut PX, pw: &mut PW) {
         .collect();
 
     let base = (0..NP).map(|x| x as f32 / NP as f32);
-    let resample_id: Vec<f32> = base.map(|x| x + rand_unifrom(0., 1. / NP as f32)).collect();
+    let resample_id: Vec<f32> = base
+        .map(|x| x + uniform_with_rng(0., 1. / NP as f32, rng))
+        .collect();
 
     let mut ind = 0;
     let mut px_new = zeros!(4, NP);
@@ -391,69 +472,5 @@ impl Observation for Vector3 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    // #[test]
-    // fn check_heapless() {
-    //     let mut v: Vec<f32, 3> = Vec::new();
-    //     v.push(0.1).unwrap();
-    //     v.push(0.2).unwrap();
-    //     v.push(0.3).unwrap();
-    //     assert_eq!(v.get(1), Some(&0.2));
-    // }
-    // #[test]
-    // fn check_oorandom() {
-    //     let seed = 4;
-    //     let mut rng = oorandom::Rand32::new(seed);
-    //     for _ in 0..10 {
-    //         std::println!("{}", rng.rand_float());
-    //     }
-    // }
-
-    #[test]
-    fn check_rand() {
-        for _ in 0..100 {
-            let r = rand::random::<f32>();
-            println!("{r}");
-        }
-    }
-
-    #[test]
-    fn test_main() {
-        let mut time = 0_f32;
-        let rf_id = vec![
-            vector![10.0_f32, 0.0_f32],
-            vector![10.0, 10.0],
-            vector![0.0, 15.0],
-            vector![-5.0, 20.0],
-        ];
-
-        let mut x_est = zeros!(4, 1);
-        let mut x_true = zeros!(4, 1);
-
-        let mut px = zeros!(4, NP);
-        let mut pw = ones!(1, NP) * (1. / NP as f32);
-        let mut x_dr = zeros!(4, 1);
-
-        let mut h_x_est = vec![x_est];
-        let mut h_x_true = vec![x_true];
-        let mut h_x_dr = vec![x_true];
-
-        let dt = 0.1;
-
-        while 50.0 > time {
-            time += dt;
-            let u = calc_input();
-
-            let (z, ud) = observation(&mut x_true, &mut x_dr, u, &rf_id, dt, MAX_RANGE);
-            let _PEst = pf_localization(&mut x_est, &mut px, &mut pw, z, ud, dt);
-
-            h_x_est.push(x_est);
-            h_x_true.push(x_true);
-            h_x_dr.push(x_dr);
-
-            println!("{time}");
-            dbg!(&x_est);
-        }
-    }
-}
+#[path = "particle_filter_seeded_tests.rs"]
+mod seeded_tests;

@@ -82,8 +82,18 @@ MUTATIONS = (
              "let S = &H * &state.sigma * H.transpose() + Q;",
              "let S = &H * &state.sigma * H.transpose() + Q * 0.1;",
              "ekf_consistency", "seeded_batch_observation_consistency", CONSISTENCY),
+    Mutation("particle-filter-seed-ignored", "rust_robotics_algo/src/localization/particle_filter.rs",
+             "2.0 * (rng.gen::<f32>() - 0.5)", "0.0", "lib",
+             "localization::particle_filter::seeded_tests::random_sources_are_seeded_and_replayable",
+             ("changing the seed must change the noise stream",)),
+    Mutation("ekf-observation-noise-omitted", SLAM + "ekf_slam.rs",
+             "rand(rng) * config.observation_noise[(0, 0)].sqrt() * 0.5", "0.0", "lib",
+             "slam::ekf_slam::rng_tests::seeded_observations_preserve_noise_formula_and_draw_order",
+             ("seeded observation range",)),
 )
 GROUPS = (
+    ("lib", "localization::particle_filter::seeded_tests", 5),
+    ("lib", "slam::ekf_slam::rng_tests", 3),
     ("grid_planner_oracles", "", 4),
     ("numerical_invariants", "", 4),
     ("lib", "slam::graph_slam::numerical_tests", 8),
