@@ -15,7 +15,6 @@ jobs:
     timeout-minutes: 25
     env:
       CARGO_TERM_COLOR: never
-      PPO_AUDIT_DIR: ${{ runner.temp }}/ppo-audit/data
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,6 +29,8 @@ jobs:
       - name: Preserve baseline and add observational hooks
         shell: bash
         run: |
+          export PPO_AUDIT_DIR="$RUNNER_TEMP/ppo-audit/data"
+          echo "PPO_AUDIT_DIR=$PPO_AUDIT_DIR" >> "$GITHUB_ENV"
           mkdir -p "$PPO_AUDIT_DIR" "$RUNNER_TEMP/ppo-audit/provenance"
           git rev-parse HEAD > "$RUNNER_TEMP/ppo-audit/provenance/commit.txt"
           rustc -Vv > "$RUNNER_TEMP/ppo-audit/provenance/rustc.txt"
