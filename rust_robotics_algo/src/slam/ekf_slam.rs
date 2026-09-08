@@ -189,62 +189,51 @@ impl Default for EkfSlamConfig {
     }
 }
 
-/// Motion model: predicts robot pose from linear and angular velocity.
+/// Motion model: predicts robot pose from constant linear and angular velocity.
 ///
-/// Uses velocity-based motion model:
-/// - If ω ≈ 0 (straight line): x' = x + v·dt·cos(θ), y' = y + v·dt·sin(θ)
-/// - If ω ≠ 0 (arc motion): uses arc equations
+/// Integrates straight and arc motion with a midpoint/sinc expression that
+/// remains well-conditioned as the angular velocity approaches zero.
 pub fn motion_model(pose: &Vector3<f32>, v: f32, w: f32, dt: f32) -> Vector3<f32> {
     let theta = pose[2];
+    let increment = motion_increment(theta, v, w, dt);
+    Vector3::new(
+        pose[0] + increment[0],
+        pose[1] + increment[1],
+        normalize_angle(theta + w * dt),
+    )
+}
 
-    if w.abs() < 1e-6 {
-        // Straight line motion
-        Vector3::new(
-            pose[0] + v * dt * theta.cos(),
-            pose[1] + v * dt * theta.sin(),
-            theta,
-        )
+/// Numerically stable displacement for constant-velocity planar motion.
+fn motion_increment(theta: f32, v: f32, w: f32, dt: f32) -> Vector2<f32> {
+    let half_turn = 0.5 * (w * dt);
+    // sin(a)/a = 1 - a^2/6 + a^4/120 + O(a^6). Below 0.01,
+    // the first omitted term is < 2e-16, well below f32 precision.
+    // Branch on accumulated turn, not angular velocity alone.
+    let sinc = if half_turn.abs() < 0.01 {
+        let squared = half_turn * half_turn;
+        1.0 - squared / 6.0 + squared * squared / 120.0
     } else {
-        // Arc motion
-        Vector3::new(
-            pose[0] + v / w * (-(theta).sin() + (theta + w * dt).sin()),
-            pose[1] + v / w * ((theta).cos() - (theta + w * dt).cos()),
-            normalize_angle(theta + w * dt),
-        )
-    }
+        half_turn.sin() / half_turn
+    };
+    let distance = v * dt * sinc;
+    let (sin_heading, cos_heading) = (theta + half_turn).sin_cos();
+    Vector2::new(distance * cos_heading, distance * sin_heading)
 }
 
 /// Computes the Jacobian of the motion model with respect to robot pose.
 fn motion_jacobian(pose: &Vector3<f32>, v: f32, w: f32, dt: f32) -> Matrix3<f32> {
-    let theta = pose[2];
-
-    if w.abs() < 1e-6 {
-        // Jacobian for straight line motion
-        Matrix3::new(
-            1.0,
-            0.0,
-            -v * dt * theta.sin(),
-            0.0,
-            1.0,
-            v * dt * theta.cos(),
-            0.0,
-            0.0,
-            1.0,
-        )
-    } else {
-        // Jacobian for arc motion
-        Matrix3::new(
-            1.0,
-            0.0,
-            v / w * (-(theta).cos() + (theta + w * dt).cos()),
-            0.0,
-            1.0,
-            v / w * (-(theta).sin() + (theta + w * dt).sin()),
-            0.0,
-            0.0,
-            1.0,
-        )
-    }
+    let increment = motion_increment(pose[2], v, w, dt);
+    Matrix3::new(
+        1.0,
+        0.0,
+        -increment[1],
+        0.0,
+        1.0,
+        increment[0],
+        0.0,
+        0.0,
+        1.0,
+    )
 }
 
 /// Computes the expected range-bearing observation to a landmark.
@@ -2643,3 +2632,7 @@ mod tests {
         // assert!(recovered, "EKF should recover after landmarks become visible again");
     }
 }
+
+#[cfg(test)]
+#[path = "ekf_slam_numerical_tests.rs"]
+mod numerical_tests;
