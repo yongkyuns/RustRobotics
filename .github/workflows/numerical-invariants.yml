@@ -13,8 +13,11 @@ jobs:
   numerical-invariants:
     name: Robotics numerical invariants
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -24,6 +27,9 @@ jobs:
         with:
           workspaces: rust_robotics_algo
 
+      - name: Test mutation evidence validation
+        run: python3 -m unittest discover -s scripts -p test_numerical_mutations.py -v
+
       - name: Run correlated Graph SLAM numerical oracles
         run: cargo test --locked -p rust_robotics_algo --lib slam::graph_slam::numerical_tests --verbose
 
@@ -32,3 +38,18 @@ jobs:
 
       - name: Run numerical invariant tests
         run: cargo test -p rust_robotics_algo --test numerical_invariants --verbose
+
+      - name: Run independent grid planner oracles
+        run: cargo test --locked -p rust_robotics_algo --test grid_planner_oracles --verbose
+
+      - name: Qualify bounded numerical mutations in an isolated worktree
+        run: python3 scripts/check_numerical_mutations.py --output "${{ runner.temp }}/numerical-mutation-evidence"
+
+      - name: Preserve numerical mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: numerical-mutation-evidence
+          path: ${{ runner.temp }}/numerical-mutation-evidence/
+          if-no-files-found: warn
+          retention-days: 30
