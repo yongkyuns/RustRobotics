@@ -1,0 +1,49 @@
+name: Qualify PPO rollout boundaries
+
+on:
+  push:
+    branches: ["fix/ppo-rollout-boundaries"]
+    paths: [".github/workflows/qualify-ppo-rollout.yml", "scripts/prepare_ppo_rollout.py"]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Prove baseline failures and qualify the bounded repair
+        run: python3 scripts/prepare_ppo_rollout.py
+      - name: Preserve source and qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-rollout-evidence
+          path: ${{ runner.temp }}/ppo-rollout-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish only qualified source edits on the feature branch
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/fix/ppo-rollout-boundaries'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs rust_robotics_train/src/ppo_rollout_tests.rs rust_robotics_train/README.md
+          git diff --cached --check
+          git commit -m 'fix: finalize PPO targets before resets and retain unfinished episode returns'
+          auth=$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/ppo-rollout-boundaries
+          git rev-parse HEAD
