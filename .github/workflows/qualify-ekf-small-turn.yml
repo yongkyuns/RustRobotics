@@ -1,0 +1,187 @@
+name: Qualify EKF small-turn numerics
+
+on:
+  push:
+    branches: ["fix/ekf-small-turn-numerics"]
+    paths: [".github/workflows/qualify-ekf-small-turn.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Qualify independent oracles and bounded motion fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'ekf-numerical-evidence'
+          evidence.mkdir()
+          source = Path('rust_robotics_algo/src/slam/ekf_slam.rs')
+          tests = Path('rust_robotics_algo/src/slam/ekf_slam_numerical_tests.rs')
+          original = source.read_text()
+          assert 'mod numerical_tests;' not in original
+          module = '\n#[cfg(test)]\n#[path = "ekf_slam_numerical_tests.rs"]\nmod numerical_tests;\n'
+          source.write_text(original + module)
+          subprocess.run(['cargo', 'fmt', '--all'], check=True)
+          prefix = 'slam::ekf_slam::numerical_tests::'
+          results = []
+          known = set(re.findall(r'#\[test\]\s+fn (\w+)', tests.read_text()))
+          assert len(known) == 8
+
+          def run(label, test=None, required_failures=(), allowed_failures=None):
+              command = ['cargo', 'test', '--locked', '-p', 'rust_robotics_algo', '--lib', prefix + (test or ''), '--']
+              if test:
+                  command.append('--exact')
+              command.append('--test-threads=1')
+              p = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+              (evidence / (label + '.log')).write_text(p.stdout)
+              print(p.stdout, flush=True)
+              names = set(re.findall(r'^test ' + re.escape(prefix) + r'(\w+) \.\.\. (?:ok|FAILED)$', p.stdout, re.MULTILINE))
+              failed = set(re.findall(r'^test ' + re.escape(prefix) + r'(\w+) \.\.\. FAILED$', p.stdout, re.MULTILINE))
+              assert names == ({test} if test else known), (label, names)
+              if required_failures:
+                  assert p.returncode == 101 and 'test result: FAILED.' in p.stdout
+                  assert set(required_failures) <= failed <= set(allowed_failures or required_failures), (label, failed)
+              else:
+                  assert p.returncode == 0 and not failed and 'test result: ok.' in p.stdout
+              results.append({'stage': label, 'exit_status': p.returncode, 'executed': sorted(names), 'failed': sorted(failed)})
+              (evidence / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
+
+          required = {
+              'motion_matches_independent_velocity_integral',
+              'motion_jacobian_matches_independent_finite_differences',
+              'tiny_angular_rate_preserves_accumulated_turn',
+              'prediction_covariance_matches_independent_linearization',
+          }
+          run('baseline', required_failures=required, allowed_failures=required | {'motion_composes_and_reverses_across_small_turns'})
+          text = source.read_text()
+          start = text.index('/// Motion model: predicts robot pose')
+          end = text.index('/// Computes the expected range-bearing observation', start)
+          replacement = '''/// Motion model: predicts robot pose from constant linear and angular velocity.
+          ///
+          /// Integrates straight and arc motion with a midpoint/sinc expression that
+          /// remains well-conditioned as the angular velocity approaches zero.
+          pub fn motion_model(pose: &Vector3<f32>, v: f32, w: f32, dt: f32) -> Vector3<f32> {
+              let theta = pose[2];
+              let increment = motion_increment(theta, v, w, dt);
+              Vector3::new(
+                  pose[0] + increment[0],
+                  pose[1] + increment[1],
+                  normalize_angle(theta + w * dt),
+              )
+          }
+
+          /// Numerically stable displacement for constant-velocity planar motion.
+          fn motion_increment(theta: f32, v: f32, w: f32, dt: f32) -> Vector2<f32> {
+              let half_turn = 0.5 * (w * dt);
+              // sin(a)/a = 1 - a^2/6 + a^4/120 + O(a^6). Below 0.01,
+              // the first omitted term is < 2e-16, well below f32 precision.
+              // Branch on accumulated turn, not angular velocity alone.
+              let sinc = if half_turn.abs() < 0.01 {
+                  let squared = half_turn * half_turn;
+                  1.0 - squared / 6.0 + squared * squared / 120.0
+              } else {
+                  half_turn.sin() / half_turn
+              };
+              let distance = v * dt * sinc;
+              let (sin_heading, cos_heading) = (theta + half_turn).sin_cos();
+              Vector2::new(distance * cos_heading, distance * sin_heading)
+          }
+
+          /// Computes the Jacobian of the motion model with respect to robot pose.
+          fn motion_jacobian(pose: &Vector3<f32>, v: f32, w: f32, dt: f32) -> Matrix3<f32> {
+              let increment = motion_increment(pose[2], v, w, dt);
+              Matrix3::new(
+                  1.0, 0.0, -increment[1],
+                  0.0, 1.0, increment[0],
+                  0.0, 0.0, 1.0,
+              )
+          }
+
+          '''
+          source.write_text(text[:start] + replacement + text[end:])
+          subprocess.run(['cargo', 'fmt', '--all'], check=True)
+          run('fixed')
+          fixed = source.read_text()
+          old_start = original.index('pub fn motion_model(')
+          old_end = original.index('/// Computes the Jacobian of the motion model', old_start)
+          new_start = fixed.index('pub fn motion_model(')
+          new_end = fixed.index('/// Numerically stable displacement', new_start)
+          mutants = [('old-motion-formula', fixed[:new_start] + original[old_start:old_end] + fixed[new_end:], 'motion_matches_independent_velocity_integral')]
+          for label, anchor, replacement, test in [
+              ('motion-jacobian-sign', '-increment[1]', 'increment[1]', 'motion_jacobian_matches_independent_finite_differences'),
+              ('suppressed-heading', 'normalize_angle(theta + w * dt),', 'theta,', 'tiny_angular_rate_preserves_accumulated_turn'),
+              ('observation-jacobian-sign', 'dy / q, -dx / q, -1.0', '-dy / q, -dx / q, -1.0', 'observation_jacobians_match_independent_finite_differences'),
+              ('lost-landmark-cross-covariance', 'let cross_k = g_robot * sigma_r_k;', 'let cross_k = g_robot * sigma_r_k * 0.0;', 'landmark_augmentation_covariance_matches_finite_differences'),
+              ('lost-prediction-coupling', 'G[(i, j)] = g[(i, j)];', 'G[(i, j)] = if i == j { g[(i, j)] } else { 0.0 };', 'prediction_covariance_matches_independent_linearization'),
+          ]:
+              assert fixed.count(anchor) == 1, (label, fixed.count(anchor))
+              mutants.append((label, fixed.replace(anchor, replacement), test))
+          for label, mutant, test in mutants:
+              try:
+                  source.write_text(mutant)
+                  run('mutant-' + label, test, required_failures=(test,))
+              finally:
+                  source.write_text(fixed)
+          run('restored')
+          assert source.read_text() == fixed
+          for label, command in [
+              ('algorithm-suite', ['cargo', 'test', '--locked', '-p', 'rust_robotics_algo']),
+              ('algorithm-clippy', ['cargo', 'clippy', '--locked', '-p', 'rust_robotics_algo', '--all-targets', '--', '-D', 'warnings']),
+              ('format', ['cargo', 'fmt', '--all', '--', '--check']),
+              ('diff-check', ['git', 'diff', '--check']),
+          ]:
+              p = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+              (evidence / (label + '.log')).write_text(p.stdout)
+              print(p.stdout, flush=True)
+              assert p.returncode == 0, label
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed <= {str(source), str(tests)}, changed
+          for path in (source, tests):
+              (evidence / path.name).write_bytes(path.read_bytes())
+          (evidence / 'qualified.patch').write_text(subprocess.check_output(['git', 'diff'], text=True))
+          print('EKF QUALIFICATION COMPLETE: baseline reproduced, fixed tests pass, six mutations detected, sources restored.', flush=True)
+          PY
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ekf-numerical-evidence
+          path: ${{ runner.temp }}/ekf-numerical-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Commit qualified code only on the feature branch
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/fix/ekf-small-turn-numerics'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- rust_robotics_algo/src/slam/ekf_slam.rs rust_robotics_algo/src/slam/ekf_slam_numerical_tests.rs
+          git diff --cached --check
+          git commit -m 'fix: stabilize EKF motion and Jacobian near zero angular velocity'
+          auth=$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/ekf-small-turn-numerics
+          git rev-parse HEAD
