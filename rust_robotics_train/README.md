@@ -168,11 +168,31 @@ saturated latents, likelihood replay, zero-coefficient momentum, snapshot infere
 and synchronization limits. Tolerances and sampling bounds are stated in the tests.
 A passing gradient or smoke test is not evidence of policy improvement.
 
-The action/objective, rollout-boundary and seeded-session increments of issue #5
-are implemented. Reproducible short-learning improvement qualification and broader
-checkpoint work remain open. Rollout-boundary handling is qualified separately above; it does
-not replace actual learning-improvement evidence. No convergence,
-performance or complete PPO-correctness claim is made here.
+## Short-learning evidence
+
+[The frozen learning protocol](LEARNING_QUALIFICATION.md) compares 12 independent
+training seeds after 128 default updates against their initial policies, using
+32 held-out paired evaluation episodes per seed. Its initial Linux qualification
+passed without adjusting seeds or thresholds: all 12 gains exceeded 25 points,
+and mean return increased from 55.60 to 127.82. The complete repeat was numerically
+identical within that build. Raw episodes, actor snapshots, statistical checks and
+provenance are retained by the permanent **PPO learning** workflow.
+
+```sh
+python3 scripts/qualify_ppo_learning.py --output target/ppo-learning-evidence
+```
+
+The expensive endpoint is explicitly selected by that runner; normal workspace
+tests run its 9 evaluator controls, including a real zero-learning-rate negative
+control. The Python validator has 12 fail-closed tests. Training-run gains, not
+individual episodes or repeated executions, are the independent statistical units.
+
+**Short learning improved; sustained balancing is not qualified.** All 384 trained
+policy evaluation episodes still failed before the 10-second cap. This evidence
+is limited to the existing noisy linear pendulum and a fixed budget; it does not
+establish global convergence, nonlinear/hardware robustness, replica-coordinator
+determinism, cross-build bitwise replay or exact-resume checkpoints. Broader
+checkpoint work remains open. No training-speed claim is made.
 
 References: [PPO paper](https://arxiv.org/abs/1707.06347) and the
 [Spinning Up squashed-Gaussian reference](https://github.com/openai/spinningup/blob/master/spinup/algos/pytorch/sac/core.py)

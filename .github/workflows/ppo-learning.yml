@@ -1,0 +1,37 @@
+name: PPO learning
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  learning:
+    name: PPO short-learning qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Test fail-closed evidence validation
+        run: python3 -m unittest discover -s scripts -p 'test_qualify_ppo_learning.py'
+      - name: Qualify held-out improvement and same-build replay
+        run: python3 scripts/qualify_ppo_learning.py --output "$RUNNER_TEMP/ppo-learning-evidence"
+      - name: Preserve all outcomes and provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-learning-evidence
+          path: ${{ runner.temp }}/ppo-learning-evidence/
+          retention-days: 30
+          if-no-files-found: error
