@@ -1,0 +1,106 @@
+name: Prepare PPO learning qualification (temporary)
+on:
+  push:
+    branches: [test/ppo-learning-qualification]
+    paths: [.github/workflows/prepare-ppo-learning.yml]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format and validate evaluator controls and intended defects
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+          out = Path(os.environ['RUNNER_TEMP']) / 'ppo-learning-evidence' / 'controls'
+          out.mkdir(parents=True)
+          source = Path('rust_robotics_train/tests/ppo_learning.rs')
+          report = {'input_commit': os.environ['GITHUB_SHA'], 'commands': [], 'qualified': False}
+          def run(label, args, count=None, failure=None, marker=None):
+              result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=1200)
+              text = result.stdout
+              (out / (label + '.log')).write_text(text)
+              print(text, flush=True)
+              entry = {'label': label, 'command': args, 'status': result.returncode, 'expected_failure': failure, 'marker': marker}
+              report['commands'].append(entry)
+              if failure:
+                  assert result.returncode == 101, entry
+                  assert 'running 1 test\n' in text and 'test result: FAILED. 0 passed; 1 failed; 0 ignored;' in text, entry
+                  assert re.search(r'^test ' + re.escape(failure) + r' \.\.\. FAILED$', text, re.MULTILINE), entry
+                  assert 'panicked at' in text and marker in text, entry
+              else:
+                  assert result.returncode == 0, entry
+                  if count is not None:
+                      assert f'test result: ok. {count} passed; 0 failed;' in text, entry
+              entry['qualified'] = True
+          try:
+              run('format', ['cargo', 'fmt', '--all'])
+              run('python-validator', ['python3', '-m', 'unittest', 'discover', '-s', 'scripts', '-p', 'test_qualify_ppo_learning.py'])
+              run('evaluator-baseline', ['cargo', 'test', '--locked', '--release', '-p', 'rust_robotics_train', '--test', 'ppo_learning'], 9)
+              fixed = source.read_bytes()
+              mutations = [
+                  ('ignored-policy', 'let action = policy.act(observation);', 'let action = 0.0_f32;', 'evaluator_obeys_policy_rewards_and_episode_ends', 'evaluation must execute the supplied policy'),
+                  ('nine-seed-gate', 'wins >= 10 && mean_gain >= MIN_MEAN_GAIN', 'wins >= 9 && mean_gain >= MIN_MEAN_GAIN', 'acceptance_rejects_ties_outliers_missing_and_nonfinite_trials', 'nine gains do not suffice'),
+                  ('double-count-reward', 'total_return += f64::from(result.reward);', 'total_return += 2.0 * f64::from(result.reward);', 'evaluator_obeys_policy_rewards_and_episode_ends', 'zero-action reward reference'),
+                  ('exclusive-binomial-tail', 'if i >= wins {', 'if i > wins {', 'binomial_tail_matches_exhaustive_coin_sequences', 'independent binomial oracle'),
+              ]
+              for label, old, new, test, marker in mutations:
+                  text = source.read_text()
+                  assert text.count(old) == 1, (label, text.count(old))
+                  try:
+                      source.write_text(text.replace(old, new))
+                      run(label, ['cargo', 'test', '--locked', '--release', '-p', 'rust_robotics_train', '--test', 'ppo_learning', test, '--', '--exact', '--test-threads=1', '--show-output'], failure=test, marker=marker)
+                  finally:
+                      source.write_bytes(fixed)
+              assert source.read_bytes() == fixed
+              run('restored-training-crate', ['cargo', 'test', '--locked', '--release', '-p', 'rust_robotics_train'], 55)
+              run('strict-clippy', ['cargo', 'clippy', '--locked', '-p', 'rust_robotics_train', '--all-targets', '--', '-D', 'warnings'])
+              run('format-check', ['cargo', 'fmt', '--all', '--', '--check'])
+              run('diff-check', ['git', 'diff', '--check'])
+              changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+              assert changed <= {'rust_robotics_train/tests/ppo_learning.rs', 'rust_robotics_train/examples/ppo_learning_probe.rs'}, changed
+              report['qualified'] = True
+          finally:
+              report['test_sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+              (out / 'ppo_learning.rs').write_bytes(source.read_bytes())
+              (out / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
+          PY
+      - name: Retain only control-qualified formatting on the feature branch
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/test/ppo-learning-qualification'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- rust_robotics_train/tests/ppo_learning.rs rust_robotics_train/examples/ppo_learning_probe.rs
+          git diff --cached --check
+          if ! git diff --cached --quiet; then
+            git commit -m 'style: format control-qualified PPO learning fixtures'
+            auth=$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 -w0)
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/test/ppo-learning-qualification
+          fi
+      - name: Run predeclared held-out confirmation and exact replay
+        shell: bash
+        run: python3 scripts/qualify_ppo_learning.py --output "$RUNNER_TEMP/ppo-learning-evidence/confirmation"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-learning-evidence
+          path: ${{ runner.temp }}/ppo-learning-evidence/
+          retention-days: 30
+          if-no-files-found: error
