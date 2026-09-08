@@ -9,7 +9,10 @@ const SEED: u64 = 0x5050_0030;
 const MEAN: f32 = 0.4;
 
 fn close(actual: f32, expected: f64, tolerance: f64, context: &str) {
-    assert!(actual.is_finite() && expected.is_finite(), "{context}: nonfinite");
+    assert!(
+        actual.is_finite() && expected.is_finite(),
+        "{context}: nonfinite"
+    );
     assert!(
         (f64::from(actual) - expected).abs() <= tolerance * expected.abs().max(1.0),
         "{context}: actual={actual}, expected={expected}"
@@ -42,7 +45,12 @@ fn config(max_steps: usize) -> PendulumEnvConfig {
 }
 
 fn layer(in_dim: usize, weights: Vec<f32>, bias: f32) -> LinearSnapshot {
-    LinearSnapshot { in_dim, out_dim: 1, weight: weights, bias: vec![bias] }
+    LinearSnapshot {
+        in_dim,
+        out_dim: 1,
+        weight: weights,
+        bias: vec![bias],
+    }
 }
 
 fn session(env: PendulumEnvConfig, rollout_steps: usize) -> PpoTrainerSession {
@@ -78,7 +86,9 @@ fn session(env: PendulumEnvConfig, rollout_steps: usize) -> PpoTrainerSession {
 
 fn reference_value(observation: [f32; 4]) -> f64 {
     (4.0 + f64::from(0.2_f32) * f64::from(observation[1])
-        + f64::from(0.3_f32) * f64::from(observation[3])).max(0.0) - 2.0
+        + f64::from(0.3_f32) * f64::from(observation[3]))
+    .max(0.0)
+        - 2.0
 }
 
 struct Transition {
@@ -103,8 +113,8 @@ fn trace(session: &PpoTrainerSession, count: usize) -> (Vec<Transition>, [f32; 4
         elapsed += 1;
         // Independently classify raw state, not the production status helper.
         let state = env.state();
-        let terminated = state[2].abs() > config.max_angle_rad
-            || state[0].abs() > config.max_position_m;
+        let terminated =
+            state[2].abs() > config.max_angle_rad || state[0].abs() > config.max_position_m;
         let ended = terminated || elapsed >= config.max_steps;
         let reward = if terminated { -10.0 } else { 1.0 };
         assert_eq!(f64::from(step.reward), reward);
@@ -112,7 +122,11 @@ fn trace(session: &PpoTrainerSession, count: usize) -> (Vec<Transition>, [f32; 4
             observation,
             reward,
             value: reference_value(observation),
-            next_value: if terminated { 0.0 } else { reference_value(step.observation) },
+            next_value: if terminated {
+                0.0
+            } else {
+                reference_value(step.observation)
+            },
             ended,
             terminated,
         });
@@ -133,7 +147,9 @@ fn reference_targets(trace: &[Transition], gamma: f64, lambda: f64) -> (Vec<f64>
         let mut advantage = 0.0;
         for item in &trace[start..] {
             advantage += weight * (item.reward + gamma * item.next_value - item.value);
-            if item.ended { break; }
+            if item.ended {
+                break;
+            }
             weight *= gamma * lambda;
         }
         returns.push(advantage + trace[start].value);
@@ -145,22 +161,40 @@ fn reference_targets(trace: &[Transition], gamma: f64, lambda: f64) -> (Vec<f64>
 fn check_collector(session: &mut PpoTrainerSession) -> Vec<Transition> {
     let (expected, final_observation) = trace(session, session.config.ppo.rollout_steps);
     let (returns, advantages) = reference_targets(
-        &expected, f64::from(session.config.ppo.gamma), f64::from(session.config.ppo.gae_lambda),
+        &expected,
+        f64::from(session.config.ppo.gamma),
+        f64::from(session.config.ppo.gae_lambda),
     );
     let batch = session.collect_rollout_with_rng(&mut StdRng::seed_from_u64(SEED));
     assert_eq!(batch.returns.len(), expected.len());
     assert_eq!(batch.advantages.len(), expected.len());
     assert_eq!(batch.observations.len(), expected.len());
-    assert_eq!(session.current_observation, final_observation, "collector must retain next observation");
+    assert_eq!(
+        session.current_observation, final_observation,
+        "collector must retain next observation"
+    );
     let mean = advantages.iter().sum::<f64>() / advantages.len() as f64;
-    let variance = advantages.iter().map(|a| (a - mean).powi(2)).sum::<f64>() / advantages.len() as f64;
+    let variance =
+        advantages.iter().map(|a| (a - mean).powi(2)).sum::<f64>() / advantages.len() as f64;
     for (index, item) in expected.iter().enumerate() {
-        assert_eq!(batch.observations[index], item.observation, "collector observation sequence");
+        assert_eq!(
+            batch.observations[index], item.observation,
+            "collector observation sequence"
+        );
         // Short f32 TD sums/MLP inference versus independent f64 arithmetic.
-        close(batch.returns[index], returns[index], 2e-5, "collector return oracle");
+        close(
+            batch.returns[index],
+            returns[index],
+            2e-5,
+            "collector return oracle",
+        );
         // Normalization additionally amplifies rounding by the batch deviation.
-        close(batch.advantages[index], (advantages[index] - mean) / variance.sqrt().max(1e-6),
-            2e-4, "whole-rollout advantage normalization");
+        close(
+            batch.advantages[index],
+            (advantages[index] - mean) / variance.sqrt().max(1e-6),
+            2e-4,
+            "whole-rollout advantage normalization",
+        );
     }
     expected
 }
@@ -171,18 +205,34 @@ fn gae_matches_forward_sum_across_terminal_masks() {
     let values = [0.4_f32, 0.3, -0.6, 7.0, 2.0, -1.0];
     for mask in 0..64 {
         let terminals: Vec<bool> = (0..6).map(|i| mask & (1 << i) != 0).collect();
-        let trace: Vec<Transition> = (0..6).map(|i| Transition {
-            observation: [0.0; 4], reward: rewards[i].into(), value: values[i].into(),
-            next_value: if terminals[i] { 0.0 } else { f64::from(*values.get(i + 1).unwrap_or(&2.0)) },
-            ended: terminals[i], terminated: terminals[i],
-        }).collect();
+        let trace: Vec<Transition> = (0..6)
+            .map(|i| Transition {
+                observation: [0.0; 4],
+                reward: rewards[i].into(),
+                value: values[i].into(),
+                next_value: if terminals[i] {
+                    0.0
+                } else {
+                    f64::from(*values.get(i + 1).unwrap_or(&2.0))
+                },
+                ended: terminals[i],
+                terminated: terminals[i],
+            })
+            .collect();
         for gamma in [0.0_f32, 0.5, 0.99, 1.0] {
             for lambda in [0.0_f32, 0.5, 0.95, 1.0] {
-                let (expected_returns, expected_advantages) = reference_targets(&trace, gamma.into(), lambda.into());
-                let (returns, advantages) = compute_gae(&rewards, &values, &terminals, 2.0, gamma, lambda);
+                let (expected_returns, expected_advantages) =
+                    reference_targets(&trace, gamma.into(), lambda.into());
+                let (returns, advantages) =
+                    compute_gae(&rewards, &values, &terminals, 2.0, gamma, lambda);
                 for i in 0..6 {
                     close(returns[i], expected_returns[i], 2e-5, "GAE forward return");
-                    close(advantages[i], expected_advantages[i], 2e-5, "GAE forward advantage");
+                    close(
+                        advantages[i],
+                        expected_advantages[i],
+                        2e-5,
+                        "GAE forward advantage",
+                    );
                 }
             }
         }
@@ -198,10 +248,20 @@ fn gae_empty_input_is_empty() {
 #[test]
 fn gae_rejects_mismatched_lengths() {
     for (values, terminals) in [
-        (vec![], vec![false]), (vec![0.0, 0.0], vec![false]),
-        (vec![0.0], vec![]), (vec![0.0], vec![false, false]),
+        (vec![], vec![false]),
+        (vec![0.0, 0.0], vec![false]),
+        (vec![0.0], vec![]),
+        (vec![0.0], vec![false, false]),
     ] {
-        assert!(std::panic::catch_unwind(|| compute_gae(&[1.0], &values, &terminals, 0.0, 0.9, 0.8)).is_err());
+        assert!(std::panic::catch_unwind(|| compute_gae(
+            &[1.0],
+            &values,
+            &terminals,
+            0.0,
+            0.9,
+            0.8
+        ))
+        .is_err());
     }
 }
 
@@ -211,8 +271,13 @@ fn collector_bootstraps_timeouts_before_reset() {
     let trace = check_collector(&mut session);
     assert_eq!(trace.iter().filter(|t| t.ended).count(), 2);
     assert!(trace.iter().all(|t| !t.terminated));
-    assert!(trace.iter().filter(|t| t.ended).all(|t| (t.next_value - 2.0).abs() > 1e-3),
-        "fixture must distinguish final observation from reset");
+    assert!(
+        trace
+            .iter()
+            .filter(|t| t.ended)
+            .all(|t| (t.next_value - 2.0).abs() > 1e-3),
+        "fixture must distinguish final observation from reset"
+    );
 }
 
 #[test]
@@ -229,7 +294,10 @@ fn collector_stops_at_true_termination() {
     env.max_angle_rad = 0.0;
     let mut session = session(env, 7);
     let trace = check_collector(&mut session);
-    assert!(trace.iter().any(|t| t.terminated), "fixture must include actual failure");
+    assert!(
+        trace.iter().any(|t| t.terminated),
+        "fixture must include actual failure"
+    );
     assert!(trace.iter().filter(|t| t.ended).all(|t| t.terminated));
 }
 
@@ -239,7 +307,10 @@ fn collector_terminal_on_timeout_uses_zero_value() {
     env.max_angle_rad = 0.0;
     let mut session = session(env, 6);
     let trace = check_collector(&mut session);
-    assert!(trace[1].terminated, "fixture must fail on its second-step time limit");
+    assert!(
+        trace[1].terminated,
+        "fixture must fail on its second-step time limit"
+    );
     assert_eq!(trace[1].next_value, 0.0);
 }
 
@@ -251,7 +322,10 @@ fn collector_continues_unfinished_rollout() {
     assert_eq!(session.metrics.total_episodes, 0);
     let before = session.current_observation;
     let next = session.collect_rollout_with_rng(&mut StdRng::seed_from_u64(SEED + 1));
-    assert_eq!(next.observations[0], before, "rollout boundary must not reset the environment");
+    assert_eq!(
+        next.observations[0], before,
+        "rollout boundary must not reset the environment"
+    );
     assert_eq!(session.metrics.total_env_steps, 6);
 }
 
@@ -264,7 +338,10 @@ fn partial_episode_returns_cross_rollouts() {
         assert_eq!(session.metrics.total_updates, update);
         assert_eq!(session.metrics.total_episodes, update * 2 / 5);
         if update >= 3 {
-            assert_eq!(session.metrics.last_episode_return, 5.0, "whole episode return spans rollout buffers");
+            assert_eq!(
+                session.metrics.last_episode_return, 5.0,
+                "whole episode return spans rollout buffers"
+            );
             assert_eq!(session.metrics.mean_episode_return, 5.0);
             assert_eq!(session.metrics.best_episode_return, 5.0);
         }
@@ -279,7 +356,11 @@ fn multiple_completed_episodes_count_once() {
     session.collect_rollout_with_rng(&mut StdRng::seed_from_u64(SEED));
     assert_eq!(session.metrics.total_env_steps, 8);
     assert_eq!(session.metrics.total_episodes, 2);
-    assert_eq!(session.recent_episode_returns, vec![3.0, 3.0], "completed episodes must not accumulate one another");
+    assert_eq!(
+        session.recent_episode_returns,
+        vec![3.0, 3.0],
+        "completed episodes must not accumulate one another"
+    );
     assert_eq!(session.episode_return, 2.0);
     assert_eq!(session.metrics.last_episode_return, 3.0);
     assert_eq!(session.metrics.mean_episode_return, 3.0);
@@ -296,8 +377,18 @@ fn negative_first_episode_sets_best_return() {
     let total = expected.iter().map(|t| t.reward).sum::<f64>();
     assert!(total < 0.0);
     session.collect_rollout_with_rng(&mut StdRng::seed_from_u64(SEED));
-    close(session.metrics.best_episode_return, total, 1e-6, "negative first episode best return");
-    close(session.metrics.last_episode_return, total, 1e-6, "negative episode return");
+    close(
+        session.metrics.best_episode_return,
+        total,
+        1e-6,
+        "negative first episode best return",
+    );
+    close(
+        session.metrics.last_episode_return,
+        total,
+        1e-6,
+        "negative episode return",
+    );
 }
 
 #[test]
@@ -311,7 +402,10 @@ fn weight_transfer_preserves_partial_episode() {
     assert_eq!(session.metrics, metrics);
     session.config.ppo.rollout_steps = 3;
     session.collect_rollout_with_rng(&mut StdRng::seed_from_u64(SEED + 1));
-    assert_eq!(session.metrics.last_episode_return, 5.0, "weight transfer must retain unfinished return");
+    assert_eq!(
+        session.metrics.last_episode_return, 5.0,
+        "weight transfer must retain unfinished return"
+    );
     assert_eq!(session.metrics.total_episodes, 1);
     assert_eq!(session.episode_return, 0.0);
 }
@@ -325,7 +419,9 @@ fn zero_length_rollout_preserves_episode() {
     let partial = session.episode_return;
     session.config.ppo.rollout_steps = 0;
     let batch = session.collect_rollout_with_rng(&mut StdRng::seed_from_u64(SEED));
-    assert!(batch.observations.is_empty() && batch.returns.is_empty() && batch.advantages.is_empty());
+    assert!(
+        batch.observations.is_empty() && batch.returns.is_empty() && batch.advantages.is_empty()
+    );
     assert_eq!(session.current_observation, before);
     assert_eq!(session.env.state(), state);
     assert_eq!(session.episode_return, partial);
