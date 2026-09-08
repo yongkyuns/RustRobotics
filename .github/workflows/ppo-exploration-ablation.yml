@@ -1,3 +1,4 @@
+# Candidate adapter keeps Rust and Python exploration metadata guards aligned.
 name: PPO exploration-scale development ablation
 
 on:
