@@ -38,6 +38,11 @@ jobs:
           evidence.mkdir()
           dense = Path('rust_robotics_algo/src/slam/graph_slam.rs')
           sparse = Path('rust_robotics_algo/src/slam/sparse_solver.rs')
+          tests = Path('rust_robotics_algo/src/slam/graph_slam_numerical_tests.rs')
+          # nalgebra 0.30.1 uses slice(), not the later view() spelling.
+          test_text = tests.read_text()
+          assert test_text.count('omega.view(') == 1
+          tests.write_text(test_text.replace('omega.view(', 'omega.slice('))
           original_dense = dense.read_text()
           assert original_dense.count('.map(|ch| ch.l())') == 2
           module = '\n#[cfg(test)]\n#[path = "graph_slam_numerical_tests.rs"]\nmod numerical_tests;\n'
@@ -51,7 +56,7 @@ jobs:
               command = ['cargo', 'test', '--locked', '-p', 'rust_robotics_algo', '--lib', prefix + (test or ''), '--']
               if test:
                   command.append('--exact')
-              command.append('--nocapture')
+              command.append('--test-threads=1')
               completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
               output = completed.stdout
               (evidence / (label + '.log')).write_text(output)
@@ -109,7 +114,11 @@ jobs:
           run('restored')
           assert dense.read_text() == fixed
           assert sparse.read_text() == sparse_text
-          subprocess.run(['cargo', 'test', '--locked', '-p', 'rust_robotics_algo', '--test', 'numerical_invariants'], check=True)
+          command = ['cargo', 'test', '--locked', '-p', 'rust_robotics_algo', '--test', 'numerical_invariants']
+          completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
+          (evidence / 'existing-invariants.log').write_text(completed.stdout)
+          print(completed.stdout, flush=True)
+          assert completed.returncode == 0 and 'test result: ok. 4 passed;' in completed.stdout
           workflow = Path('.github/workflows/numerical-invariants.yml')
           text = workflow.read_text()
           anchor = '      - name: Run numerical invariant tests\n'
@@ -119,9 +128,12 @@ jobs:
           Path('.github/workflows/qualify-correlated-whitening.yml').unlink()
           subprocess.run(['cargo', 'fmt', '--all', '--', '--check'], check=True)
           subprocess.run(['git', 'diff', '--check'], check=True)
-          allowed = {str(dense), 'rust_robotics_algo/src/slam/graph_slam_numerical_tests.rs', str(workflow), '.github/workflows/qualify-correlated-whitening.yml'}
+          allowed = {str(dense), str(tests), str(workflow), '.github/workflows/qualify-correlated-whitening.yml'}
           changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           assert changed <= allowed, changed
+          for path in (dense, tests, workflow):
+              (evidence / path.name).write_bytes(path.read_bytes())
+          (evidence / 'qualified.patch').write_text(subprocess.check_output(['git', 'diff'], text=True))
           print('QUALIFICATION COMPLETE: baseline failed, eight fixed oracles passed, four targeted mutants killed, sources restored.', flush=True)
           PY
       - name: Preserve qualification evidence
@@ -132,7 +144,7 @@ jobs:
           path: ${{ runner.temp }}/correlated-whitening-evidence/
           if-no-files-found: error
           retention-days: 30
-      - name: Commit only the qualified fix on this feature branch
+      - name: Commit only qualified code on this feature branch
         env:
           PUBLISH_TOKEN: ${{ github.token }}
         shell: bash
@@ -141,7 +153,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- rust_robotics_algo/src/slam/graph_slam.rs rust_robotics_algo/src/slam/graph_slam_numerical_tests.rs .github/workflows/numerical-invariants.yml .github/workflows/qualify-correlated-whitening.yml
+          # Workflow changes are applied separately through the GitHub connector.
+          git add -- rust_robotics_algo/src/slam/graph_slam.rs rust_robotics_algo/src/slam/graph_slam_numerical_tests.rs
           git diff --cached --stat
           git diff --cached --check
           git commit -m 'fix: whiten dense Graph SLAM with the transposed Cholesky factor'
