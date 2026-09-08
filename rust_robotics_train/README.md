@@ -65,6 +65,48 @@ moments, RNG state, environment state or rollout state; they are warm-start / we
 synchronization data, not exact-resume training checkpoints. Loading old weights
 preserves deterministic inference, not the old clipped stochastic policy.
 
+## Episode and rollout boundaries
+
+`max_steps` is an external collection time limit, not a finite-horizon task
+termination: remaining time is not part of the observation. `StepResult` retains
+its existing serialized fields and struct-literal layout. `done` means reset is
+required. `truncated` now means a **time-limit-only** end, and `terminated()`
+means a task failure. If failure and timeout coincide, failure takes precedence:
+`done = true`, `truncated = false`, with the existing failure reward unchanged.
+Thus the old overlap case intentionally changes; the clock flag is not a second
+independent termination reason. Historical payloads with both flags true cannot
+identify whether a simultaneous failure occurred and are not resume checkpoints.
+
+The collector finishes one GAE segment at every environment reset and at the
+rollout buffer cutoff. A true failure supplies zero bootstrap. A timeout or
+unfinished buffer supplies the critic value of the last **pre-reset** observation.
+Advantages never propagate across reset into a different episode. Normalization
+still occurs once across the whole rollout. A buffer cutoff alone does not reset
+the environment or count an episode. Critic evaluation for bootstrapping occurs
+at segment boundaries, not a second time at every ordinary step.
+
+An unfinished episode's undiscounted return belongs to the session, not to a
+rollout buffer. It survives collection/update calls and weight transfers, then
+is recorded and cleared exactly once when the episode ends. Completed-episode
+metrics include the whole episode (also for time limits), not bootstrapped value
+targets. Empty rollouts and zero requested updates do not advance/reset episodes.
+
+The boundary suite uses explicit weights, noise-free dynamics fixtures and a
+private caller-owned action RNG to compare the real collector to forward f64
+TD-error sums. This is not an end-to-end seeded training API. Fourteen trainer
+tests and five environment tests cover terminal-mask combinations, pre-reset
+bootstrap, reset isolation, coincident failure/timeout, cross-buffer returns,
+multiple episodes, negative returns, weight transfer and empty calls. The 1,024
+GAE combinations use 64 terminal masks and four gamma/lambda choices each.
+Existing PPO objective tests remain unchanged.
+
+References: [Gymnasium time-limit semantics](https://gymnasium.farama.org/tutorials/gymnasium_basics/handling_time_limits/)
+and [Spinning Up PPO path finalization](https://spinningup.openai.com/en/latest/_modules/spinup/algos/pytorch/ppo/ppo.html).
+The former motivates the bootstrap distinction; the latter illustrates finishing
+value targets at trajectory boundaries. These tests do not establish learning
+improvement, validate a finite-horizon objective, or repair observation noise's
+partial-observability effects.
+
 ## Verification
 
 ```sh
@@ -82,8 +124,8 @@ A passing gradient or smoke test is not evidence of policy improvement.
 
 This is the action/objective increment of issue #5. End-to-end session/environment
 seeding, reproducible short-learning qualification and broader checkpoint work
-remain open. Existing rollout episode-return accounting and time-limit bootstrap
-handling also need separate review before a learning-quality claim. No convergence,
+remain open. Rollout-boundary handling is qualified separately above; it does
+not replace actual learning-improvement evidence. No convergence,
 performance or complete PPO-correctness claim is made here.
 
 References: [PPO paper](https://arxiv.org/abs/1707.06347) and the

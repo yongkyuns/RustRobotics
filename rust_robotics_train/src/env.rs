@@ -17,6 +17,7 @@ pub struct PendulumEnvConfig {
     pub reset_angular_velocity_range_radps: f32,
     pub max_angle_rad: f32,
     pub max_position_m: f32,
+    /// External collection time limit, not a finite-horizon task terminal.
     pub max_steps: usize,
     pub observation_position_noise_m: f32,
     pub observation_velocity_noise_mps: f32,
@@ -64,8 +65,18 @@ impl Default for PendulumEnvConfig {
 pub struct StepResult {
     pub observation: [f32; 4],
     pub reward: f32,
+    /// True after task termination or time-limit truncation; reset is required.
     pub done: bool,
+    /// Time-limit-only end. Task failure takes precedence when both coincide.
     pub truncated: bool,
+}
+
+impl StepResult {
+    /// Task termination for results produced by `PendulumEnv`.
+    /// This relies on its time-limit-only `truncated` contract.
+    pub fn terminated(&self) -> bool {
+        self.done && !self.truncated
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +154,7 @@ impl PendulumEnv {
 
         let terminated = self.state[2].abs() > self.config.max_angle_rad
             || self.state[0].abs() > self.config.max_position_m;
-        let truncated = self.steps >= self.config.max_steps;
+        let truncated = !terminated && self.steps >= self.config.max_steps;
         let reward = self.reward(clipped_action, terminated);
 
         StepResult {
@@ -214,5 +225,100 @@ mod tests {
 
         assert_eq!(clamped.observation, unclamped.observation);
         assert_eq!(clamped.reward, unclamped.reward);
+    }
+
+    fn boundary_env(max_steps: usize) -> PendulumEnv {
+        PendulumEnv::new(
+            Model::default(),
+            PendulumEnvConfig {
+                max_steps,
+                max_angle_rad: 1.0,
+                max_position_m: 1.0,
+                reset_position_range_m: 0.0,
+                reset_velocity_range_mps: 0.0,
+                reset_angle_range_rad: 0.0,
+                reset_angular_velocity_range_radps: 0.0,
+                observation_position_noise_m: 0.0,
+                observation_velocity_noise_mps: 0.0,
+                observation_angle_noise_rad: 0.0,
+                observation_angular_velocity_noise_radps: 0.0,
+                action_noise_force_n: 0.0,
+                disturbance_force_n: 0.0,
+                disturbance_probability_per_step: 0.0,
+                ..PendulumEnvConfig::default()
+            },
+        )
+    }
+
+    #[test]
+    fn step_flags_distinguish_continuation_and_timeout() {
+        let mut env = boundary_env(3);
+        for index in 1..=3 {
+            let result = env.step(1.0);
+            assert_eq!(result.done, index == 3);
+            assert_eq!(result.truncated, index == 3);
+            assert!(!result.terminated());
+            assert_eq!(
+                result.observation,
+                env.observation(),
+                "step returns pre-reset observation"
+            );
+        }
+    }
+
+    #[test]
+    fn state_failure_ends_before_limit() {
+        for axis in [0, 2] {
+            let mut env = boundary_env(10);
+            env.state[axis] = 2.0;
+            let result = env.step(0.0);
+            assert!(result.done && result.terminated());
+            assert!(!result.truncated);
+            assert_eq!(result.reward, -10.0);
+        }
+    }
+
+    #[test]
+    fn failure_on_time_limit_is_terminal() {
+        for axis in [0, 2] {
+            let mut env = boundary_env(1);
+            env.state[axis] = 2.0;
+            let result = env.step(0.0);
+            assert!(result.terminated(), "time-limit failure must terminate");
+            assert!(result.done && !result.truncated);
+            assert_eq!(result.reward, -10.0);
+        }
+    }
+
+    #[test]
+    fn step_result_literal_retains_existing_fields() {
+        let result = StepResult {
+            observation: [0.0; 4],
+            reward: 1.0,
+            done: true,
+            truncated: true,
+        };
+        assert!(!result.terminated());
+        assert!(StepResult {
+            truncated: false,
+            ..result
+        }
+        .terminated());
+        assert!(!StepResult {
+            done: false,
+            truncated: false,
+            ..result
+        }
+        .terminated());
+    }
+
+    #[test]
+    fn reset_starts_fresh_time_limit() {
+        let mut env = boundary_env(2);
+        assert!(!env.step(0.0).done);
+        assert!(env.step(0.0).truncated);
+        assert_eq!(env.reset(), [0.0; 4]);
+        assert!(!env.step(0.0).done);
+        assert!(env.step(0.0).truncated);
     }
 }

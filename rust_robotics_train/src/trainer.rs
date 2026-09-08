@@ -100,6 +100,8 @@ pub struct PpoTrainerSession {
         OptimizerAdaptor<burn::optim::Adam, ValueNetwork<AutodiffBackend>, AutodiffBackend>,
     metrics: PpoMetrics,
     recent_episode_returns: Vec<f32>,
+    // Undiscounted return of the unfinished environment episode.
+    episode_return: f32,
 }
 
 impl PpoTrainerSession {
@@ -133,6 +135,7 @@ impl PpoTrainerSession {
             critic_optimizer,
             metrics: PpoMetrics::default(),
             recent_episode_returns: Vec::new(),
+            episode_return: 0.0,
         }
     }
 
@@ -198,8 +201,13 @@ impl PpoTrainerSession {
     ///
     /// - observations / actions / log-probs are stored for policy replay
     /// - rewards and values feed generalized advantage estimation
-    /// - terminal transitions reset the environment and update metrics
+    /// - each reset ends a GAE trace; only true termination removes bootstrap
+    /// - unfinished episode returns survive rollout/update boundaries
     fn collect_rollout(&mut self) -> RolloutBatch {
+        self.collect_rollout_with_rng(&mut rand::thread_rng())
+    }
+
+    fn collect_rollout_with_rng<R: Rng + ?Sized>(&mut self, rng: &mut R) -> RolloutBatch {
         let rollout_steps = self.config.ppo.rollout_steps;
         let mut observations = Vec::with_capacity(rollout_steps);
         let mut latent_actions = Vec::with_capacity(rollout_steps);
@@ -207,16 +215,16 @@ impl PpoTrainerSession {
         let mut rewards = Vec::with_capacity(rollout_steps);
         let mut values = Vec::with_capacity(rollout_steps);
         let mut terminals = Vec::with_capacity(rollout_steps);
-
-        let mut episode_return = 0.0;
+        let mut returns = Vec::with_capacity(rollout_steps);
+        let mut advantages = Vec::with_capacity(rollout_steps);
+        let mut path_start = 0;
         let distribution = SquashedGaussian::new(self.config.action_std, self.actor.action_limit);
-        let mut rng = rand::thread_rng();
 
-        for _ in 0..rollout_steps {
+        for index in 0..rollout_steps {
             let observation = self.current_observation;
             let mean = self.policy_latent_mean(observation);
             let value = self.value_estimate(observation);
-            let sample = distribution.sample(mean, &mut rng);
+            let sample = distribution.sample(mean, rng);
             let step = self.env.step(sample.action);
 
             observations.push(observation);
@@ -224,13 +232,35 @@ impl PpoTrainerSession {
             old_log_probs.push(sample.log_prob);
             rewards.push(step.reward);
             values.push(value);
-            terminals.push(step.done);
-
-            episode_return += step.reward;
+            terminals.push(step.terminated());
+            self.episode_return += step.reward;
             self.metrics.total_env_steps += 1;
-            self.current_observation = step.observation;
 
+            // Every reset ends a GAE trace. Only true task termination removes
+            // the bootstrap; time limits use the final observation BEFORE reset.
+            // A buffer cutoff finishes targets without ending the live episode.
+            if step.done || index + 1 == rollout_steps {
+                let bootstrap_value = if step.terminated() {
+                    0.0
+                } else {
+                    self.value_estimate(step.observation)
+                };
+                let (path_returns, path_advantages) = compute_gae(
+                    &rewards[path_start..],
+                    &values[path_start..],
+                    &terminals[path_start..],
+                    bootstrap_value,
+                    self.config.ppo.gamma,
+                    self.config.ppo.gae_lambda,
+                );
+                returns.extend(path_returns);
+                advantages.extend(path_advantages);
+                path_start = rewards.len();
+            }
+
+            self.current_observation = step.observation;
             if step.done {
+                let episode_return = std::mem::take(&mut self.episode_return);
                 self.metrics.total_episodes += 1;
                 self.metrics.last_episode_return = episode_return;
                 if self.metrics.total_episodes == 1 {
@@ -242,29 +272,13 @@ impl PpoTrainerSession {
                 push_recent(&mut self.recent_episode_returns, episode_return, 32);
                 self.metrics.mean_episode_return =
                     mean_slice(&self.recent_episode_returns).unwrap_or(episode_return);
-                episode_return = 0.0;
                 self.current_observation = self.env.reset();
             }
         }
 
-        let bootstrap_value = if terminals.last().copied().unwrap_or(false) {
-            0.0
-        } else {
-            self.value_estimate(self.current_observation)
-        };
-
-        let (returns, advantages) = compute_gae(
-            &rewards,
-            &values,
-            &terminals,
-            bootstrap_value,
-            self.config.ppo.gamma,
-            self.config.ppo.gae_lambda,
-        );
+        // Keep the existing whole-rollout normalization, not per-episode scaling.
         let advantages = normalize(&advantages);
-
         self.metrics.last_mean_advantage = mean_slice(&advantages).unwrap_or(0.0);
-
         RolloutBatch {
             observations,
             latent_actions,
@@ -417,6 +431,16 @@ fn compute_gae(
     gamma: f32,
     gae_lambda: f32,
 ) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(
+        rewards.len(),
+        values.len(),
+        "GAE rewards/values length mismatch"
+    );
+    assert_eq!(
+        rewards.len(),
+        terminals.len(),
+        "GAE rewards/terminals length mismatch"
+    );
     let mut advantages = vec![0.0; rewards.len()];
     let mut returns = vec![0.0; rewards.len()];
     let mut next_value = bootstrap_value;
@@ -492,3 +516,7 @@ mod tests {
 #[cfg(test)]
 #[path = "ppo_objective_tests.rs"]
 mod objective_tests;
+
+#[cfg(test)]
+#[path = "ppo_rollout_tests.rs"]
+mod rollout_tests;
