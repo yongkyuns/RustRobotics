@@ -14,7 +14,7 @@ use crate::{
     backend::{AutodiffBackend, AutodiffDevice},
     env::{PendulumEnv, PendulumEnvConfig},
     model::{
-        obs_tensor, policy_network_from_snapshot, scalar_tensor, value_network_from_snapshot,
+        obs_tensor, policy_network_from_snapshot, scalar_tensor, value_network_from_snapshot, Mlp,
         PolicyNetwork, ValueNetwork,
     },
 };
@@ -22,7 +22,7 @@ use burn::{
     module::AutodiffModule,
     optim::{adaptor::OptimizerAdaptor, AdamConfig, GradientsParams, Optimizer},
 };
-use rand::{seq::SliceRandom, Rng};
+use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use rust_robotics_core::{PolicySnapshot, PpoMetrics, PpoSharedState};
 use serde::{Deserialize, Serialize};
 
@@ -102,11 +102,26 @@ pub struct PpoTrainerSession {
     recent_episode_returns: Vec<f32>,
     // Undiscounted return of the unfinished environment episode.
     episode_return: f32,
+    // Separate continuing streams prevent optimizer draw counts from changing
+    // collection noise. No per-tick thread_rng or backend-global seed is used.
+    environment_rng: StdRng,
+    action_rng: StdRng,
+    update_rng: StdRng,
 }
 
 impl PpoTrainerSession {
-    /// Creates a new trainer session with fresh actor and critic networks.
+    /// Creates a fresh, entropy-seeded session with privately owned randomness.
     pub fn new(config: PpoTrainerConfig) -> Self {
+        Self::new_seeded(config, rand::thread_rng().gen())
+    }
+
+    /// Creates a reproducible fresh session, including model initialization,
+    /// environment resets/noise, action sampling, minibatches and entropy.
+    ///
+    /// Equal seeds, configurations and call sequences replay numerical state on
+    /// the same backend/build. No cross-platform/version bitwise or checkpoint
+    /// guarantee is made. This does not seed unrelated sessions or Burn globally.
+    pub fn new_seeded(config: PpoTrainerConfig, seed: u64) -> Self {
         SquashedGaussian::new(config.action_std, config.env.max_force);
         assert!(
             config.ppo.entropy_coef.is_finite() && config.ppo.entropy_coef >= 0.0,
@@ -117,10 +132,25 @@ impl PpoTrainerSession {
             "value_loss_coef must be finite and nonnegative"
         );
         let device = Default::default();
-        let env = PendulumEnv::new(Default::default(), config.env);
-        let current_observation = env.observation();
-        let actor = PolicyNetwork::new(&device, OBS_DIM, config.hidden_dim, config.env.max_force);
-        let critic = ValueNetwork::new(&device, OBS_DIM, config.hidden_dim);
+        // Fixed child order: actor initialization, critic initialization,
+        // environment, actions, optimizer. Initialization draws do not consume
+        // live environment/action streams, including when hidden_dim changes.
+        let mut root = StdRng::seed_from_u64(seed);
+        let mut child = || StdRng::seed_from_u64(root.gen());
+        let mut actor_rng = child();
+        let mut critic_rng = child();
+        let mut environment_rng = child();
+        let action_rng = child();
+        let update_rng = child();
+        let env = PendulumEnv::new_with_rng(Default::default(), config.env, &mut environment_rng);
+        let current_observation = env.observation_with_rng(&mut environment_rng);
+        let actor = PolicyNetwork {
+            mlp: Mlp::new_with_rng(&device, OBS_DIM, config.hidden_dim, 1, &mut actor_rng),
+            action_limit: config.env.max_force,
+        };
+        let critic = ValueNetwork {
+            mlp: Mlp::new_with_rng(&device, OBS_DIM, config.hidden_dim, 1, &mut critic_rng),
+        };
         let actor_optimizer = AdamConfig::new().init();
         let critic_optimizer = AdamConfig::new().init();
 
@@ -136,6 +166,9 @@ impl PpoTrainerSession {
             metrics: PpoMetrics::default(),
             recent_episode_returns: Vec::new(),
             episode_return: 0.0,
+            environment_rng,
+            action_rng,
+            update_rng,
         }
     }
 
@@ -204,7 +237,12 @@ impl PpoTrainerSession {
     /// - each reset ends a GAE trace; only true termination removes bootstrap
     /// - unfinished episode returns survive rollout/update boundaries
     fn collect_rollout(&mut self) -> RolloutBatch {
-        self.collect_rollout_with_rng(&mut rand::thread_rng())
+        // Use a local cursor to avoid aliasing &mut self with its RNG, then
+        // retain the advanced cursor. This is a copy, not a reseed or shared RNG.
+        let mut rng = self.action_rng.clone();
+        let rollout = self.collect_rollout_with_rng(&mut rng);
+        self.action_rng = rng;
+        rollout
     }
 
     fn collect_rollout_with_rng<R: Rng + ?Sized>(&mut self, rng: &mut R) -> RolloutBatch {
@@ -225,7 +263,9 @@ impl PpoTrainerSession {
             let mean = self.policy_latent_mean(observation);
             let value = self.value_estimate(observation);
             let sample = distribution.sample(mean, rng);
-            let step = self.env.step(sample.action);
+            let step = self
+                .env
+                .step_with_rng(sample.action, &mut self.environment_rng);
 
             observations.push(observation);
             latent_actions.push(sample.latent);
@@ -272,7 +312,7 @@ impl PpoTrainerSession {
                 push_recent(&mut self.recent_episode_returns, episode_return, 32);
                 self.metrics.mean_episode_return =
                     mean_slice(&self.recent_episode_returns).unwrap_or(episode_return);
-                self.current_observation = self.env.reset();
+                self.current_observation = self.env.reset_with_rng(&mut self.environment_rng);
             }
         }
 
@@ -298,7 +338,9 @@ impl PpoTrainerSession {
     /// uses configured MSE weighting. Entropy uses fresh current-policy samples,
     /// not negative log likelihood of actions from the old rollout policy.
     fn optimize(&mut self, rollout: &RolloutBatch) {
-        self.optimize_with_rng(rollout, &mut rand::thread_rng());
+        let mut rng = self.update_rng.clone();
+        self.optimize_with_rng(rollout, &mut rng);
+        self.update_rng = rng;
     }
 
     fn optimize_with_rng<R: Rng + ?Sized>(&mut self, rollout: &RolloutBatch, rng: &mut R) {
@@ -520,3 +562,7 @@ mod objective_tests;
 #[cfg(test)]
 #[path = "ppo_rollout_tests.rs"]
 mod rollout_tests;
+
+#[cfg(test)]
+#[path = "ppo_seed_tests.rs"]
+mod seed_tests;

@@ -107,6 +107,52 @@ value targets at trajectory boundaries. These tests do not establish learning
 improvement, validate a finite-horizon objective, or repair observation noise's
 partial-observability effects.
 
+## Seeded sessions and explicit environment randomness
+
+```rust
+use rust_robotics_train::{PpoTrainerConfig, PpoTrainerSession};
+let mut trainer = PpoTrainerSession::new_seeded(PpoTrainerConfig::default(), 42);
+trainer.train_updates(3);
+```
+
+`new_seeded(config, seed)` covers actor/critic initialization, initial environment
+state, observation/action noise, random disturbances, episode resets, Gaussian
+action sampling, minibatch shuffling and bounded-policy entropy sampling. Five
+child StdRng streams have a fixed order: actor initialization, critic initialization,
+environment, actions, optimizer. The last three continue across updates. Model
+size cannot consume collection randomness; optimizer draw counts cannot consume
+action or environment randomness. Shuffling and entropy share the optimizer stream.
+Reset and weight transfer do not reseed. No process-global/backend seed is set.
+
+The existing `new(config)` draws a fresh entropy seed and uses this same owned
+implementation. Existing config fields, serialized layout, signatures and the
+standalone `PolicyNetwork::new` / `ValueNetwork::new` APIs remain available.
+Seeded MLP initialization eagerly fills weights and biases from
+`U(-1/sqrt(fan_in), 1/sqrt(fan_in))`, matching Burn 0.20.1's default LinearConfig
+law, rather than relying on lazily evaluated backend-global random tensors. It
+preserves the distribution, not Burn's particular random sequence or parameter IDs.
+
+`PendulumEnv` offers `new_with_rng`, `reset_with_rng`, `step_with_rng` and
+`observation_with_rng` for caller-owned streams, including evaluation fixtures.
+The original methods remain entropy-backed wrappers. Mixing those original
+methods into an explicit-stream trajectory opts out of deterministic replay.
+The environment itself stores no RNG and gains no mutex/interior mutability.
+Standalone noisy observation calls consume draws; trainer snapshot/config/metrics
+readouts do not. Cloning an environment copies its state, not an external RNG.
+
+Replay requires the same seed, configuration, inputs, calls, locked dependencies,
+backend and numerical build. Tests compare exact numerical values locally within
+a build, including multiple actual optimizer updates and concurrently/interleaved
+sessions. Bitwise equality across architectures, compiler or dependency upgrades
+is not promised; StdRng's algorithm is not a stable serialized format. Store the
+seed/config and source/lockfile revisions for experiments. This is fresh-run
+reproducibility, not resumable checkpointing: portable shared weights still omit
+RNG/optimizer/environment/partial-episode state. The simulator's replica scheduling
+and aggregation are not covered by this single-session contract.
+
+References: [Burn 0.20.1 Linear initialization](https://github.com/tracel-ai/burn/blob/v0.20.1/crates/burn-nn/src/modules/linear.rs)
+and [rand 0.8 StdRng portability](https://docs.rs/rand/0.8.5/rand/rngs/struct.StdRng.html).
+
 ## Verification
 
 ```sh
@@ -122,9 +168,9 @@ saturated latents, likelihood replay, zero-coefficient momentum, snapshot infere
 and synchronization limits. Tolerances and sampling bounds are stated in the tests.
 A passing gradient or smoke test is not evidence of policy improvement.
 
-This is the action/objective increment of issue #5. End-to-end session/environment
-seeding, reproducible short-learning qualification and broader checkpoint work
-remain open. Rollout-boundary handling is qualified separately above; it does
+The action/objective, rollout-boundary and seeded-session increments of issue #5
+are implemented. Reproducible short-learning improvement qualification and broader
+checkpoint work remain open. Rollout-boundary handling is qualified separately above; it does
 not replace actual learning-improvement evidence. No convergence,
 performance or complete PPO-correctness claim is made here.
 

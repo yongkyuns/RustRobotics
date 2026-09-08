@@ -89,13 +89,23 @@ pub struct PendulumEnv {
 
 impl PendulumEnv {
     pub fn new(model: Model, config: PendulumEnvConfig) -> Self {
+        Self::new_with_rng(model, config, &mut rand::thread_rng())
+    }
+
+    /// Constructs and resets using only the caller's random stream.
+    /// Keep using the `_with_rng` methods for a reproducible trajectory.
+    pub fn new_with_rng<R: Rng + ?Sized>(
+        model: Model,
+        config: PendulumEnvConfig,
+        rng: &mut R,
+    ) -> Self {
         let mut env = Self {
             model,
             config,
             state: vector![0.0, 0.0, 0.0, 0.0],
             steps: 0,
         };
-        env.reset();
+        env.reset_with_rng(rng);
         env
     }
 
@@ -112,38 +122,49 @@ impl PendulumEnv {
     }
 
     pub fn observation(&self) -> [f32; 4] {
-        let mut rng = rand::thread_rng();
+        self.observation_with_rng(&mut rand::thread_rng())
+    }
+
+    /// Samples observation noise without touching any shared random stream.
+    pub fn observation_with_rng<R: Rng + ?Sized>(&self, rng: &mut R) -> [f32; 4] {
         [
-            self.state[0] + sample_symmetric(&mut rng, self.config.observation_position_noise_m),
-            self.state[1] + sample_symmetric(&mut rng, self.config.observation_velocity_noise_mps),
-            self.state[2] + sample_symmetric(&mut rng, self.config.observation_angle_noise_rad),
+            self.state[0] + sample_symmetric(rng, self.config.observation_position_noise_m),
+            self.state[1] + sample_symmetric(rng, self.config.observation_velocity_noise_mps),
+            self.state[2] + sample_symmetric(rng, self.config.observation_angle_noise_rad),
             self.state[3]
-                + sample_symmetric(
-                    &mut rng,
-                    self.config.observation_angular_velocity_noise_radps,
-                ),
+                + sample_symmetric(rng, self.config.observation_angular_velocity_noise_radps),
         ]
     }
 
     pub fn reset(&mut self) -> [f32; 4] {
-        let mut rng = rand::thread_rng();
+        self.reset_with_rng(&mut rand::thread_rng())
+    }
+
+    /// Draws reset state and its observation from the caller's continuing stream.
+    /// This does not reseed that stream.
+    pub fn reset_with_rng<R: Rng + ?Sized>(&mut self, rng: &mut R) -> [f32; 4] {
         self.state = vector![
-            sample_symmetric(&mut rng, self.config.reset_position_range_m),
-            sample_symmetric(&mut rng, self.config.reset_velocity_range_mps),
-            sample_symmetric(&mut rng, self.config.reset_angle_range_rad),
-            sample_symmetric(&mut rng, self.config.reset_angular_velocity_range_radps)
+            sample_symmetric(rng, self.config.reset_position_range_m),
+            sample_symmetric(rng, self.config.reset_velocity_range_mps),
+            sample_symmetric(rng, self.config.reset_angle_range_rad),
+            sample_symmetric(rng, self.config.reset_angular_velocity_range_radps)
         ];
         self.steps = 0;
-        self.observation()
+        self.observation_with_rng(rng)
     }
 
     pub fn step(&mut self, action: f32) -> StepResult {
-        let mut rng = rand::thread_rng();
+        self.step_with_rng(action, &mut rand::thread_rng())
+    }
+
+    /// Draws action noise, disturbances and observation noise from one explicit
+    /// stream. Dynamics, rewards and boundary semantics match `step`.
+    pub fn step_with_rng<R: Rng + ?Sized>(&mut self, action: f32, rng: &mut R) -> StepResult {
         let clipped_action = action.clamp(-self.config.max_force, self.config.max_force);
-        let action_noise = sample_symmetric(&mut rng, self.config.action_noise_force_n);
+        let action_noise = sample_symmetric(rng, self.config.action_noise_force_n);
         let disturbance =
             if rng.gen_bool(self.config.disturbance_probability_per_step.clamp(0.0, 1.0) as f64) {
-                sample_symmetric(&mut rng, self.config.disturbance_force_n)
+                sample_symmetric(rng, self.config.disturbance_force_n)
             } else {
                 0.0
             };
@@ -158,7 +179,7 @@ impl PendulumEnv {
         let reward = self.reward(clipped_action, terminated);
 
         StepResult {
-            observation: self.observation(),
+            observation: self.observation_with_rng(rng),
             reward,
             done: terminated || truncated,
             truncated,
@@ -178,7 +199,7 @@ impl PendulumEnv {
     }
 }
 
-fn sample_symmetric(rng: &mut impl Rng, magnitude: f32) -> f32 {
+fn sample_symmetric<R: Rng + ?Sized>(rng: &mut R, magnitude: f32) -> f32 {
     let magnitude = magnitude.max(0.0);
     if magnitude == 0.0 {
         0.0
