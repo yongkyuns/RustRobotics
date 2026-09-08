@@ -29,7 +29,10 @@ change('''                    let critic_grads =
 change('                last_policy_loss = policy_loss_scalar;', '                #[cfg(test)]\n                reference_audit::after(self);\n                last_policy_loss = policy_loss_scalar;')
 s += '\n#[cfg(test)]\n#[path = "ppo_reference_audit.rs"]\nmod reference_audit;\n'
 p.write_text(s)
-# Remove two unused imports before first compile; no numerical change.
 p = Path('rust_robotics_train/src/ppo_reference_audit.rs')
 s = p.read_text().replace('use burn::tensor::{backend::AutodiffBackend as AD, Tensor};', 'use burn::tensor::backend::AutodiffBackend as AD;').replace('use rust_robotics_core::{LinearSnapshot, ValueSnapshot};', 'use rust_robotics_core::LinearSnapshot;')
+# Strict-Clippy setup repair: enumerate the same four coefficients, unchanged order/math.
+assert s.count('for i in 0..4 {') == 1
+s = s.replace('for i in 0..4 {', 'for (i, coefficient) in gain.into_iter().enumerate() {')
+s = s.replace('-gain[i]/20.0', '-coefficient/20.0').replace('gain[i]/20.0', 'coefficient/20.0')
 p.write_text(s)
