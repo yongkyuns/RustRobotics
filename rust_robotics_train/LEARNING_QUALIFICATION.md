@@ -85,9 +85,55 @@ No default hyperparameter, reward or noise was adjusted.
 
 [Exploratory run 34226939664](https://github.com/yongkyuns/RustRobotics/actions/runs/34226939664)
 ran source `c74cefc8e5b232f1ea921785fde440b27c6bacf7`. Artifact `10056283773`
-contains all raw episode results and provenance. ZIP SHA256:
+contains all 384 exploratory episode records and provenance. ZIP SHA256:
 `5d960871dc0f637c01075df05655bae864b0f80673ac474974a509b83b0da405`.
 These three exploratory gains are not the acceptance result.
+
+## Initial Linux confirmation — passed without protocol adjustment
+
+[Qualification run 34228027590](https://github.com/yongkyuns/RustRobotics/actions/runs/34228027590)
+ran formatted test source at `f0b4d99c0946fb35ed08af8c2f50ad8748f4b833`.
+All 12 confirmation seeds exceeded the 25-point margin. Mean return increased
+from **55.603606 to 127.816198**, a gain of **72.212593**. Median gain was
+**73.472756**, with nominal 96.142578125% median interval
+**[60.876861, 78.684983]**. The one-sided margin-test probability was
+**1/4096 = 0.000244140625**. The complete second execution replayed all numeric
+records and actor bytes exactly; it is not another independent cohort.
+
+| Training seed | Initial mean return | Final mean return | Gain |
+| --- | ---: | ---: | ---: |
+| 101 | 63.989831 | 128.510680 | 64.520849 |
+| 102 | 41.224085 | 132.203891 | 90.979806 |
+| 103 | 70.287631 | 143.408106 | 73.120475 |
+| 104 | 58.115070 | 118.991932 | 60.876861 |
+| 105 | 40.149255 | 121.399161 | 81.249906 |
+| 106 | 58.422439 | 132.247478 | 73.825038 |
+| 107 | 60.462263 | 120.834642 | 60.372379 |
+| 108 | 53.135535 | 131.820517 | 78.684983 |
+| 109 | 58.078317 | 129.232856 | 71.154539 |
+| 110 | 60.366210 | 118.197170 | 57.830960 |
+| 111 | 52.719071 | 129.205220 | 76.486149 |
+| 112 | 50.293563 | 127.742728 | 77.449165 |
+
+**This is improvement, not solved balancing.** Mean episode length increased
+from 80.666667 to 175.130208 steps (about 0.81 to 1.75 seconds). All 384 final
+policy evaluation episodes still terminated before the 1,000-step/10-second cap;
+the longest lasted 529 steps. Sustained balancing remains unqualified.
+
+All 9 evaluator controls and 12 Python validator tests passed. Four injected
+evaluator/statistics defects (ignoring the policy, accepting nine good seeds,
+double-counting rewards, excluding the observed binomial count) each reached the
+intended named runtime assertion. Restored training-crate tests and strict Clippy
+passed. No seeds, thresholds, trial counts, numerical code or assertions were
+changed after execution to obtain a pass. Only formatting was applied beforehand.
+
+Artifact `10056676921` contains 14 command logs, structured results, 768 episode
+records and 24 actors per confirmation execution, plus qualified source files.
+Its downloaded SHA256 and all archived source hashes were independently checked:
+`a31a6415d2497d42b7b563238715e96c2b09264c168d2055429b8491563eb4d7`.
+The executed test blob is `59fd74a4d18bd7ed81462e02947498e39363632d`; the independent
+runner blob is `6273cdf4175f86494b2ab7973ea145641e4f5372`.
+Temporary probe/preparation files are removed from the submitted change.
 
 ## Execution and evidence
 
@@ -101,13 +147,13 @@ python3 scripts/qualify_ppo_learning.py --output target/ppo-learning-evidence
 ```
 
 The expensive endpoint has an explicit `#[ignore]` annotation so the four ordinary
-platform jobs do not accidentally run it in debug mode. The qualification runner
-executes it by exact name with `--ignored`, requires one completed runtime test,
-and checks 12 trials, 768 episode records, 24 actor snapshots and exact budgets.
-Its Python implementation independently recomputes every mean, margin count,
-threshold, binomial probability and interval instead of trusting Rust's success
-flag. Missing/duplicate records, unexpected seeds, malformed policies, nonfinite
-values, impossible reward sums and contradictory outcomes are rejected.
+platform jobs do not accidentally run it in debug mode. The permanent **PPO
+learning** workflow executes it by exact name with `--ignored`, requires one
+completed runtime test, and checks 12 trials, 768 episode records, 24 actors and
+exact budgets. Python independently recomputes every mean, margin count, threshold,
+binomial probability and interval instead of trusting Rust's success flag.
+Missing/duplicate records, unexpected seeds, malformed policies, nonfinite values,
+impossible reward sums and contradictory outcomes are rejected.
 
 Raw actor evidence encodes big-endian f32 words in this fixed order: action limit,
 action scale, input weights/bias, hidden weights/bias, output weights/bias. The
@@ -125,14 +171,8 @@ Controls include independent enumeration of all 4,096 Bernoulli sequences,
 known order statistics, ties/missing/nonfinite/outlier cases, supplied-policy
 execution, terminal/time-limit accounting, per-episode RNG isolation and an actual
 four-update **zero-learning-rate negative control**. That control executes 2,048
-training transitions but must preserve actor/critic weights and paired scores;
+training transitions but preserves actor/critic weights and paired scores;
 synthetic zero gains then check the gate, not additional independent training runs.
-
-## Confirmation status
-
-Confirmation has not yet been executed on this candidate. Exploratory improvement
-and passing evaluator controls alone do not satisfy issue #5. The final evidence
-must be inspected before claiming the predeclared criterion passed.
 
 ## Limits
 
