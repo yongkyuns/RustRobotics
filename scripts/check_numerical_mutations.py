@@ -35,6 +35,11 @@ SLAM = "rust_robotics_algo/src/slam/"
 EXHAUSTIVE = "exhaustive_small_maps_match_independent_oracle"
 COVARIANCE = "ekf_slam_covariance_remains_symmetric_and_psd"
 PROPAGATION = "state.sigma = &G * &state.sigma * G.transpose() + R;"
+CONSISTENCY = ("terminal robot NEES: consistency envelope:",
+               "terminal joint NEES: consistency envelope:",
+               "pre-update NIS: consistency envelope:")
+SINGLE_NOISE = ("// Innovation covariance: S = H Σ Hᵀ + Q\n"
+                "    let S = &H * &state.sigma * H.transpose() + config.observation_noise;")
 MUTATIONS = (
     Mutation("astar-greedy", PLANNER + "astar.rs", "self.g + self.h", "self.h",
              "grid_planner_oracles", "seeded_rectangular_maps_match_independent_oracle",
@@ -64,12 +69,26 @@ MUTATIONS = (
     Mutation("ekf-motion-jacobian-sign", SLAM + "ekf_slam.rs", "-increment[1]", "increment[1]",
              "lib", "slam::ekf_slam::numerical_tests::motion_jacobian_matches_independent_finite_differences",
              ("motion Jacobian:",)),
+    Mutation("ekf-process-noise-underreported", SLAM + "ekf_slam.rs", PROPAGATION,
+             PROPAGATION.replace("+ R;", "+ R * 0.01;"), "ekf_consistency",
+             "seeded_prediction_covariance_matches_errors", CONSISTENCY),
+    Mutation("ekf-process-noise-overreported", SLAM + "ekf_slam.rs", PROPAGATION,
+             PROPAGATION.replace("+ R;", "+ R * 4.0;"), "ekf_consistency",
+             "seeded_prediction_covariance_matches_errors", CONSISTENCY),
+    Mutation("ekf-single-measurement-noise", SLAM + "ekf_slam.rs", SINGLE_NOISE,
+             SINGLE_NOISE.replace("+ config.observation_noise;", "+ config.observation_noise * 0.1;"),
+             "ekf_consistency", "seeded_single_observation_consistency", CONSISTENCY),
+    Mutation("ekf-batch-measurement-noise", SLAM + "ekf_slam.rs",
+             "let S = &H * &state.sigma * H.transpose() + Q;",
+             "let S = &H * &state.sigma * H.transpose() + Q * 0.1;",
+             "ekf_consistency", "seeded_batch_observation_consistency", CONSISTENCY),
 )
 GROUPS = (
     ("grid_planner_oracles", "", 4),
     ("numerical_invariants", "", 4),
     ("lib", "slam::graph_slam::numerical_tests", 8),
     ("lib", "slam::ekf_slam::numerical_tests", 8),
+    ("ekf_consistency", "", 4),
 )
 
 
@@ -129,7 +148,7 @@ def main() -> None:
         command += ["--lib"] if target == "lib" else ["--test", target]
         if test:
             command.append(test)
-        command += ["--", "--test-threads=1"]
+        command += ["--", "--test-threads=1", "--show-output"]
         if markers:
             command.append("--exact")
         print(f"{label}: {' '.join(command)}", flush=True)
