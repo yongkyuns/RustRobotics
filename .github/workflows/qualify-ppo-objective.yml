@@ -52,7 +52,10 @@ jobs:
                   assert result.returncode == 101, entry
                   assert 'running 1 test\n' in output and 'test result: FAILED. 0 passed; 1 failed; 0 ignored;' in output, entry
                   assert re.search(r'^test ' + re.escape(prefix + failure) + r' \.\.\. FAILED$', output, re.MULTILINE), entry
-                  assert 'panicked at' in output and marker in output and 'assertion' in output, entry
+                  # Custom assert! messages need not contain the word assertion.
+                  # Require the exact named test, completed summary and its
+                  # designated assertion marker; unrelated panics do not qualify.
+                  assert 'panicked at' in output and marker in output, entry
               else:
                   assert result.returncode == 0, entry
                   if count is not None:
