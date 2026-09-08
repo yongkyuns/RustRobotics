@@ -1,0 +1,147 @@
+name: Qualify bounded PPO objective
+
+on:
+  push:
+    branches: ["fix/ppo-bounded-objective"]
+    paths: [".github/workflows/qualify-ppo-objective.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply guarded integration and qualify exact assertions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'ppo-objective-evidence'
+          evidence.mkdir()
+          prefix = 'trainer::objective_tests::'
+          report = {'commit': os.environ['GITHUB_SHA'], 'commands': []}
+          train = Path('rust_robotics_train/src/trainer.rs')
+          dist = Path('rust_robotics_train/src/ppo_distribution.rs')
+          paths = [train, dist, Path('rust_robotics_train/src/ppo_objective_tests.rs'), Path('rust_robotics_train/src/model.rs'), Path('rust_robotics_train/src/algorithm.rs'), Path('rust_robotics_core/src/lib.rs')]
+
+          def command(label, args, count=None, failure=None, marker=None):
+              result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+              output = result.stdout
+              (evidence / (label + '.log')).write_text(output)
+              print(output, flush=True)
+              entry = {'label': label, 'command': args, 'returncode': result.returncode, 'expected_count': count, 'expected_failure': failure, 'marker': marker}
+              report['commands'].append(entry)
+              if failure:
+                  assert result.returncode == 101, entry
+                  assert 'running 1 test\n' in output and 'test result: FAILED. 0 passed; 1 failed; 0 ignored;' in output, entry
+                  assert re.search(r'^test ' + re.escape(prefix + failure) + r' \.\.\. FAILED$', output, re.MULTILINE), entry
+                  assert 'panicked at' in output and marker in output and 'assertion' in output, entry
+              else:
+                  assert result.returncode == 0, entry
+                  if count is not None:
+                      assert f'test result: ok. {count} passed; 0 failed; 0 ignored;' in output, entry
+              entry['qualified'] = True
+              (evidence / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
+
+          def tests(label, test=None, marker=None):
+              args = ['cargo', 'test', '--locked', '-p', 'rust_robotics_train', '--lib', prefix + (test or ''), '--', '--test-threads=1', '--show-output']
+              if test:
+                  args.append('--exact')
+              command(label, args, count=1 if test else 17, failure=test, marker=marker)
+
+          try:
+              expected = {
+                  str(train): '773249c3895609a78cba4992cab247537fc24ff6',
+                  'rust_robotics_train/src/model.rs': '1d2cc5134d21d96f3dafa3033c7a75237a958a9c',
+                  'rust_robotics_train/src/algorithm.rs': 'cbb3a510839efa96888e30537816d5bf8e0c2064',
+                  'rust_robotics_core/src/lib.rs': 'd5443df343316eaa9b62a76bd209e70c7a16dfcc',
+              }
+              for path, sha in expected.items():
+                  data = Path(path).read_bytes()
+                  actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+                  assert actual == sha, (path, actual, sha)
+              subprocess.run(['git', 'apply', '--check', 'scripts/ppo-objective.patch'], check=True)
+              subprocess.run(['git', 'apply', 'scripts/ppo-objective.patch'], check=True)
+              subprocess.run(['cargo', 'fmt', '--all'], check=True)
+              tests('fixed-baseline')
+              mutations = [
+                  ('post-squash-clamping', dist, 'action: self.action_limit * latent.tanh(),', 'action: (self.action_limit * mean.tanh() + self.action_limit * (latent - mean)).clamp(-self.action_limit, self.action_limit),', 'samples_preserve_transform_and_seed', 'action must be the latent transform'),
+                  ('scalar-jacobian-omitted', dist, '- log_tanh_jacobian(latent)', '- 0.0 * log_tanh_jacobian(latent)', 'scalar_density_matches_independent_change_of_variables', 'PPO oracle mismatch'),
+                  ('tensor-jacobian-omitted', dist, '- log_tanh_jacobian_tensor(latents)', '- log_tanh_jacobian_tensor(latents).mul_scalar(0.0)', 'tensor_density_and_score_match_independent_reference', 'PPO oracle mismatch'),
+                  ('entropy-coefficient-ignored', train, 'policy_loss - entropy.mul_scalar(self.config.ppo.entropy_coef)', 'policy_loss - entropy.mul_scalar(0.0)', 'entropy_coefficient_changes_actual_actor_without_advantages', 'entropy coefficient must affect actor parameters'),
+                  ('value-coefficient-ignored', train, 'mse.mul_scalar(coefficient)', 'mse.mul_scalar(coefficient * 0.0 + 1.0)', 'value_coefficient_scales_loss_and_gradient', 'PPO oracle mismatch'),
+                  ('zero-value-adam-momentum', train, 'if self.config.ppo.value_loss_coef > 0.0 {', 'if self.config.ppo.value_loss_coef >= 0.0 {', 'zero_value_coefficient_freezes_existing_adam_momentum', 'zero coefficient must also freeze Adam momentum'),
+                  ('ppo-maximum-surrogate', train, 'unclipped.min_pair(clipped)', 'unclipped.max_pair(clipped)', 'clipping_values_and_gradients_cover_both_advantage_signs', 'PPO oracle mismatch'),
+              ]
+              fixed = {path: path.read_bytes() for path in paths}
+              for label, path, old, new, test, marker in mutations:
+                  text = path.read_text()
+                  assert text.count(old) == 1, (label, text.count(old))
+                  try:
+                      path.write_text(text.replace(old, new))
+                      tests(label, test, marker)
+                  finally:
+                      path.write_bytes(fixed[path])
+              assert all(path.read_bytes() == data for path, data in fixed.items())
+              tests('restored')
+              command('all-training-tests', ['cargo', 'test', '--locked', '-p', 'rust_robotics_train'], count=20)
+              command('strict-clippy', ['cargo', 'clippy', '--locked', '-p', 'rust_robotics_train', '--all-targets', '--', '-D', 'warnings'])
+              command('format', ['cargo', 'fmt', '--all', '--', '--check'])
+              subprocess.run(['git', 'diff', '--check'], check=True)
+              changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+              assert changed <= {str(p) for p in paths}, changed
+              report['qualified'] = True
+          except Exception as exc:
+              report['error'] = repr(exc)
+              raise
+          finally:
+              report['source_sha256'] = {}
+              for path in paths:
+                  data = path.read_bytes()
+                  destination = evidence / 'sources' / path
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_bytes(data)
+                  report['source_sha256'][str(path)] = hashlib.sha256(data).hexdigest()
+              (evidence / 'qualified.patch').write_text(subprocess.check_output(['git', 'diff'], text=True))
+              (evidence / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
+          PY
+      - name: Preserve source and qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-objective-evidence
+          path: ${{ runner.temp }}/ppo-objective-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish only qualified source edits on the feature branch
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/fix/ppo-bounded-objective'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_distribution.rs rust_robotics_train/src/ppo_objective_tests.rs rust_robotics_train/src/model.rs rust_robotics_train/src/algorithm.rs rust_robotics_core/src/lib.rs
+          git diff --cached --check
+          git commit -m 'fix: integrate qualified bounded PPO policy and weighted objectives'
+          auth=$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/ppo-bounded-objective
+          git rev-parse HEAD
