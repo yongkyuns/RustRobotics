@@ -10,6 +10,7 @@ use burn::{
     nn::{Linear, LinearConfig},
     tensor::{activation, backend::Backend, Tensor, TensorData},
 };
+use rand::Rng;
 use rust_robotics_core::{LinearSnapshot, PolicySnapshot, ValueSnapshot};
 
 /// Shared three-layer MLP used by both actor and critic.
@@ -31,6 +32,46 @@ impl<B: Backend> Mlp<B> {
             input: LinearConfig::new(input_dim, hidden_dim).init(device),
             hidden: LinearConfig::new(hidden_dim, hidden_dim).init(device),
             output: LinearConfig::new(hidden_dim, output_dim).init(device),
+        }
+    }
+
+    /// Eager caller-owned initialization with the same U(-1/sqrt(fan_in),
+    /// 1/sqrt(fan_in)) weight/bias law as Burn 0.20.1's default LinearConfig.
+    /// No backend seed or lazy random tensor is involved. Parameter IDs are
+    /// backend bookkeeping, not part of the numerical reproducibility contract.
+    pub(crate) fn new_with_rng<R: Rng + ?Sized>(
+        device: &B::Device,
+        input_dim: usize,
+        hidden_dim: usize,
+        output_dim: usize,
+        rng: &mut R,
+    ) -> Self {
+        fn layer<B: Backend, R: Rng + ?Sized>(
+            device: &B::Device,
+            in_dim: usize,
+            out_dim: usize,
+            rng: &mut R,
+        ) -> Linear<B> {
+            assert!(in_dim > 0 && out_dim > 0, "MLP dimensions must be positive");
+            let bound = (1.0 / in_dim as f64).sqrt() as f32;
+            let weight = (0..in_dim * out_dim)
+                .map(|_| rng.gen_range(-bound..bound))
+                .collect();
+            let bias = (0..out_dim).map(|_| rng.gen_range(-bound..bound)).collect();
+            linear_from_snapshot(
+                &LinearSnapshot {
+                    in_dim,
+                    out_dim,
+                    weight,
+                    bias,
+                },
+                device,
+            )
+        }
+        Self {
+            input: layer(device, input_dim, hidden_dim, rng),
+            hidden: layer(device, hidden_dim, hidden_dim, rng),
+            output: layer(device, hidden_dim, output_dim, rng),
         }
     }
 
