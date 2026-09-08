@@ -1103,10 +1103,12 @@ impl GraphSlam {
 
             let error = self.odometry_error(c);
 
+            // information = L L^T; whitening requires W^T W = information,
+            // hence W = L^T for both residuals and Jacobians.
             let sqrt_info = c
                 .information
                 .cholesky()
-                .map(|ch| ch.l())
+                .map(|ch| ch.l().transpose())
                 .unwrap_or(Matrix3::identity());
 
             let sqrt_robust = (c.robust_weight as f32).sqrt();
@@ -1160,10 +1162,12 @@ impl GraphSlam {
 
             let error = self.observation_error(c);
 
+            // information = L L^T; whitening requires W^T W = information,
+            // hence W = L^T for both residuals and Jacobians.
             let sqrt_info = c
                 .information
                 .cholesky()
-                .map(|ch| ch.l())
+                .map(|ch| ch.l().transpose())
                 .unwrap_or(Matrix2::identity());
 
             let sqrt_robust = (c.robust_weight as f32).sqrt();
@@ -1516,3 +1520,7 @@ mod tests {
         assert!(result.final_error < result.initial_error);
     }
 }
+
+#[cfg(test)]
+#[path = "graph_slam_numerical_tests.rs"]
+mod numerical_tests;

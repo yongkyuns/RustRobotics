@@ -108,7 +108,9 @@ fn raw_residuals(graph: &GraphSlam, state: &DVector<f64>) -> DVector<f64> {
         let dx = state[offset] - p.x;
         let dy = state[offset + 1] - p.y;
         values.push(f64::from(factor.measurement[0]) - dx.hypot(dy));
-        values.push(wrap(f64::from(factor.measurement[1]) - wrap(dy.atan2(dx) - p.z)));
+        values.push(wrap(
+            f64::from(factor.measurement[1]) - wrap(dy.atan2(dx) - p.z),
+        ));
     }
     DVector::from_vec(values)
 }
@@ -139,7 +141,10 @@ fn information_matrix(graph: &GraphSlam) -> DMatrix<f64> {
 }
 
 fn close(actual: f64, expected: f64, tolerance: f64, context: &str) {
-    assert!(actual.is_finite() && expected.is_finite(), "{context}: non-finite value");
+    assert!(
+        actual.is_finite() && expected.is_finite(),
+        "{context}: non-finite value"
+    );
     let bound = tolerance * expected.abs().max(1.0);
     assert!(
         (actual - expected).abs() <= bound,
@@ -156,16 +161,25 @@ fn check_factor_metrics(sparse: bool, odometry: bool) {
         let (offset, dimension, count) = if odometry {
             (0, 3, graph.odometry_constraints.len())
         } else {
-            (3 * graph.odometry_constraints.len(), 2, graph.observation_constraints.len())
+            (
+                3 * graph.odometry_constraints.len(),
+                2,
+                graph.observation_constraints.len(),
+            )
         };
         for index in 0..count {
             let begin = offset + dimension * index;
             let error = raw.rows(begin, dimension);
-            let block = omega.view((begin, begin), (dimension, dimension));
+            let block = omega.slice((begin, begin), (dimension, dimension));
             let expected = (error.transpose() * block * error)[0];
             // Geometry and whitening use f32 in production. 2e-6 relative/absolute
             // slack covers their rounding, not a changed covariance metric.
-            close(whitened.rows(begin, dimension).norm_squared(), expected, 2e-6, "factor metric");
+            close(
+                whitened.rows(begin, dimension).norm_squared(),
+                expected,
+                2e-6,
+                "factor metric",
+            );
         }
     }
 }
@@ -207,7 +221,8 @@ fn check_normal_equations(sparse: bool) {
             let mut minus = state.clone();
             plus[col] += h;
             minus[col] -= h;
-            let derivative = (raw_residuals(&graph, &plus) - raw_residuals(&graph, &minus)) / (2.0 * h);
+            let derivative =
+                (raw_residuals(&graph, &plus) - raw_residuals(&graph, &minus)) / (2.0 * h);
             numeric.set_column(col, &derivative);
         }
         let expected_hessian = numeric.transpose() * &omega * &numeric;
@@ -216,9 +231,19 @@ fn check_normal_equations(sparse: bool) {
         let actual_gradient = jacobian.transpose() * whitened;
         assert_eq!(actual_hessian.shape(), expected_hessian.shape());
         for row in 0..state.len() {
-            close(actual_gradient[row], expected_gradient[row], 2e-5, "finite-difference gradient");
+            close(
+                actual_gradient[row],
+                expected_gradient[row],
+                2e-5,
+                "finite-difference gradient",
+            );
             for col in 0..state.len() {
-                close(actual_hessian[(row, col)], expected_hessian[(row, col)], 2e-5, "finite-difference normal matrix");
+                close(
+                    actual_hessian[(row, col)],
+                    expected_hessian[(row, col)],
+                    2e-5,
+                    "finite-difference normal matrix",
+                );
             }
         }
     }
@@ -245,7 +270,12 @@ fn dense_sparse_correlated_linear_systems_agree() {
         for row in 0..dense_r.len() {
             close(dense_r[row], sparse_r[row], 2e-6, "backend residual");
             for col in 0..dense_j.ncols() {
-                close(dense_j[(row, col)], sparse_j[(row, col)], 2e-6, "backend Jacobian");
+                close(
+                    dense_j[(row, col)],
+                    sparse_j[(row, col)],
+                    2e-6,
+                    "backend Jacobian",
+                );
             }
         }
     }
@@ -253,7 +283,10 @@ fn dense_sparse_correlated_linear_systems_agree() {
 
 #[test]
 fn correlated_odometry_optimization_reaches_closed_form_solution() {
-    let measurements = [Vector3::new(1.4_f32, 0.2, 0.12), Vector3::new(0.7_f32, 1.1, -0.15)];
+    let measurements = [
+        Vector3::new(1.4_f32, 0.2, 0.12),
+        Vector3::new(0.7_f32, 1.1, -0.15),
+    ];
     let information = [
         Matrix3::new(9.0_f32, 2.0, 1.0, 2.0, 4.0, 0.2, 1.0, 0.2, 2.0),
         Matrix3::new(1.0_f32, -0.6, 0.1, -0.6, 3.0, 0.5, 0.1, 0.5, 4.0),
