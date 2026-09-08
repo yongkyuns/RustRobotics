@@ -34,6 +34,36 @@ jobs:
       - name: Audit Rust dependencies
         run: cargo audit
 
+  npm:
+    name: npm dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: Install locked npm dependencies without lifecycle scripts
+        run: npm ci --include=dev --ignore-scripts --no-audit
+      - name: Verify npm manifests are unchanged
+        run: git diff --exit-code -- package.json package-lock.json
+      # Policy and scope: BROWSER_TOOLING_SECURITY.md. Do not omit dev dependencies.
+      - name: Audit npm dependencies including browser tooling
+        shell: bash
+        run: npm --silent run audit:npm -- --json | tee npm-audit.json
+      - name: Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: npm-audit.json
+          if-no-files-found: ignore
+          retention-days: 14
+
   docs-javascript:
     name: Tutorial JavaScript syntax
     runs-on: ubuntu-latest

@@ -3,9 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:web-smoke": "playwright test --config playwright.config.mjs"
+    "test:web-smoke": "playwright test --config playwright.config.mjs",
+    "audit:npm": "npm audit --include=dev --audit-level=low"
   },
   "devDependencies": {
-    "@playwright/test": "1.54.2"
+    "@playwright/test": "1.56.1"
   }
 }
