@@ -38,6 +38,10 @@ jobs:
           evidence.mkdir()
           source = Path('rust_robotics_algo/src/slam/ekf_slam.rs')
           tests = Path('rust_robotics_algo/src/slam/ekf_slam_numerical_tests.rs')
+          test_text = tests.read_text()
+          old_config = '    let mut config = EkfSlamConfig::default();\n    config.observation_noise = Matrix2::new(0.04, 0.003, 0.003, 0.0025);'
+          assert test_text.count(old_config) == 1
+          tests.write_text(test_text.replace(old_config, '    let config = EkfSlamConfig {\n        observation_noise: Matrix2::new(0.04, 0.003, 0.003, 0.0025),\n        ..EkfSlamConfig::default()\n    };'))
           original = source.read_text()
           assert 'mod numerical_tests;' not in original
           module = '\n#[cfg(test)]\n#[path = "ekf_slam_numerical_tests.rs"]\nmod numerical_tests;\n'
@@ -145,11 +149,14 @@ jobs:
                   source.write_text(fixed)
           run('restored')
           assert source.read_text() == fixed
+          for path in (source, tests):
+              (evidence / path.name).write_bytes(path.read_bytes())
+          (evidence / 'qualified.patch').write_text(subprocess.check_output(['git', 'diff'], text=True))
           for label, command in [
-              ('algorithm-suite', ['cargo', 'test', '--locked', '-p', 'rust_robotics_algo']),
               ('algorithm-clippy', ['cargo', 'clippy', '--locked', '-p', 'rust_robotics_algo', '--all-targets', '--', '-D', 'warnings']),
               ('format', ['cargo', 'fmt', '--all', '--', '--check']),
               ('diff-check', ['git', 'diff', '--check']),
+              ('algorithm-suite', ['cargo', 'test', '--locked', '-p', 'rust_robotics_algo']),
           ]:
               p = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
               (evidence / (label + '.log')).write_text(p.stdout)
@@ -157,9 +164,6 @@ jobs:
               assert p.returncode == 0, label
           changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           assert changed <= {str(source), str(tests)}, changed
-          for path in (source, tests):
-              (evidence / path.name).write_bytes(path.read_bytes())
-          (evidence / 'qualified.patch').write_text(subprocess.check_output(['git', 'diff'], text=True))
           print('EKF QUALIFICATION COMPLETE: baseline reproduced, fixed tests pass, six mutations detected, sources restored.', flush=True)
           PY
       - name: Preserve qualification evidence
