@@ -24,5 +24,8 @@ jobs:
         with:
           workspaces: rust_robotics_algo
 
+      - name: Run correlated Graph SLAM numerical oracles
+        run: cargo test --locked -p rust_robotics_algo --lib slam::graph_slam::numerical_tests --verbose
+
       - name: Run numerical invariant tests
         run: cargo test -p rust_robotics_algo --test numerical_invariants --verbose
