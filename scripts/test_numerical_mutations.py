@@ -1,7 +1,9 @@
 """The qualification harness must fail closed when test execution is ambiguous."""
 import unittest
 
-from check_numerical_mutations import Mutation, replace_source, validate_result
+from check_numerical_mutations import (
+    GROUPS, MUTATIONS, Mutation, evidence_log_name, replace_source, validate_result,
+)
 
 
 class QualificationTests(unittest.TestCase):
@@ -53,6 +55,16 @@ class QualificationTests(unittest.TestCase):
         validate_result(0, success, 1)
         with self.assertRaises(RuntimeError):
             self.check_failure(0, success)
+
+    def test_evidence_filenames_are_portable_and_unique(self):
+        labels = [m.label for m in MUTATIONS]
+        labels += [stage + (test or target) for stage in ("before-", "restored-")
+                   for target, test, _ in GROUPS]
+        names = [evidence_log_name(label) for label in labels]
+        self.assertEqual(len(names), len(set(names)))
+        for name in names:
+            self.assertRegex(name, r"^[A-Za-z0-9_.-]+\.log$")
+        self.assertEqual(evidence_log_name("a::b"), "a--b.log")
 
     def test_source_anchor_cardinality(self):
         mutation = Mutation("m", "source", "old", "new", "lib", "oracle", ("cost",), matches=2)

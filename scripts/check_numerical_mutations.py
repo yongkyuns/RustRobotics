@@ -99,6 +99,11 @@ def replace_source(text: str, mutation: Mutation) -> str:
     return text.replace(mutation.before, mutation.after, 1)
 
 
+def evidence_log_name(label: str) -> str:
+    # GitHub artifacts also need filenames that can be extracted on Windows.
+    return re.sub(r"[^A-Za-z0-9_.-]", "-", label) + ".log"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="new evidence directory")
@@ -128,6 +133,7 @@ def main() -> None:
         if markers:
             command.append("--exact")
         print(f"{label}: {' '.join(command)}", flush=True)
+        log_path = output / evidence_log_name(label)
         try:
             result = subprocess.run(command, cwd=work, env=env, text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
@@ -135,9 +141,9 @@ def main() -> None:
             partial = error.stdout or b""
             if isinstance(partial, bytes):
                 partial = partial.decode("utf-8", errors="replace")
-            (output / f"{label}.log").write_text(partial, encoding="utf-8")
+            log_path.write_text(partial, encoding="utf-8")
             raise RuntimeError(f"{label}: timed out, not mutation evidence") from error
-        (output / f"{label}.log").write_text(result.stdout, encoding="utf-8")
+        log_path.write_text(result.stdout, encoding="utf-8")
         report["runs"].append({"label": label, "command": command, "exit_status": result.returncode,
                                "expected_tests": count, "expected_failure": test if markers else None})
         save()

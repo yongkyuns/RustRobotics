@@ -141,7 +141,9 @@ fn next_word(state: &mut u32) -> u32 {
 fn seeded_rectangular_maps_match_independent_oracle() {
     for seed in 1_u32..=24 {
         let mut state = seed ^ 0xa341_316c;
-        let blocked: Vec<bool> = (0..56).map(|_| next_word(&mut state) % 5 == 0).collect();
+        let blocked: Vec<bool> = (0..56)
+            .map(|_| next_word(&mut state).is_multiple_of(5))
+            .collect();
         let mut pairs = vec![(0, 55), (7, 48)];
         for _ in 0..6 {
             let start = (next_word(&mut state) % 56) as usize;
