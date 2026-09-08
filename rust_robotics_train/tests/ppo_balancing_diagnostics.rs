@@ -8,10 +8,14 @@ use rust_robotics_algo::{
     nalgebra::{SMatrix, SVector},
 };
 use rust_robotics_train::{
-    PendulumEnv, PendulumEnvConfig, PolicySnapshot, PpoSharedState, PpoTrainerConfig,
-    PpoTrainerSession, ValueSnapshot,
+    PendulumEnv, PendulumEnvConfig, PpoSharedState, PpoTrainerConfig, PpoTrainerSession,
+    ValueSnapshot,
 };
-use std::{fs, io::{self, BufWriter, Write}, path::Path};
+use std::{
+    fs,
+    io::{self, BufWriter, Write},
+    path::Path,
+};
 
 const SEEDS: [u64; 4] = [201, 202, 203, 204];
 const CHECKPOINTS: [usize; 4] = [0, 128, 512, 2048];
@@ -22,7 +26,10 @@ type Matrix = SMatrix<f64, 4, 4>;
 type Vector = SVector<f64, 4>;
 
 fn evaluation_config() -> PendulumEnvConfig {
-    PendulumEnvConfig { max_steps: CAP, ..Default::default() }
+    PendulumEnvConfig {
+        max_steps: CAP,
+        ..Default::default()
+    }
 }
 
 fn episode_seed(seed: u64, episode: usize) -> u64 {
@@ -30,10 +37,18 @@ fn episode_seed(seed: u64, episode: usize) -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ending { Angle, Position, Both, Timeout }
+enum Ending {
+    Angle,
+    Position,
+    Both,
+    Timeout,
+}
 
 fn ending(state: [f32; 4], c: PendulumEnvConfig, steps: usize) -> Option<Ending> {
-    match (state[2].abs() > c.max_angle_rad, state[0].abs() > c.max_position_m) {
+    match (
+        state[2].abs() > c.max_angle_rad,
+        state[0].abs() > c.max_position_m,
+    ) {
         (true, true) => Some(Ending::Both),
         (true, false) => Some(Ending::Angle),
         (false, true) => Some(Ending::Position),
@@ -51,8 +66,10 @@ fn lqr_reference(c: PendulumEnvConfig) -> ([f32; 4], Matrix, usize) {
     let a = a.cast::<f64>();
     let b = b.cast::<f64>();
     let q = Matrix::from_diagonal(&Vector::new(
-        c.reward_position_weight.into(), c.reward_velocity_weight.into(),
-        c.reward_angle_weight.into(), c.reward_angular_velocity_weight.into(),
+        c.reward_position_weight.into(),
+        c.reward_velocity_weight.into(),
+        c.reward_angle_weight.into(),
+        c.reward_angular_velocity_weight.into(),
     ));
     let r = f64::from(c.reward_action_weight);
     assert!(r > 0.0 && r.is_finite());
@@ -65,16 +82,28 @@ fn lqr_reference(c: PendulumEnvConfig) -> ([f32; 4], Matrix, usize) {
         p = next;
         assert!(p.iter().all(|x| x.is_finite()));
         if residual < 1e-12 {
-            assert!(p.cholesky().is_some(), "DARE solution must be positive definite");
+            assert!(
+                p.cholesky().is_some(),
+                "DARE solution must be positive definite"
+            );
             let k = (b.transpose() * p * a) / (r + (b.transpose() * p * b)[0]);
-            return ([k[0] as f32, k[1] as f32, k[2] as f32, k[3] as f32], p, iteration);
+            return (
+                [k[0] as f32, k[1] as f32, k[2] as f32, k[3] as f32],
+                p,
+                iteration,
+            );
         }
     }
     panic!("diagnostic DARE failed to converge");
 }
 
 fn feedback(gain: [f32; 4], observation: [f32; 4], limit: f32) -> f32 {
-    (-gain.iter().zip(observation).map(|(k, x)| k * x).sum::<f32>()).clamp(-limit, limit)
+    (-gain
+        .iter()
+        .zip(observation)
+        .map(|(k, x)| k * x)
+        .sum::<f32>())
+    .clamp(-limit, limit)
 }
 
 fn value(snapshot: &ValueSnapshot, observation: [f32; 4]) -> f64 {
@@ -86,11 +115,24 @@ fn value(snapshot: &ValueSnapshot, observation: [f32; 4]) -> f64 {
 }
 
 fn check_snapshot(shared: &PpoSharedState) {
-    for layer in [&shared.policy.input, &shared.policy.hidden, &shared.policy.output,
-        &shared.value.input, &shared.value.hidden, &shared.value.output] {
-        assert_eq!(layer.in_dim.checked_mul(layer.out_dim), Some(layer.weight.len()));
+    for layer in [
+        &shared.policy.input,
+        &shared.policy.hidden,
+        &shared.policy.output,
+        &shared.value.input,
+        &shared.value.hidden,
+        &shared.value.output,
+    ] {
+        assert_eq!(
+            layer.in_dim.checked_mul(layer.out_dim),
+            Some(layer.weight.len())
+        );
         assert_eq!(layer.out_dim, layer.bias.len());
-        assert!(layer.weight.iter().chain(&layer.bias).all(|x| x.is_finite()));
+        assert!(layer
+            .weight
+            .iter()
+            .chain(&layer.bias)
+            .all(|x| x.is_finite()));
     }
     assert_eq!(shared.policy.action_limit, 20.0);
     assert_eq!(shared.policy.action_std, 2.0);
@@ -136,32 +178,61 @@ fn episode(
     for steps in 1..=c.max_steps {
         assert!(observation.iter().all(|x| x.is_finite()));
         let action = policy(observation);
-        assert!(action.is_finite() && action.abs() <= c.max_force, "finite bounded action required");
+        assert!(
+            action.is_finite() && action.abs() <= c.max_force,
+            "finite bounded action required"
+        );
         absolute_force_sum += f64::from(action.abs());
         near_limit_steps += usize::from(action.abs() >= 0.95 * c.max_force);
         let before = env.state();
         let result = env.step_with_rng(action, &mut rng);
         let state = env.state();
-        assert!(state.iter().chain(result.observation.iter()).all(|x| x.is_finite()));
+        assert!(state
+            .iter()
+            .chain(result.observation.iter())
+            .all(|x| x.is_finite()));
         assert!(result.reward.is_finite());
-        for i in 0..4 { maximum_absolute_state[i] = maximum_absolute_state[i].max(state[i].abs()); }
+        for i in 0..4 {
+            maximum_absolute_state[i] = maximum_absolute_state[i].max(state[i].abs());
+        }
         total_return += f64::from(result.reward);
         discounted_return += discount * f64::from(result.reward);
         discount *= f64::from(PpoTrainerConfig::default().ppo.gamma);
         let physical = [state[0], state[1], state[2], state[3]];
         let reason = ending(physical, c, steps);
-        assert_eq!(result.done, reason.is_some(), "independent episode-end classification");
+        assert_eq!(
+            result.done,
+            reason.is_some(),
+            "independent episode-end classification"
+        );
         assert_eq!(result.truncated, reason == Some(Ending::Timeout));
         if let Some(key) = trace_key {
-            writeln!(trace, "{key}\t{seed}\t{steps}\t{:?}\t{observation:?}\t{action}\t{}\t{physical:?}\t{}\t{}",
-                [before[0], before[1], before[2], before[3]], result.reward, result.done, result.truncated)?;
+            writeln!(
+                trace,
+                "{key}\t{seed}\t{steps}\t{:?}\t{observation:?}\t{action}\t{}\t{physical:?}\t{}\t{}",
+                [before[0], before[1], before[2], before[3]],
+                result.reward,
+                result.done,
+                result.truncated
+            )?;
         }
         if let Some(reason) = reason {
             return Ok(Episode {
-                total_return, discounted_return, steps, ending: reason, initial_observation,
+                total_return,
+                discounted_return,
+                steps,
+                ending: reason,
+                initial_observation,
                 final_state: physical,
-                maximum_absolute_state: [maximum_absolute_state[0], maximum_absolute_state[1], maximum_absolute_state[2], maximum_absolute_state[3]],
-                absolute_force_sum, near_limit_steps, initial_value,
+                maximum_absolute_state: [
+                    maximum_absolute_state[0],
+                    maximum_absolute_state[1],
+                    maximum_absolute_state[2],
+                    maximum_absolute_state[3],
+                ],
+                absolute_force_sum,
+                near_limit_steps,
+                initial_value,
             });
         }
         observation = result.observation;
@@ -170,21 +241,58 @@ fn episode(
 }
 
 fn emit_episode(writer: &mut impl Write, key: &str, seed: u64, e: &Episode) -> io::Result<()> {
-    let initial_value = e.initial_value.map(|x| x.to_string()).unwrap_or_else(|| "none".into());
-    writeln!(writer, "{key}\t{seed}\t{}\t{}\t{}\t{:?}\t{}\t{}\t{initial_value}\t{:?}\t{:?}\t{:?}",
-        e.total_return, e.discounted_return, e.steps, e.ending, e.absolute_force_sum,
-        e.near_limit_steps, e.initial_observation, e.final_state, e.maximum_absolute_state)
+    let initial_value = e
+        .initial_value
+        .map(|x| x.to_string())
+        .unwrap_or_else(|| "none".into());
+    writeln!(
+        writer,
+        "{key}\t{seed}\t{}\t{}\t{}\t{:?}\t{}\t{}\t{initial_value}\t{:?}\t{:?}\t{:?}",
+        e.total_return,
+        e.discounted_return,
+        e.steps,
+        e.ending,
+        e.absolute_force_sum,
+        e.near_limit_steps,
+        e.initial_observation,
+        e.final_state,
+        e.maximum_absolute_state
+    )
 }
 
-fn emit_snapshot(writer: &mut impl Write, seed: u64, updates: usize, shared: &PpoSharedState) -> io::Result<()> {
+fn emit_snapshot(
+    writer: &mut impl Write,
+    seed: u64,
+    updates: usize,
+    shared: &PpoSharedState,
+) -> io::Result<()> {
     // Architecture is the unchanged 4x64x64x1 recipe. Hex encodes exact f32 bits;
     // actor metadata precedes layers; each layer is weights followed by biases.
     for (kind, layers, metadata) in [
-        ("actor", [&shared.policy.input, &shared.policy.hidden, &shared.policy.output], vec![shared.policy.action_limit, shared.policy.action_std]),
-        ("critic", [&shared.value.input, &shared.value.hidden, &shared.value.output], Vec::new()),
+        (
+            "actor",
+            [
+                &shared.policy.input,
+                &shared.policy.hidden,
+                &shared.policy.output,
+            ],
+            vec![shared.policy.action_limit, shared.policy.action_std],
+        ),
+        (
+            "critic",
+            [
+                &shared.value.input,
+                &shared.value.hidden,
+                &shared.value.output,
+            ],
+            Vec::new(),
+        ),
     ] {
-        let hex = metadata.iter().chain(layers.iter().flat_map(|l| l.weight.iter().chain(&l.bias)))
-            .map(|x| format!("{:08x}", x.to_bits())).collect::<String>();
+        let hex = metadata
+            .iter()
+            .chain(layers.iter().flat_map(|l| l.weight.iter().chain(&l.bias)))
+            .map(|x| format!("{:08x}", x.to_bits()))
+            .collect::<String>();
         writeln!(writer, "{seed}\t{updates}\t{kind}\t{hex}")?;
     }
     Ok(())
@@ -204,20 +312,48 @@ fn measure_default_balancing_development_panel() -> io::Result<()> {
     fs::create_dir_all(directory)?;
     let c = evaluation_config();
     let (gain, _, iterations) = lqr_reference(c);
-    fs::write(directory.join("lqr.txt"), format!("gain={gain:?}\niterations={iterations}\n"))?;
-    fs::write(directory.join("config.txt"), format!("training={:?}\nevaluation={c:?}\nseeds={SEEDS:?}\ncheckpoints={CHECKPOINTS:?}\n", PpoTrainerConfig::default()))?;
+    fs::write(
+        directory.join("lqr.txt"),
+        format!("gain={gain:?}\niterations={iterations}\n"),
+    )?;
+    fs::write(
+        directory.join("config.txt"),
+        format!(
+            "training={:?}\nevaluation={c:?}\nseeds={SEEDS:?}\ncheckpoints={CHECKPOINTS:?}\n",
+            PpoTrainerConfig::default()
+        ),
+    )?;
     let mut scores = output(directory, "episodes.tsv", "controller\ttraining_seed\tupdates\tepisode\tevaluation_seed\treturn\tdiscounted_return\tsteps\tending\tabs_force_sum\tnear_limit_steps\tinitial_value\tinitial_observation\tfinal_state\tmax_abs_state")?;
     let mut traces = output(directory, "traces.tsv", "controller\ttraining_seed\tupdates\tepisode\tevaluation_seed\tstep\tbefore_state\tobservation\taction\treward\tafter_state\tdone\ttruncated")?;
-    let mut snapshots = output(directory, "snapshots.tsv", "training_seed\tupdates\tkind\tf32_hex")?;
-    let mut metrics = output(directory, "metrics.tsv", "training_seed\tupdates\tenv_steps\tepisodes\tmean_return\tpolicy_loss\tvalue_loss")?;
+    let mut snapshots = output(
+        directory,
+        "snapshots.tsv",
+        "training_seed\tupdates\tkind\tf32_hex",
+    )?;
+    let mut metrics = output(
+        directory,
+        "metrics.tsv",
+        "training_seed\tupdates\tenv_steps\tepisodes\tmean_return\tpolicy_loss\tvalue_loss",
+    )?;
     for seed in SEEDS {
         for controller in ["zero", "lqr"] {
             for index in 0..EPISODES {
                 let key = format!("{controller}\t{seed}\t0\t{index}");
                 let e_seed = episode_seed(seed, index);
-                let result = episode(c, e_seed,
-                    |obs| if controller == "zero" { 0.0 } else { feedback(gain, obs, c.max_force) },
-                    None, &mut traces, (index < 2).then_some(key.as_str()))?;
+                let result = episode(
+                    c,
+                    e_seed,
+                    |obs| {
+                        if controller == "zero" {
+                            0.0
+                        } else {
+                            feedback(gain, obs, c.max_force)
+                        }
+                    },
+                    None,
+                    &mut traces,
+                    (index < 2).then_some(key.as_str()),
+                )?;
                 emit_episode(&mut scores, &key, e_seed, &result)?;
             }
         }
@@ -229,30 +365,60 @@ fn measure_default_balancing_development_panel() -> io::Result<()> {
             let m = session.metrics();
             assert_eq!(m.total_updates, updates);
             assert_eq!(m.total_env_steps, updates * 512);
-            assert!([m.mean_episode_return, m.last_policy_loss, m.last_value_loss].iter().all(|x| x.is_finite()));
-            writeln!(metrics, "{seed}\t{updates}\t{}\t{}\t{}\t{}\t{}", m.total_env_steps, m.total_episodes, m.mean_episode_return, m.last_policy_loss, m.last_value_loss)?;
+            assert!(
+                [m.mean_episode_return, m.last_policy_loss, m.last_value_loss]
+                    .iter()
+                    .all(|x| x.is_finite())
+            );
+            writeln!(
+                metrics,
+                "{seed}\t{updates}\t{}\t{}\t{}\t{}\t{}",
+                m.total_env_steps,
+                m.total_episodes,
+                m.mean_episode_return,
+                m.last_policy_loss,
+                m.last_value_loss
+            )?;
             let shared = session.shared_state();
             check_snapshot(&shared);
             emit_snapshot(&mut snapshots, seed, updates, &shared)?;
             for index in 0..EPISODES {
                 let key = format!("ppo\t{seed}\t{updates}\t{index}");
                 let e_seed = episode_seed(seed, index);
-                let result = episode(c, e_seed, |obs| shared.policy.act(obs), Some(&shared.value),
-                    &mut traces, (index < 2).then_some(key.as_str()))?;
+                let result = episode(
+                    c,
+                    e_seed,
+                    |obs| shared.policy.act(obs),
+                    Some(&shared.value),
+                    &mut traces,
+                    (index < 2).then_some(key.as_str()),
+                )?;
                 emit_episode(&mut scores, &key, e_seed, &result)?;
             }
-            scores.flush()?; traces.flush()?; snapshots.flush()?; metrics.flush()?;
-            println!("development seed={seed} updates={updates} transitions={}", updates * 512);
+            scores.flush()?;
+            traces.flush()?;
+            snapshots.flush()?;
+            metrics.flush()?;
+            println!(
+                "development seed={seed} updates={updates} transitions={}",
+                updates * 512
+            );
         }
     }
-    scores.flush()?; traces.flush()?; snapshots.flush()?; metrics.flush()?;
+    scores.flush()?;
+    traces.flush()?;
+    snapshots.flush()?;
+    metrics.flush()?;
     Ok(())
 }
 
 #[test]
 fn failure_labels_respect_strict_limits_and_precedence() {
     let c = evaluation_config();
-    assert_eq!(ending([c.max_position_m, 0.0, c.max_angle_rad, 0.0], c, 1), None);
+    assert_eq!(
+        ending([c.max_position_m, 0.0, c.max_angle_rad, 0.0], c, 1),
+        None
+    );
     assert_eq!(ending([3.0, 0.0, 0.0, 0.0], c, CAP), Some(Ending::Position));
     assert_eq!(ending([0.0, 0.0, -0.7, 0.0], c, CAP), Some(Ending::Angle));
     assert_eq!(ending([-3.0, 0.0, 0.7, 0.0], c, CAP), Some(Ending::Both));
@@ -267,28 +433,52 @@ fn lqr_matches_independent_schur_reference_and_stable_closed_loop() {
     // episode outcomes, using the same float32 A/B/Q/R promoted to float64.
     let reference = [-13.26732451, -19.68876114, 155.46190748, 64.60218293];
     for (actual, expected) in gain.into_iter().zip(reference) {
-        assert!((f64::from(actual) - expected).abs() < 2e-5, "independent LQR gain reference");
+        assert!(
+            (f64::from(actual) - expected).abs() < 2e-5,
+            "independent LQR gain reference"
+        );
     }
     let (a, b) = Model::default().model(c.dt);
-    let a = a.cast::<f64>(); let b = b.cast::<f64>();
+    let a = a.cast::<f64>();
+    let b = b.cast::<f64>();
     let k = SMatrix::<f64, 1, 4>::from_row_slice(&gain.map(f64::from));
     let closed = a - b * k;
     assert!(closed.complex_eigenvalues().iter().all(|x| x.norm() < 1.0));
-    let q = Matrix::from_diagonal(&Vector::new(c.reward_position_weight.into(), c.reward_velocity_weight.into(), c.reward_angle_weight.into(), c.reward_angular_velocity_weight.into()));
-    let residual = p - (q + closed.transpose() * p * closed + k.transpose() * k * f64::from(c.reward_action_weight));
-    assert!(residual.amax() / p.amax() < 1e-8, "independent Bellman residual");
+    let q = Matrix::from_diagonal(&Vector::new(
+        c.reward_position_weight.into(),
+        c.reward_velocity_weight.into(),
+        c.reward_angle_weight.into(),
+        c.reward_angular_velocity_weight.into(),
+    ));
+    let residual = p
+        - (q + closed.transpose() * p * closed
+            + k.transpose() * k * f64::from(c.reward_action_weight));
+    assert!(
+        residual.amax() / p.amax() < 1e-8,
+        "independent Bellman residual"
+    );
     assert_eq!(feedback(gain, [0.0; 4], c.max_force), 0.0);
-    assert_eq!(feedback(gain, [0.0, 0.0, 100.0, 0.0], c.max_force), -c.max_force);
+    assert_eq!(
+        feedback(gain, [0.0, 0.0, 100.0, 0.0], c.max_force),
+        -c.max_force
+    );
 }
 
 fn quiet_config() -> PendulumEnvConfig {
     PendulumEnvConfig {
-        reset_position_range_m: 0.0, reset_velocity_range_mps: 0.0,
-        reset_angle_range_rad: 0.0, reset_angular_velocity_range_radps: 0.0,
-        observation_position_noise_m: 0.0, observation_velocity_noise_mps: 0.0,
-        observation_angle_noise_rad: 0.0, observation_angular_velocity_noise_radps: 0.0,
-        action_noise_force_n: 0.0, disturbance_force_n: 0.0,
-        disturbance_probability_per_step: 0.0, max_steps: 5, ..Default::default()
+        reset_position_range_m: 0.0,
+        reset_velocity_range_mps: 0.0,
+        reset_angle_range_rad: 0.0,
+        reset_angular_velocity_range_radps: 0.0,
+        observation_position_noise_m: 0.0,
+        observation_velocity_noise_mps: 0.0,
+        observation_angle_noise_rad: 0.0,
+        observation_angular_velocity_noise_radps: 0.0,
+        action_noise_force_n: 0.0,
+        disturbance_force_n: 0.0,
+        disturbance_probability_per_step: 0.0,
+        max_steps: 5,
+        ..Default::default()
     }
 }
 
@@ -323,9 +513,20 @@ fn noisy_observation_control_matches_explicit_environment_loop() {
         total += f64::from(step.reward);
         if step.done {
             assert_eq!(measured.steps, i);
-            assert_eq!(measured.total_return, total, "noisy policy rollout reference");
+            assert_eq!(
+                measured.total_return, total,
+                "noisy policy rollout reference"
+            );
             assert_eq!(measured.absolute_force_sum, force);
-            assert_eq!(measured.final_state, [env.state()[0], env.state()[1], env.state()[2], env.state()[3]]);
+            assert_eq!(
+                measured.final_state,
+                [
+                    env.state()[0],
+                    env.state()[1],
+                    env.state()[2],
+                    env.state()[3]
+                ]
+            );
             return;
         }
         obs = step.observation;
@@ -337,11 +538,30 @@ fn noisy_observation_control_matches_explicit_environment_loop() {
 fn episode_streams_and_trace_logging_do_not_change_outcomes() {
     let c = evaluation_config();
     let (gain, _, _) = lqr_reference(c);
-    let a = episode(c, 3301, |obs| feedback(gain, obs, 20.0), None, &mut io::sink(), None).unwrap();
+    let a = episode(
+        c,
+        3301,
+        |obs| feedback(gain, obs, 20.0),
+        None,
+        &mut io::sink(),
+        None,
+    )
+    .unwrap();
     let mut trace = Vec::new();
     let _unrelated = episode(c, 9876, |_| 20.0, None, &mut io::sink(), None).unwrap();
-    let b = episode(c, 3301, |obs| feedback(gain, obs, 20.0), None, &mut trace, Some("lqr\t0\t0\t0")).unwrap();
-    assert_eq!(a, b, "trace and unrelated episodes must not consume policy randomness");
+    let b = episode(
+        c,
+        3301,
+        |obs| feedback(gain, obs, 20.0),
+        None,
+        &mut trace,
+        Some("lqr\t0\t0\t0"),
+    )
+    .unwrap();
+    assert_eq!(
+        a, b,
+        "trace and unrelated episodes must not consume policy randomness"
+    );
     assert_eq!(String::from_utf8(trace).unwrap().lines().count(), b.steps);
 }
 
