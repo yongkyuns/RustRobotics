@@ -1,0 +1,158 @@
+name: Independent PPO pipeline audit
+
+on:
+  push:
+    branches: ["audit/ppo-reference-pipeline"]
+    paths: [".github/workflows/ppo-reference-audit.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Export actual Rust updates and stable-start control
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: never
+      PPO_AUDIT_DIR: ${{ runner.temp }}/ppo-audit/data
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Preserve baseline and add observational hooks
+        shell: bash
+        run: |
+          mkdir -p "$PPO_AUDIT_DIR" "$RUNNER_TEMP/ppo-audit/provenance"
+          git rev-parse HEAD > "$RUNNER_TEMP/ppo-audit/provenance/commit.txt"
+          rustc -Vv > "$RUNNER_TEMP/ppo-audit/provenance/rustc.txt"
+          git diff d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs rust_robotics_train/src/model.rs Cargo.lock | tee "$RUNNER_TEMP/ppo-audit/provenance/baseline-diff.txt"
+          test ! -s "$RUNNER_TEMP/ppo-audit/provenance/baseline-diff.txt"
+          python3 scripts/prepare_ppo_reference_audit.py
+          cargo fmt --all
+          cp rust_robotics_train/src/trainer.rs "$RUNNER_TEMP/ppo-audit/provenance/instrumented-trainer.rs"
+          cp rust_robotics_train/src/ppo_reference_audit.rs "$RUNNER_TEMP/ppo-audit/provenance/ppo_reference_audit.rs"
+          cp scripts/prepare_ppo_reference_audit.py scripts/compare_ppo_torch.py scripts/reference_ppo_rust_env.py "$RUNNER_TEMP/ppo-audit/provenance/"
+          cp rust_robotics_train/examples/ppo_audit_env.rs Cargo.lock "$RUNNER_TEMP/ppo-audit/provenance/"
+      - name: Strict checks and unchanged unit tests
+        shell: bash
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/ppo-audit/clippy.log"
+          cargo test --locked -p rust_robotics_train --lib 2>&1 | tee "$RUNNER_TEMP/ppo-audit/unit-tests.log"
+      - name: Export exact minibatches, gradients and Adam updates
+        shell: bash
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib trainer::reference_audit::export_frozen_optimizer_batches -- --ignored --exact --test-threads=1 --show-output 2>&1 | tee "$RUNNER_TEMP/ppo-audit/batches.log"
+      - name: Verify direct Rust transport fixture and build environment server
+        shell: bash
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib trainer::reference_audit::export_environment_transport_fixture -- --ignored --exact --test-threads=1 --show-output 2>&1 | tee "$RUNNER_TEMP/ppo-audit/transport.log"
+          cargo build --locked --release -p rust_robotics_train --example ppo_audit_env 2>&1 | tee "$RUNNER_TEMP/ppo-audit/server-build.log"
+          cp target/release/examples/ppo_audit_env "$PPO_AUDIT_DIR/ppo_audit_env"
+      - name: Measure known feedback represented by existing network and PPO continuation
+        shell: bash
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib trainer::reference_audit::measure_constructive_stable_start -- --ignored --exact --test-threads=1 --show-output 2>&1 | tee "$RUNNER_TEMP/ppo-audit/stable-start.log"
+      - name: Restore original trainer and preserve source hashes
+        if: always()
+        shell: bash
+        run: |
+          git checkout -- rust_robotics_train/src/trainer.rs
+          git diff --exit-code -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs rust_robotics_train/src/model.rs Cargo.lock
+          python3 - <<'PY'
+          import os,hashlib,json
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'ppo-audit'
+          hashes={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file() and p.name!='manifest.json'}
+          (root/'manifest.json').write_text(json.dumps(hashes,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-rust-audit
+          path: ${{ runner.temp }}/ppo-audit/
+          retention-days: 30
+
+  torch:
+    name: Independent PyTorch gradient and optimizer comparison
+    needs: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-rust-audit
+          path: ${{ runner.temp }}/audit
+      - name: Install pinned CPU reference
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6
+          python -m pip freeze > "${{ runner.temp }}/audit/torch-requirements.txt"
+      - name: Compare every layer and all consecutive optimizer steps
+        shell: bash
+        run: python scripts/compare_ppo_torch.py --input "${{ runner.temp }}/audit/data" 2>&1 | tee "${{ runner.temp }}/audit/torch.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-torch-comparison
+          path: |
+            ${{ runner.temp }}/audit/data/torch-comparison.json
+            ${{ runner.temp }}/audit/torch.log
+            ${{ runner.temp }}/audit/torch-requirements.txt
+          retention-days: 30
+
+  reference:
+    name: Reference PPO seed ${{ matrix.seed }} on actual Rust env
+    needs: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [201, 202, 203, 204]
+    env:
+      OMP_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-rust-audit
+          path: ${{ runner.temp }}/audit
+      - name: Install pinned trusted reference implementation
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 stable-baselines3==2.7.0 gymnasium==1.2.0
+          python -m pip freeze > "${{ runner.temp }}/reference-requirements.txt"
+      - name: Validate adapter then execute all predeclared checkpoints
+        shell: bash
+        run: |
+          chmod +x "${{ runner.temp }}/audit/data/ppo_audit_env"
+          python scripts/reference_ppo_rust_env.py --binary "${{ runner.temp }}/audit/data/ppo_audit_env" --fixture "${{ runner.temp }}/audit/data/transport.tsv" --seed ${{ matrix.seed }} --output "${{ runner.temp }}/reference-${{ matrix.seed }}" 2>&1 | tee "${{ runner.temp }}/reference.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-sb3-${{ matrix.seed }}
+          path: |
+            ${{ runner.temp }}/reference-${{ matrix.seed }}/
+            ${{ runner.temp }}/reference.log
+            ${{ runner.temp }}/reference-requirements.txt
+          retention-days: 30
