@@ -1,0 +1,146 @@
+name: Qualify seeded PPO sessions
+
+on:
+  push:
+    branches: ["feat/ppo-session-seeding"]
+    paths: [".github/workflows/qualify-ppo-seeding.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Integrate guarded sources and qualify replay defects
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'ppo-seeding-evidence'
+          evidence.mkdir()
+          train = Path('rust_robotics_train/src/trainer.rs')
+          model = Path('rust_robotics_train/src/model.rs')
+          env = Path('rust_robotics_train/src/env.rs')
+          test_file = Path('rust_robotics_train/src/ppo_seed_tests.rs')
+          paths = [train, model, env, test_file, Path('rust_robotics_train/README.md')]
+          report = {'input_commit': os.environ['GITHUB_SHA'], 'commands': []}
+          prefix = 'trainer::seed_tests::'
+
+          def command(label, args, count=None, failure=None, marker=None):
+              result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+              output = result.stdout
+              (evidence / (label + '.log')).write_text(output)
+              print(output, flush=True)
+              entry = {'label': label, 'command': args, 'returncode': result.returncode, 'expected_count': count, 'expected_failure': failure, 'marker': marker}
+              report['commands'].append(entry)
+              if failure:
+                  assert result.returncode == 101, entry
+                  assert 'running 1 test\n' in output and 'test result: FAILED. 0 passed; 1 failed; 0 ignored;' in output, entry
+                  assert re.search(r'^test ' + re.escape(prefix + failure) + r' \.\.\. FAILED$', output, re.MULTILINE), entry
+                  assert 'panicked at' in output and marker in output, entry
+              else:
+                  assert result.returncode == 0, entry
+                  if count is not None:
+                      assert f'test result: ok. {count} passed; 0 failed; 0 ignored;' in output, entry
+              entry['qualified'] = True
+              (evidence / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
+
+          def tests(label, test=None, marker=None):
+              args = ['cargo', 'test', '--locked', '-p', 'rust_robotics_train', '--lib', prefix + (test or ''), '--', '--test-threads=1', '--show-output']
+              if test:
+                  args.append('--exact')
+              command(label, args, 1 if test else 16, test, marker)
+
+          try:
+              subprocess.run(['python3', 'scripts/prepare-ppo-seeding.py'], check=True)
+              # Unused test import identified during source review, before execution.
+              text = test_file.read_text()
+              assert text.count('use crate::{LinearSnapshot, ValueSnapshot};') == 1
+              test_file.write_text(text.replace('use crate::{LinearSnapshot, ValueSnapshot};', 'use crate::ValueSnapshot;'))
+              command('format-sources', ['cargo', 'fmt', '--all'])
+              tests('seeded-baseline')
+              command('all-training-tests', ['cargo', 'test', '--locked', '-p', 'rust_robotics_train'], 55)
+              fixed = {path: path.read_bytes() for path in paths}
+              mutations = [
+                  ('ignored-master-seed', train, 'StdRng::seed_from_u64(seed)', 'StdRng::seed_from_u64(0)', 1, 'different_seeds_change_initial_models_and_environment', 'master seed must affect actor'),
+                  ('zero-initialization', model, '.map(|_| rng.gen_range(-bound..bound))', '.map(|_| 0.0_f32)', 2, 'initialization_matches_explicit_uniform_reference', 'seeded layer weight'),
+                  ('unseeded-observation', env, '        [\n            self.state[0] + sample_symmetric(rng,', '        let mut unseeded = rand::thread_rng();\n        let rng = &mut unseeded;\n        [\n            self.state[0] + sample_symmetric(rng,', 1, 'environment_draws_match_independent_reference', 'observation RNG reference'),
+                  ('action-cursor-not-retained', train, '        self.action_rng = rng;', '        let _ = rng;', 1, 'random_cursors_advance_only_in_their_own_phase', 'action cursor must advance'),
+                  ('optimizer-cursor-not-retained', train, '        self.update_rng = rng;', '        let _ = rng;', 1, 'random_cursors_advance_only_in_their_own_phase', 'optimizer cursor must advance'),
+                  ('unseeded-environment-step', train, '.step_with_rng(sample.action, &mut self.environment_rng)', '.step(sample.action)', 1, 'noisy_rollouts_replay_every_stored_value', 'seeded rollout observations'),
+                  ('unseeded-episode-reset', train, '.reset_with_rng(&mut self.environment_rng)', '.reset()', 1, 'noisy_rollouts_replay_every_stored_value', 'seeded rollout observations'),
+                  ('weight-transfer-reseeds-action', train, '        self.config.action_std = state.policy.action_std;', '        self.config.action_std = state.policy.action_std;\n        self.action_rng = StdRng::seed_from_u64(0);', 1, 'weight_transfer_preserves_local_random_cursors', 'weight transfer must retain action RNG'),
+              ]
+              for label, path, old, new, count, test, marker in mutations:
+                  text = path.read_text()
+                  assert text.count(old) == count, (label, text.count(old), count)
+                  try:
+                      path.write_text(text.replace(old, new, 1))
+                      tests(label, test, marker)
+                  finally:
+                      path.write_bytes(fixed[path])
+              assert all(path.read_bytes() == data for path, data in fixed.items())
+              tests('seeded-restored')
+              command('restored-training-tests', ['cargo', 'test', '--locked', '-p', 'rust_robotics_train'], 55)
+              command('strict-clippy', ['cargo', 'clippy', '--locked', '-p', 'rust_robotics_train', '--all-targets', '--', '-D', 'warnings'])
+              command('final-format', ['cargo', 'fmt', '--all', '--', '--check'])
+              command('diff-check', ['git', 'diff', '--check'])
+              changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+              assert changed == {str(p) for p in paths}, changed
+              report['qualified'] = True
+          except Exception as exc:
+              report['error'] = repr(exc)
+              raise
+          finally:
+              report['source_sha256'] = {}
+              report['source_git_blobs'] = {}
+              for path in paths:
+                  data = path.read_bytes()
+                  destination = evidence / 'sources' / path
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_bytes(data)
+                  report['source_sha256'][str(path)] = hashlib.sha256(data).hexdigest()
+                  report['source_git_blobs'][str(path)] = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              (evidence / 'qualified.patch').write_text(subprocess.check_output(['git', 'diff'], text=True))
+              (evidence / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
+          PY
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-seeding-evidence
+          path: ${{ runner.temp }}/ppo-seeding-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish only qualified sources on the feature branch
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = 'refs/heads/feat/ppo-session-seeding'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs rust_robotics_train/src/model.rs rust_robotics_train/src/ppo_seed_tests.rs rust_robotics_train/README.md
+          git diff --cached --check
+          git commit -m 'feat: add isolated seeded PPO sessions and explicit environment RNGs'
+          auth=$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/feat/ppo-session-seeding
+          git rev-parse HEAD
