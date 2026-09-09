@@ -1,0 +1,59 @@
+name: PPO C3 coordinator contract check
+on:
+  push:
+    branches: ["audit/ppo-c3-reference"]
+    paths: [".github/workflows/ppo-c3-coordinator.yml"]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      PPO_COORD_OUT: /tmp/c3-coordinator
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Prepare exact original sources and isolated guard candidate
+        run: |
+          mkdir -p "$PPO_COORD_OUT"
+          python3 audits/ppo_crosscheck/coordinator_probe.py 2>&1 | tee "$PPO_COORD_OUT/prepare.log"
+          cp audits/ppo_crosscheck/coordinator_probe.py "$PPO_COORD_OUT/"
+          cp Cargo.lock "$PPO_COORD_OUT/"
+          git rev-parse HEAD > "$PPO_COORD_OUT/commit.txt"
+          rustc -Vv > "$PPO_COORD_OUT/rustc.txt"
+      - name: Require original-path reproduction and guard equivalence
+        run: |
+          cargo test --locked -p rust_robotics_train --test ppo_coordinator_reference -- --show-output 2>&1 | tee "$PPO_COORD_OUT/tests.log"
+          grep -F 'test result: ok. 7 passed; 0 failed;' "$PPO_COORD_OUT/tests.log"
+          grep -F 'COORDINATOR REPRODUCTION' "$PPO_COORD_OUT/tests.log"
+          grep -F 'GUARD restores exact seeded four-update grouping invariance' "$PPO_COORD_OUT/tests.log"
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train/src rust_robotics_train/Cargo.toml rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - name: Preserve all results and provenance
+        if: always()
+        run: |
+          mkdir -p "$PPO_COORD_OUT"
+          python3 - <<'PY'
+          import os,pathlib,json,hashlib
+          p=pathlib.Path(os.environ['PPO_COORD_OUT'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-c3-coordinator
+          path: ${{ env.PPO_COORD_OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
