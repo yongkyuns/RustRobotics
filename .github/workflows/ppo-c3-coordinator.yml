@@ -2,7 +2,7 @@ name: PPO C3 coordinator contract check
 on:
   push:
     branches: ["audit/ppo-c3-reference"]
-    paths: [".github/workflows/ppo-c3-coordinator.yml"]
+    paths: [".github/workflows/ppo-c3-coordinator.yml", "audits/ppo_crosscheck/coordinator_probe.py"]
 permissions:
   contents: read
 defaults:
@@ -30,6 +30,7 @@ jobs:
           mkdir -p "$PPO_COORD_OUT"
           python3 audits/ppo_crosscheck/coordinator_probe.py 2>&1 | tee "$PPO_COORD_OUT/prepare.log"
           cp audits/ppo_crosscheck/coordinator_probe.py "$PPO_COORD_OUT/"
+          cp .github/workflows/ppo-c3-coordinator.yml "$PPO_COORD_OUT/"
           cp Cargo.lock "$PPO_COORD_OUT/"
           git rev-parse HEAD > "$PPO_COORD_OUT/commit.txt"
           rustc -Vv > "$PPO_COORD_OUT/rustc.txt"
