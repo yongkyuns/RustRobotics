@@ -25,10 +25,9 @@ helper='''
 #[cfg(test)]
 impl PpoTrainerCoordinator {
     pub fn audit_seeded(config: PpoTrainerConfig, seed: u64) -> Self {
-        let mut result = Self {
-            executors: vec![PlatformPpoReplicaExecutor::audit_seeded(config, seed)],
-            ..Self::default()
-        };
+        // Field assignment avoids moving fields out of a temporary with Drop.
+        let mut result = Self::default();
+        result.executors = vec![PlatformPpoReplicaExecutor::audit_seeded(config, seed)];
         result.refresh_summary();
         result
     }
