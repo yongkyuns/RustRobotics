@@ -25,14 +25,15 @@ jobs:
           python3 scripts/agent_ppo_fix.py 2>&1 | tee /tmp/ppo-fix/prepare.log
           cargo fmt --all
           git diff --check
-          # Protected sources and the numerical lockfile are not part of this fix.
           git diff --exit-code -- rust_robotics_algo docs Cargo.lock
           git diff > /tmp/ppo-fix/source.patch
       - name: Commit actual source without force-updating the branch
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add rust_robotics_train rust_robotics_core rust_robotics_sim/src rust_robotics_sim/web tests site_docs scripts
+          for path in rust_robotics_train rust_robotics_core rust_robotics_sim/src rust_robotics_sim/web tests site_docs scripts; do
+            if [ -d "$path" ]; then git add "$path"; fi
+          done
           git diff --cached --check
           message='fix: preserve PPO optimizer history in single-replica coordinator'
           if [ -f /tmp/ppo-fix-message ]; then message=$(cat /tmp/ppo-fix-message); fi
