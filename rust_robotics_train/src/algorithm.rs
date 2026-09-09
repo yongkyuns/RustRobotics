@@ -9,6 +9,7 @@ pub enum AlgorithmKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PpoConfig {
+    /// Transitions per environment per update; pooled size is count * steps.
     pub rollout_steps: usize,
     pub mini_batch_size: usize,
     pub epochs_per_update: usize,

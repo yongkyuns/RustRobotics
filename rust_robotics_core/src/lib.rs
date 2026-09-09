@@ -137,12 +137,12 @@ pub struct PpoMetrics {
     pub last_mean_advantage: f32,
 }
 
-/// Bundle of policy and value snapshots exchanged between trainer replicas.
+/// Bundle of actor and critic weights for an explicit external warm start.
 ///
-/// The simulator's multi-replica coordinator averages these dense tensors and
-/// redistributes the merged result. Keeping the actor and critic bundled
-/// together avoids accidental shape mismatches between independently updated
-/// models. This is weight-transfer state, not an exact-resume checkpoint:
+/// Ordinary training keeps one learner and pools environment rollouts; it does
+/// not average independently optimized networks or reload on readout. Keeping
+/// both networks bundled supports intentional transfer of compatible models.
+/// This is weight-transfer state, not an exact-resume checkpoint:
 /// optimizer moments, environment state, RNG state and metrics are not included.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PpoSharedState {

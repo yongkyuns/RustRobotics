@@ -1,6 +1,6 @@
 use rust_robotics_core::{PolicySnapshot, PpoMetrics, PpoSharedState};
 use rust_robotics_train::PpoTrainerConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 #[derive(Default)]
@@ -12,6 +12,13 @@ pub struct WebPpoReplicaExecutor {
     last_error: Option<String>,
     busy: bool,
     ready: bool,
+}
+
+#[derive(Serialize)]
+struct WorkerConfig<'a> {
+    #[serde(flatten)]
+    config: &'a PpoTrainerConfig,
+    environment_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -41,19 +48,20 @@ extern "C" {
     #[wasm_bindgen(js_name = rustRoboticsPpoTrainerDestroy)]
     fn js_ppo_trainer_destroy(handle: u32);
 
-    #[wasm_bindgen(js_name = rustRoboticsPpoTrainerLoadSharedState)]
-    fn js_ppo_trainer_load_shared_state(handle: u32, state: JsValue);
 }
 
 impl WebPpoReplicaExecutor {
-    pub fn new(config: PpoTrainerConfig) -> Self {
+    pub fn new(config: PpoTrainerConfig, environments: usize) -> Self {
         let mut executor = Self::default();
-        executor.reset(config);
+        executor.reset(config, environments);
         executor
     }
 
-    fn reset(&mut self, config: PpoTrainerConfig) {
-        let value = match serde_wasm_bindgen::to_value(&config) {
+    fn reset(&mut self, config: PpoTrainerConfig, environments: usize) {
+        let value = match serde_wasm_bindgen::to_value(&WorkerConfig {
+            config: &config,
+            environment_count: environments,
+        }) {
             Ok(value) => value,
             Err(err) => {
                 self.last_error = Some(err.to_string());
@@ -105,27 +113,12 @@ impl WebPpoReplicaExecutor {
         self.busy
     }
 
-    pub fn accepts_shared_state(&self) -> bool {
-        self.ready && !self.busy
-    }
-
     pub fn metrics(&self) -> Option<&PpoMetrics> {
         self.metrics.as_ref()
     }
 
     pub fn shared_state(&self) -> Option<PpoSharedState> {
         self.shared_state.clone()
-    }
-
-    pub fn load_shared_state(&mut self, state: &PpoSharedState) {
-        let Some(handle) = self.handle else {
-            return;
-        };
-        if let Ok(value) = serde_wasm_bindgen::to_value(state) {
-            js_ppo_trainer_load_shared_state(handle, value);
-            self.shared_state = Some(state.clone());
-            self.snapshot = Some(state.policy.clone());
-        }
     }
 
     pub fn last_error(&self) -> Option<&str> {
