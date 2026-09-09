@@ -87,7 +87,7 @@ impl InvertedPendulum {
         };
 
         if self.controller.kind() == ControllerKind::Policy {
-            self.controller.sync_policy(snapshot);
+            self.controller.sync_policy(&snapshot);
         } else {
             self.set_policy_controller(&snapshot);
         }
