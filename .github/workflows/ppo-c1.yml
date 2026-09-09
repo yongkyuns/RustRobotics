@@ -5,6 +5,10 @@ on:
     branches: ["audit/ppo-c1-episode-credit"]
     paths: [".github/workflows/ppo-c1.yml"]
 
+defaults:
+  run:
+    shell: bash
+
 permissions:
   contents: read
   actions: read
@@ -16,8 +20,8 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: 1.98.1
       CARGO_TERM_COLOR: never
-      C1_PRIOR_CONTROLS: ${{ runner.temp }}/prior-controls
-      PPO_ATTR_DIR: ${{ runner.temp }}/c1-controls
+      C1_PRIOR_CONTROLS: /tmp/prior-controls
+      PPO_ATTR_DIR: /tmp/c1-controls
     steps:
       - uses: actions/checkout@v4
         with:
@@ -86,9 +90,9 @@ jobs:
       CARGO_TERM_COLOR: never
       C1_ARM: ${{ matrix.arm }}
       C1_SEED: ${{ matrix.seed }}
-      C1_PRIOR_CONTROLS: ${{ runner.temp }}/prior-controls
-      C1_PRIOR_SEED: ${{ runner.temp }}/prior-seed
-      PPO_ATTR_DIR: ${{ runner.temp }}/c1-${{ matrix.arm }}-${{ matrix.seed }}
+      C1_PRIOR_CONTROLS: /tmp/prior-controls
+      C1_PRIOR_SEED: /tmp/prior-seed
+      PPO_ATTR_DIR: /tmp/c1-${{ matrix.arm }}-${{ matrix.seed }}
     steps:
       - uses: actions/checkout@v4
         with:
