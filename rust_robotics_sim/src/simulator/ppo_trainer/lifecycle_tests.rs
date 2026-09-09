@@ -4,13 +4,19 @@ use rust_robotics_train::PpoTrainerSession;
 
 fn seeded(config: PpoTrainerConfig, seed: u64) -> PpoTrainerCoordinator {
     let mut coordinator = PpoTrainerCoordinator::default();
-    coordinator.executors = vec![PlatformPpoReplicaExecutor::new_seeded(config, seed)];
+    coordinator.environment_count = 1;
+    coordinator.executor = Some(PlatformPpoReplicaExecutor::new_seeded(config, seed, 1));
     coordinator.refresh_summary();
     coordinator
 }
 
 fn assert_same(coordinator: &PpoTrainerCoordinator, session: &PpoTrainerSession) {
-    let actual = coordinator.executors[0].shared_state().unwrap();
+    let actual = coordinator
+        .executor
+        .as_ref()
+        .unwrap()
+        .shared_state()
+        .unwrap();
     let expected = session.shared_state();
     assert_eq!(
         actual.policy, expected.policy,
@@ -96,4 +102,44 @@ fn reset_and_destroy_preserve_readiness_and_clear_cached_results() {
     assert_eq!(coordinator.metrics().unwrap().total_updates, 0);
     assert_eq!(coordinator.status().total, 1);
     assert_eq!(coordinator.status().ready, 1);
+}
+
+#[test]
+fn multiple_environments_use_one_persistent_pooled_learner() {
+    let mut config = PpoTrainerConfig::default();
+    config.ppo.rollout_steps = 16;
+    config.ppo.mini_batch_size = 16;
+    config.hidden_dim = 8;
+    for environments in [2, 8] {
+        let mut coordinator = PpoTrainerCoordinator::default();
+        coordinator.environment_count = environments;
+        coordinator.executor = Some(PlatformPpoReplicaExecutor::new_seeded(
+            config.clone(),
+            201,
+            environments,
+        ));
+        coordinator.refresh_summary();
+        let mut direct =
+            PpoTrainerSession::new_seeded_with_environments(config.clone(), 201, environments);
+        for _ in 0..3 {
+            coordinator.tick(1);
+            coordinator.refresh();
+            direct.train_updates(1);
+            let actual = coordinator
+                .executor
+                .as_ref()
+                .unwrap()
+                .shared_state()
+                .unwrap();
+            let expected = direct.shared_state();
+            assert_eq!(actual.policy, expected.policy);
+            assert_eq!(actual.value, expected.value);
+            assert_eq!(coordinator.metrics(), Some(direct.metrics()));
+            assert_eq!(coordinator.status().total, environments);
+            assert_eq!(coordinator.status().ready, environments);
+            assert_eq!(coordinator.status().busy, 0);
+        }
+        assert_eq!(direct.metrics().total_env_steps, 3 * environments * 16);
+        assert_eq!(direct.metrics().total_updates, 3);
+    }
 }

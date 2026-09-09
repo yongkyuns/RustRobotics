@@ -6,9 +6,9 @@ pub struct NativePpoReplicaExecutor {
 }
 
 impl NativePpoReplicaExecutor {
-    pub fn new(config: PpoTrainerConfig) -> Self {
+    pub fn new(config: PpoTrainerConfig, environments: usize) -> Self {
         Self {
-            session: PpoTrainerSession::new(config),
+            session: PpoTrainerSession::new_with_environments(config, environments),
         }
     }
 
@@ -28,20 +28,12 @@ impl NativePpoReplicaExecutor {
         false
     }
 
-    pub fn accepts_shared_state(&self) -> bool {
-        true
-    }
-
     pub fn metrics(&self) -> Option<&PpoMetrics> {
         Some(self.session.metrics())
     }
 
     pub fn shared_state(&self) -> Option<PpoSharedState> {
         Some(self.session.shared_state())
-    }
-
-    pub fn load_shared_state(&mut self, state: &PpoSharedState) {
-        self.session.load_shared_state(state);
     }
 
     pub fn last_error(&self) -> Option<&str> {
@@ -51,9 +43,9 @@ impl NativePpoReplicaExecutor {
 
 #[cfg(test)]
 impl NativePpoReplicaExecutor {
-    pub(super) fn new_seeded(config: PpoTrainerConfig, seed: u64) -> Self {
+    pub(super) fn new_seeded(config: PpoTrainerConfig, seed: u64, environments: usize) -> Self {
         Self {
-            session: PpoTrainerSession::new_seeded(config, seed),
+            session: PpoTrainerSession::new_seeded_with_environments(config, seed, environments),
         }
     }
 }

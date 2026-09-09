@@ -3,7 +3,7 @@
 //! This module is the glue between:
 //!
 //! - the user-facing controller selection in the pendulum UI
-//! - the `PpoTrainerCoordinator`, which may run one or more training replicas
+//! - the `PpoTrainerCoordinator`, which owns one learner and one or more environments
 //! - the live controller instance embedded in `InvertedPendulum`
 //!
 //! The key rule is that selecting `PPO Policy` in the UI should immediately
@@ -35,7 +35,7 @@ impl InvertedPendulum {
         }
     }
 
-    /// Rebuilds trainer replicas from the current configuration.
+    /// Rebuilds the learner and its environment streams from the current configuration.
     pub(crate) fn reset_trainer(&mut self) {
         self.trainer_config.env.dt = PENDULUM_FIXED_DT;
         self.trainer_backend
