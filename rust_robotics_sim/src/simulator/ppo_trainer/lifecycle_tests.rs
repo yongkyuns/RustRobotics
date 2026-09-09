@@ -1,13 +1,23 @@
 //! Permanent regressions for real coordinator/session optimizer continuity.
 use super::*;
-use rust_robotics_train::PpoTrainerSession;
+use rust_robotics_train::{PpoConfig, PpoTrainerSession};
 
-fn seeded(config: PpoTrainerConfig, seed: u64) -> PpoTrainerCoordinator {
-    let mut coordinator = PpoTrainerCoordinator::default();
-    coordinator.environment_count = 1;
-    coordinator.executor = Some(PlatformPpoReplicaExecutor::new_seeded(config, seed, 1));
+fn seeded_pool(config: PpoTrainerConfig, seed: u64, count: usize) -> PpoTrainerCoordinator {
+    let mut coordinator = PpoTrainerCoordinator {
+        executor: Some(PlatformPpoReplicaExecutor::new_seeded(config, seed, count)),
+        environment_count: count,
+        snapshot: None,
+        metrics: None,
+        last_error: None,
+        busy: false,
+        status: PpoReplicaStatus::default(),
+    };
     coordinator.refresh_summary();
     coordinator
+}
+
+fn seeded(config: PpoTrainerConfig, seed: u64) -> PpoTrainerCoordinator {
+    seeded_pool(config, seed, 1)
 }
 
 fn assert_same(coordinator: &PpoTrainerCoordinator, session: &PpoTrainerSession) {
@@ -106,19 +116,17 @@ fn reset_and_destroy_preserve_readiness_and_clear_cached_results() {
 
 #[test]
 fn multiple_environments_use_one_persistent_pooled_learner() {
-    let mut config = PpoTrainerConfig::default();
-    config.ppo.rollout_steps = 16;
-    config.ppo.mini_batch_size = 16;
-    config.hidden_dim = 8;
+    let config = PpoTrainerConfig {
+        hidden_dim: 8,
+        ppo: PpoConfig {
+            rollout_steps: 16,
+            mini_batch_size: 16,
+            ..PpoConfig::default()
+        },
+        ..PpoTrainerConfig::default()
+    };
     for environments in [2, 8] {
-        let mut coordinator = PpoTrainerCoordinator::default();
-        coordinator.environment_count = environments;
-        coordinator.executor = Some(PlatformPpoReplicaExecutor::new_seeded(
-            config.clone(),
-            201,
-            environments,
-        ));
-        coordinator.refresh_summary();
+        let mut coordinator = seeded_pool(config.clone(), 201, environments);
         let mut direct =
             PpoTrainerSession::new_seeded_with_environments(config.clone(), 201, environments);
         for _ in 0..3 {
