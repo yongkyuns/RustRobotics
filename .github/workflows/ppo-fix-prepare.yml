@@ -1,0 +1,65 @@
+name: Prepare PPO source correction
+on:
+  push:
+    branches: ["fix/ppo-shared-policy-rollouts"]
+    paths: ["scripts/agent_ppo_fix.py", ".github/workflows/ppo-fix-prepare.yml"]
+permissions:
+  contents: write
+defaults:
+  run:
+    shell: bash
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+      - name: Apply exact-source patches and format
+        run: |
+          mkdir -p /tmp/ppo-fix
+          python3 scripts/agent_ppo_fix.py 2>&1 | tee /tmp/ppo-fix/prepare.log
+          cargo fmt --all
+          git diff --check
+          # Protected sources and the numerical lockfile are not part of this fix.
+          git diff --exit-code -- rust_robotics_algo docs Cargo.lock
+          git diff > /tmp/ppo-fix/source.patch
+      - name: Commit actual source without force-updating the branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add rust_robotics_train rust_robotics_core rust_robotics_sim/src rust_robotics_sim/web tests site_docs scripts
+          git diff --cached --check
+          message='fix: preserve PPO optimizer history in single-replica coordinator'
+          if [ -f /tmp/ppo-fix-message ]; then message=$(cat /tmp/ppo-fix-message); fi
+          git commit -m "$message"
+          git push origin HEAD:fix/ppo-shared-policy-rollouts
+          git rev-parse HEAD | tee /tmp/ppo-fix/commit.txt
+      - name: Preserve source for local review
+        if: always()
+        run: |
+          mkdir -p /tmp/ppo-fix
+          git diff > /tmp/ppo-fix/uncommitted.patch
+          python3 - <<'PY'
+          import pathlib,subprocess,tarfile
+          with tarfile.open('/tmp/ppo-fix/source.tar.gz','w:gz') as archive:
+              for name in subprocess.check_output(['git','ls-files'],text=True).splitlines():
+                  p=pathlib.Path(name)
+                  if p.is_file() and not name.startswith(('docs/','rust_robotics_sim/web/vendor/','rust_robotics_sim/web/ort_web/')) and p.suffix in {'.rs','.toml','.lock','.md','.py','.js','.json','.yml','.yaml','.ts','.sh','.rst'}:
+                      archive.add(p,arcname=name)
+              for name in subprocess.check_output(['git','ls-files','--others','--exclude-standard'],text=True).splitlines():
+                  p=pathlib.Path(name)
+                  if p.is_file() and p.suffix in {'.rs','.py','.md','.ts'}:
+                      archive.add(p,arcname=name)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-fix-prepared-${{ github.run_id }}
+          path: /tmp/ppo-fix/
+          include-hidden-files: true
+          if-no-files-found: error
