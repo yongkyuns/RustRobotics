@@ -1,0 +1,151 @@
+name: PPO C1 episode-credit development
+
+on:
+  push:
+    branches: ["audit/ppo-c1-episode-credit"]
+    paths: [".github/workflows/ppo-c1.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      C1_PRIOR_CONTROLS: ${{ runner.temp }}/prior-controls
+      PPO_ATTR_DIR: ${{ runner.temp }}/c1-controls
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-attribution-controls
+          run-id: 34306690451
+          github-token: ${{ github.token }}
+          path: ${{ env.C1_PRIOR_CONTROLS }}
+      - name: Prepare pinned ordinary collector and diagnostic controls
+        run: |
+          mkdir -p "$PPO_ATTR_DIR"
+          python3 -m py_compile scripts/prepare_ppo_c1.py
+          python3 scripts/prepare_ppo_c1.py 2>&1 | tee "$PPO_ATTR_DIR/prepare.log"
+      - name: Require controls and unchanged regression tests
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$PPO_ATTR_DIR/clippy.log"
+          cargo test --locked -p rust_robotics_train --lib 2>&1 | tee "$PPO_ATTR_DIR/unit-tests.log"
+          grep -F 'test result: ok. 64 passed; 0 failed;' "$PPO_ATTR_DIR/unit-tests.log"
+          cargo test --locked -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$PPO_ATTR_DIR/integration-controls.log"
+          cargo test --locked --release -p rust_robotics_train --lib --no-run 2>&1 | tee "$PPO_ATTR_DIR/release-build.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Preserve compiled source and restore production
+        if: always()
+        run: |
+          mkdir -p "$PPO_ATTR_DIR"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          p=pathlib.Path(os.environ['PPO_ATTR_DIR'])
+          files={str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'}
+          (p/'manifest.json').write_text(json.dumps(files,indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs
+          rm -f rust_robotics_train/src/ppo_update_attribution.rs
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-c1-controls
+          path: ${{ env.PPO_ATTR_DIR }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    name: C1 ${{ matrix.arm }} seed ${{ matrix.seed }}
+    needs: controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [baseline, coverage, returns, joint]
+        seed: [201, 202, 203, 204]
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      C1_ARM: ${{ matrix.arm }}
+      C1_SEED: ${{ matrix.seed }}
+      C1_PRIOR_CONTROLS: ${{ runner.temp }}/prior-controls
+      C1_PRIOR_SEED: ${{ runner.temp }}/prior-seed
+      PPO_ATTR_DIR: ${{ runner.temp }}/c1-${{ matrix.arm }}-${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-attribution-controls
+          run-id: 34306690451
+          github-token: ${{ github.token }}
+          path: ${{ env.C1_PRIOR_CONTROLS }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-attribution-${{ matrix.seed }}
+          run-id: 34306690451
+          github-token: ${{ github.token }}
+          path: ${{ env.C1_PRIOR_SEED }}
+      - name: Prepare identical compiled source and original witness bytes
+        id: prepare
+        run: |
+          mkdir -p "$PPO_ATTR_DIR"
+          python3 scripts/prepare_ppo_c1.py 2>&1 | tee "$PPO_ATTR_DIR/prepare.log"
+      - name: Fixed-budget from-scratch comparison
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib trainer::update_attribution::c1_from_scratch -- --ignored --exact --test-threads=1 --show-output 2>&1 | tee "$PPO_ATTR_DIR/from-scratch.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$PPO_ATTR_DIR/from-scratch.log"
+          grep -F 'C1 FROM SCRATCH COMPLETE' "$PPO_ATTR_DIR/from-scratch.log"
+      - name: Replay frozen witnesses with original optimizer history
+        if: always() && matrix.arm == 'joint' && steps.prepare.outcome == 'success'
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib trainer::update_attribution::c1_frozen_witness -- --ignored --exact --test-threads=1 --show-output 2>&1 | tee "$PPO_ATTR_DIR/witness.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$PPO_ATTR_DIR/witness.log"
+          grep -F 'C1 FROZEN WITNESS COMPLETE' "$PPO_ATTR_DIR/witness.log"
+      - name: Preserve every checkpoint and failure, restore production
+        if: always()
+        run: |
+          mkdir -p "$PPO_ATTR_DIR"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          p=pathlib.Path(os.environ['PPO_ATTR_DIR'])
+          files={str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'}
+          (p/'manifest.json').write_text(json.dumps(files,indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs
+          rm -f rust_robotics_train/src/ppo_update_attribution.rs
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-c1-${{ matrix.arm }}-${{ matrix.seed }}
+          path: ${{ env.PPO_ATTR_DIR }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
