@@ -1,0 +1,148 @@
+name: PPO C2 credit versus optimizer diagnostics
+
+on:
+  push:
+    branches: ["audit/ppo-c2-credit-step"]
+    paths: [".github/workflows/ppo-c2.yml"]
+
+defaults:
+  run:
+    shell: bash
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      C2_PRIOR_CONTROLS: /tmp/c1-controls
+      PPO_ATTR_DIR: /tmp/c2-controls
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-c1-controls
+          run-id: 34349190569
+          github-token: ${{ github.token }}
+          path: ${{ env.C2_PRIOR_CONTROLS }}
+      - name: Prepare source with fail-closed hashes
+        run: |
+          mkdir -p "$PPO_ATTR_DIR"
+          python3 scripts/prepare_ppo_c2.py 2>&1 | tee "$PPO_ATTR_DIR/prepare.log"
+      - name: Require all observer, arithmetic and unchanged integration controls
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$PPO_ATTR_DIR/clippy.log"
+          cargo test --locked -p rust_robotics_train --lib 2>&1 | tee "$PPO_ATTR_DIR/unit-tests.log"
+          grep -F 'test result: ok. 68 passed; 0 failed;' "$PPO_ATTR_DIR/unit-tests.log"
+          cargo test --locked -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$PPO_ATTR_DIR/integration-controls.log"
+          cargo test --locked --release -p rust_robotics_train --lib --no-run 2>&1 | tee "$PPO_ATTR_DIR/release-build.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Preserve evidence and restore production
+        if: always()
+        run: |
+          mkdir -p "$PPO_ATTR_DIR"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          p=pathlib.Path(os.environ['PPO_ATTR_DIR'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'},indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs
+          rm -f rust_robotics_train/src/ppo_update_attribution.rs
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-c2-controls
+          path: ${{ env.PPO_ATTR_DIR }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    needs: controls
+    name: C2 frozen seed ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [201, 202, 203, 204]
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      C1_SEED: ${{ matrix.seed }}
+      C1_PRIOR_SEED: /tmp/original-seed
+      C2_PRIOR_CONTROLS: /tmp/c1-controls
+      C2_PRIOR_JOINT: /tmp/c1-joint
+      PPO_ATTR_DIR: /tmp/c2-${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-c1-controls
+          run-id: 34349190569
+          github-token: ${{ github.token }}
+          path: ${{ env.C2_PRIOR_CONTROLS }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-attribution-${{ matrix.seed }}
+          run-id: 34306690451
+          github-token: ${{ github.token }}
+          path: ${{ env.C1_PRIOR_SEED }}
+      - uses: actions/download-artifact@v4
+        if: matrix.seed == 201
+        with:
+          name: ppo-c1-joint-201
+          run-id: 34349190569
+          github-token: ${{ github.token }}
+          path: ${{ env.C2_PRIOR_JOINT }}
+      - name: Prepare identical measured source
+        run: |
+          mkdir -p "$PPO_ATTR_DIR"
+          python3 scripts/prepare_ppo_c2.py 2>&1 | tee "$PPO_ATTR_DIR/prepare.log"
+      - name: Measure fixed witnesses and interventions
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib trainer::update_attribution::c2_measure -- --ignored --exact --test-threads=1 --show-output 2>&1 | tee "$PPO_ATTR_DIR/measurement.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$PPO_ATTR_DIR/measurement.log"
+          grep -F 'C2 COMPLETE' "$PPO_ATTR_DIR/measurement.log"
+      - name: Preserve every result and restore production
+        if: always()
+        run: |
+          mkdir -p "$PPO_ATTR_DIR"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          p=pathlib.Path(os.environ['PPO_ATTR_DIR'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'},indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs
+          rm -f rust_robotics_train/src/ppo_update_attribution.rs
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-c2-${{ matrix.seed }}
+          path: ${{ env.PPO_ATTR_DIR }}/
+          retention-days: 30
+          if-no-files-found: error
