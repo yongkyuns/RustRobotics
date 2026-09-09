@@ -1,3 +1,4 @@
+# Setup-only helper placement correction; numerical protocol unchanged.
 name: PPO harmful update attribution
 
 on:
