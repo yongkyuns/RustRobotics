@@ -48,3 +48,12 @@ impl NativePpoReplicaExecutor {
         None
     }
 }
+
+#[cfg(test)]
+impl NativePpoReplicaExecutor {
+    pub(super) fn new_seeded(config: PpoTrainerConfig, seed: u64) -> Self {
+        Self {
+            session: PpoTrainerSession::new_seeded(config, seed),
+        }
+    }
+}

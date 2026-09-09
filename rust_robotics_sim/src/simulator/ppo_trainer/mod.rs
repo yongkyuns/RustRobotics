@@ -80,6 +80,13 @@ impl PpoTrainerCoordinator {
             executor.tick(updates);
         }
 
+        // A readout is not an external weight transfer. Reloading even identical
+        // weights reconstructs the networks and resets both Adam optimizers.
+        if self.executors.len() == 1 {
+            self.refresh_summary();
+            return;
+        }
+
         if let Some(shared_state) = average_shared_states(
             &self
                 .executors
@@ -158,7 +165,11 @@ impl PpoTrainerCoordinator {
             .first()
             .and_then(PlatformPpoReplicaExecutor::shared_state)
             .map(|state| state.policy);
-        self.metrics = aggregate_metrics(&self.executors);
+        self.metrics = if self.executors.len() == 1 {
+            self.executors[0].metrics().cloned()
+        } else {
+            aggregate_metrics(&self.executors)
+        };
     }
 }
 
@@ -377,3 +388,6 @@ mod tests {
         assert_eq!(averaged.policy.action_std, first.policy.action_std);
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod lifecycle_tests;
