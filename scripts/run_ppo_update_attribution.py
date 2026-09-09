@@ -40,7 +40,7 @@ if sys.argv[1] == 'prepare':
     s+='\n#[cfg(test)]\n#[path = "ppo_update_attribution.rs"]\nmod update_attribution;\n'
     TRAIN.write_text(s)
     # Test-only cloning resets only the external clock, never physical state.
-    s=ENV.read_text()+'''\n#[cfg(test)]
+    helper='''#[cfg(test)]
 impl PendulumEnv {
     pub(crate) fn attribution_branch(&self, max_steps: usize) -> Self {
         assert!(max_steps > 0);
@@ -51,7 +51,9 @@ impl PendulumEnv {
     }
     pub(crate) fn attribution_age(&self) -> usize { self.steps }
 }
+
 '''
+    s=once(ENV.read_text(),'#[cfg(test)]\nmod tests {',helper+'#[cfg(test)]\nmod tests {')
     ENV.write_text(s)
     s=MODULE.read_text()
     # Source-review parenthesis repair, before first execution; no numeric change.
