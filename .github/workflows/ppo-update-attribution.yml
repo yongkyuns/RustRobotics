@@ -1,0 +1,111 @@
+name: PPO harmful update attribution
+
+on:
+  push:
+    branches: ["audit/ppo-update-attribution"]
+    paths: [".github/workflows/ppo-update-attribution.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Prepare observational capture and test-only physical-state cloning
+        shell: bash
+        run: |
+          export PPO_ATTR_DIR="$RUNNER_TEMP/attribution-controls"
+          echo "PPO_ATTR_DIR=$PPO_ATTR_DIR" >> "$GITHUB_ENV"
+          python3 -m py_compile scripts/run_ppo_update_attribution.py
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs rust_robotics_train/src/model.rs Cargo.lock
+          python3 scripts/run_ppo_update_attribution.py prepare
+      - name: Require unchanged regressions and attribution controls
+        run: python3 scripts/run_ppo_update_attribution.py controls
+      - name: Preserve evidence and restore production files
+        if: always()
+        shell: bash
+        run: |
+          python3 scripts/run_ppo_update_attribution.py preserve
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs
+          git diff --exit-code -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs rust_robotics_train/src/model.rs Cargo.lock
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-attribution-controls
+          path: ${{ runner.temp }}/attribution-controls/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    name: From-scratch update attribution seed ${{ matrix.seed }}
+    needs: controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [201, 202, 203, 204]
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      PPO_ATTR_SEED: ${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-balancing-diagnostics
+          run-id: 34232741415
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/prior
+      - name: Prepare pinned source and exact baseline snapshot witnesses
+        shell: bash
+        run: |
+          export PPO_ATTR_DIR="$RUNNER_TEMP/attribution-${PPO_ATTR_SEED}"
+          export PPO_ATTR_PRIOR="$RUNNER_TEMP/prior/measurements/snapshots.tsv"
+          echo "PPO_ATTR_DIR=$PPO_ATTR_DIR" >> "$GITHUB_ENV"
+          echo "PPO_ATTR_PRIOR=$PPO_ATTR_PRIOR" >> "$GITHUB_ENV"
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs rust_robotics_train/src/model.rs Cargo.lock
+          python3 scripts/run_ppo_update_attribution.py prepare
+      - name: Screen fixed window then run independent confirmation and state branches
+        run: python3 scripts/run_ppo_update_attribution.py measure
+      - name: Preserve all results and restore production source
+        if: always()
+        shell: bash
+        run: |
+          python3 scripts/run_ppo_update_attribution.py preserve
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs
+          git diff --exit-code -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/env.rs rust_robotics_train/src/model.rs Cargo.lock
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-attribution-${{ matrix.seed }}
+          path: ${{ runner.temp }}/attribution-${{ matrix.seed }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
