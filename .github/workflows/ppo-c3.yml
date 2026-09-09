@@ -1,0 +1,159 @@
+name: PPO C3 independent implementation cross-check
+on:
+  push:
+    branches: ["audit/ppo-c3-reference"]
+    paths: [".github/workflows/ppo-c3.yml"]
+defaults:
+  run:
+    shell: bash
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      PPO_REF_OUT: /tmp/c3-native
+      PPO_REF_LIBRARY: /tmp/c3-native/library/librust_robotics_train.so
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/workflows/ppo-c3.yml
+      - name: Install pinned independent library
+        run: |
+          mkdir -p "$PPO_REF_OUT"
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu 2>&1 | tee "$PPO_REF_OUT/install-torch.log"
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0 2>&1 | tee "$PPO_REF_OUT/install-reference.log"
+          python -m pip freeze > "$PPO_REF_OUT/python-freeze.txt"
+      - name: Prepare native bridge without task or optimizer edits
+        run: python audits/ppo_crosscheck/prepare.py 2>&1 | tee "$PPO_REF_OUT/prepare.log"
+      - name: Require Rust controls, regressions and native build
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$PPO_REF_OUT/clippy.log"
+          cargo test --locked -p rust_robotics_train --lib 2>&1 | tee "$PPO_REF_OUT/rust-controls.log"
+          grep -F 'test result: ok. 59 passed; 0 failed;' "$PPO_REF_OUT/rust-controls.log"
+          cargo test --locked -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$PPO_REF_OUT/integration-controls.log"
+          cargo build --locked --release -p rust_robotics_train --lib 2>&1 | tee "$PPO_REF_OUT/release-build.log"
+          mkdir -p "$PPO_REF_OUT/library"
+          cp target/release/librust_robotics_train.so "$PPO_REF_LIBRARY"
+          ldd "$PPO_REF_LIBRARY" > "$PPO_REF_OUT/native-linkage.txt"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Require actual Python-to-Rust and SB3 controls
+        run: |
+          python audits/ppo_crosscheck/reference.py controls --output "$PPO_REF_OUT/python-controls" 2>&1 | tee "$PPO_REF_OUT/python-controls.log"
+          grep -F 'C3 PYTHON CONTROLS PASS' "$PPO_REF_OUT/python-controls.log"
+      - name: Retain exact sources and evidence, restore protected production
+        if: always()
+        run: |
+          mkdir -p "$PPO_REF_OUT"
+          python - <<'PY'
+          import os,pathlib,json,hashlib
+          p=pathlib.Path(os.environ['PPO_REF_OUT'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'},indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/Cargo.toml rust_robotics_train/src/lib.rs
+          git diff --exit-code d724c517c27b182145d4054a66d3937563381dfd -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-c3-native
+          path: ${{ env.PPO_REF_OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+  measure:
+    needs: native
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    name: C3 ${{ matrix.arm }} seed ${{ matrix.seed }}
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        arm: [rust, matched, matched-vector, sb3-defaults]
+        seed: [201, 202, 203, 204]
+    env:
+      PPO_REF_LIBRARY: /tmp/c3-native/library/librust_robotics_train.so
+      PPO_REF_OUT: /tmp/c3-${{ matrix.arm }}-${{ matrix.seed }}
+      C3_PRIOR_BASELINE: /tmp/c1-baseline
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+      C3_ARM: ${{ matrix.arm }}
+      C3_SEED: ${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/workflows/ppo-c3.yml
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-c3-native
+          path: /tmp/c3-native
+      - uses: actions/download-artifact@v4
+        if: matrix.arm == 'rust'
+        with:
+          name: ppo-c1-baseline-${{ matrix.seed }}
+          run-id: 34349190569
+          github-token: ${{ github.token }}
+          path: ${{ env.C3_PRIOR_BASELINE }}
+      - name: Install the identical pinned reference library
+        run: |
+          mkdir -p "$PPO_REF_OUT"
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu 2>&1 | tee "$PPO_REF_OUT/install-torch.log"
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0 2>&1 | tee "$PPO_REF_OUT/install-reference.log"
+          python -m pip freeze > "$PPO_REF_OUT/python-freeze.txt"
+      - name: Verify native source and binary provenance
+        run: |
+          python - <<'PY'
+          import os,pathlib,json,hashlib,shutil
+          p=pathlib.Path('/tmp/c3-native'); out=pathlib.Path(os.environ['PPO_REF_OUT'])
+          manifest=json.loads((p/'manifest.json').read_text())
+          for f,h in manifest.items():
+              assert hashlib.sha256((p/f).read_bytes()).hexdigest()==h,f
+          shutil.copyfile(p/'manifest.json',out/'native-manifest.json')
+          shutil.copyfile(p/'commit.txt',out/'commit.txt')
+          shutil.copyfile(p/'sources/audits/ppo_crosscheck/reference.py',out/'reference.py')
+          PY
+      - name: Execute the fixed from-scratch budget and all paired checkpoints
+        run: |
+          python "$PPO_REF_OUT/reference.py" measure --arm "$C3_ARM" --seed "$C3_SEED" --output "$PPO_REF_OUT" 2>&1 | tee "$PPO_REF_OUT/measurement.log"
+          grep -F 'C3 MEASUREMENT COMPLETE' "$PPO_REF_OUT/measurement.log"
+      - name: Preserve every outcome including failed runs
+        if: always()
+        run: |
+          mkdir -p "$PPO_REF_OUT"
+          python - <<'PY'
+          import os,pathlib,json,hashlib
+          p=pathlib.Path(os.environ['PPO_REF_OUT'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-c3-${{ matrix.arm }}-${{ matrix.seed }}
+          path: ${{ env.PPO_REF_OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
