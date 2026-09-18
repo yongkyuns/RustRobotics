@@ -1,0 +1,154 @@
+name: PPO critic-only cadence comparison
+
+on:
+  push:
+    branches: ["audit/ppo-critic-cadence-20260918"]
+    paths: [".github/workflows/ppo-critic-cadence.yml", "audits/ppo_critic_cadence/native.rs", "audits/ppo_critic_cadence/prepare.py", "audits/ppo_critic_cadence/measure.py"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      PPO_CRITIC_OUT: /tmp/critic-native
+      PPO_CRITIC_NATIVE: /tmp/critic-native
+      PPO_REF_LIBRARY: /tmp/critic-native/library/librust_robotics_train.so
+      PPO_CRITIC_PRIOR: /tmp/critic-prior.zip
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare verified isolated critic experiment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$PPO_CRITIC_OUT"
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10564229767/zip > "$PPO_CRITIC_PRIOR"
+          python audits/ppo_critic_cadence/prepare.py 2>&1 | tee "$PPO_CRITIC_OUT/prepare.log"
+          python -m py_compile audits/ppo_critic_cadence/*.py
+      - name: Require original regression and schedule-isolation controls
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$PPO_CRITIC_OUT/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$PPO_CRITIC_OUT/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$PPO_CRITIC_OUT/integration-tests.log"
+          cargo build --locked --release -p rust_robotics_train --lib 2>&1 | tee "$PPO_CRITIC_OUT/build.log"
+          mkdir -p "$PPO_CRITIC_OUT/library"
+          cp target/release/librust_robotics_train.so "$PPO_REF_LIBRARY"
+          ldd "$PPO_REF_LIBRARY" > "$PPO_CRITIC_OUT/linkage.txt"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Install pinned evaluation dependencies
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > "$PPO_CRITIC_OUT/python-freeze.txt"
+      - name: Require evaluation and real ABI controls
+        run: |
+          python audits/ppo_critic_cadence/measure.py controls --output "$PPO_CRITIC_OUT/controls" 2>&1 | tee "$PPO_CRITIC_OUT/controls.log"
+          grep -F 'CRITIC PYTHON CONTROLS PASS' "$PPO_CRITIC_OUT/controls.log"
+      - name: Preserve every outcome and restore protected source
+        if: always()
+        run: |
+          mkdir -p "$PPO_CRITIC_OUT"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['PPO_CRITIC_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/Cargo.toml rust_robotics_train/src/lib.rs rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code d3f59f9bf38d4038ba7c5008e3a3b41c15e99835 -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: critic-native
+          path: /tmp/critic-native/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    needs: native
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: Critic ${{ matrix.arm }} seed ${{ matrix.seed }}
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        arm: [baseline, extra-frozen, extra-refresh]
+        seed: [201, 202, 203, 204]
+    env:
+      PPO_CRITIC_NATIVE: /tmp/critic-native
+      PPO_REF_LIBRARY: /tmp/critic-native/library/librust_robotics_train.so
+      PPO_CRITIC_OUT: /tmp/critic-${{ matrix.arm }}-${{ matrix.seed }}
+      CRITIC_ARM: ${{ matrix.arm }}
+      CRITIC_SEED: ${{ matrix.seed }}
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: critic-native
+          path: /tmp/critic-native
+      - name: Verify exact executable and experiment provenance
+        run: |
+          mkdir -p "$PPO_CRITIC_OUT"
+          python - <<'PY'
+          import pathlib,hashlib,json,shutil,os
+          root=pathlib.Path(os.environ['PPO_CRITIC_NATIVE']);out=pathlib.Path(os.environ['PPO_CRITIC_OUT'])
+          for n,h in json.loads((root/'manifest.json').read_text()).items(): assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          for n in ['manifest.json','baseline.txt','commit.txt']:
+              shutil.copyfile(root/n,out/('native-'+n))
+          PY
+      - name: Install identical pinned evaluation runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > "$PPO_CRITIC_OUT/python-freeze.txt"
+      - name: Execute all predetermined training checkpoints
+        run: |
+          python "$PPO_CRITIC_NATIVE/sources/audits/ppo_critic_cadence/measure.py" measure --arm "$CRITIC_ARM" --seed "$CRITIC_SEED" --output "$PPO_CRITIC_OUT" 2>&1 | tee "$PPO_CRITIC_OUT/measurement.log"
+          grep -F 'CRITIC MEASUREMENT COMPLETE' "$PPO_CRITIC_OUT/measurement.log"
+      - name: Preserve all results including failures
+        if: always()
+        run: |
+          mkdir -p "$PPO_CRITIC_OUT"
+          python - <<'PY'
+          import pathlib,hashlib,json,os
+          root=pathlib.Path(os.environ['PPO_CRITIC_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: critic-${{ matrix.arm }}-${{ matrix.seed }}
+          path: ${{ env.PPO_CRITIC_OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
