@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ppo-boundary-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     shell: bash
@@ -41,7 +45,7 @@ jobs:
       - name: Prepare observer-only native probe
         run: |
           mkdir -p "$PPO_BOUNDARY_OUT"
-          python -m py_compile audits/ppo_boundary/prepare.py audits/ppo_boundary/compare.py
+          python -m py_compile audits/ppo_boundary/prepare.py audits/ppo_boundary/compare.py audits/ppo_boundary/matched.py
           python audits/ppo_boundary/prepare.py 2>&1 | tee "$PPO_BOUNDARY_OUT/prepare.log"
       - name: Check the actual Rust sources and collect fixed traces
         run: |
@@ -61,7 +65,7 @@ jobs:
           python -m pip freeze > /tmp/ppo-boundary/python-freeze.txt
       - name: Replay real collector and persistent optimizer boundaries
         run: |
-          python audits/ppo_boundary/compare.py --input "$PPO_BOUNDARY_OUT" --output /tmp/ppo-boundary/reference 2>&1 | tee /tmp/ppo-boundary/comparison.log
+          python audits/ppo_boundary/matched.py --input "$PPO_BOUNDARY_OUT" --output /tmp/ppo-boundary/reference 2>&1 | tee /tmp/ppo-boundary/comparison.log
       - name: Retain every result and verify protected source restoration
         if: always()
         run: |
