@@ -28,10 +28,9 @@ shutil.copyfile(archive, out/'c3-native-original.zip')
 source = prior/'sources/audits/ppo_crosscheck'
 root = Path('audits/ppo_epsilon')
 shutil.copyfile(source/'reference.py', root/'c3_reference.py')
-# The checked archive contains C3's already-prepared normalized-action Gym check.
 assert 'env=RustEnv(transform=2); check_env(env,warn=True);' in (root/'c3_reference.py').read_text()
-bridge = (source/'bridge.rs').read_text() + '''
-
+bridge = (source/'bridge.rs').read_text()
+addition = '''
 // Epsilon is selected only before the first update. All later calls use the
 // exact same persistent ordinary PpoTrainerSession::train_updates method.
 #[no_mangle]
@@ -46,6 +45,9 @@ pub extern "C" fn rr_trainer_create_epsilon(seed: u64, exponent: u32) -> u64 {
     })
 }
 '''
+marker = '#[cfg(test)]\nmod tests {'
+assert bridge.count(marker) == 1
+bridge = bridge.replace(marker, addition+'\n'+marker)
 (root/'generated_bridge.rs').write_text(bridge)
 p = Path('rust_robotics_train/Cargo.toml')
 assert '[lib]' not in p.read_text()
@@ -58,7 +60,6 @@ subprocess.run(['cargo','fmt','--all'],check=True)
 subprocess.run(['git','diff','--check'],check=True)
 changes = subprocess.check_output(['git','diff','--name-only','--',*PROTECTED]).decode().splitlines()
 assert sorted(changes) == sorted(['rust_robotics_train/Cargo.toml','rust_robotics_train/src/lib.rs','rust_robotics_train/src/trainer.rs']), changes
-# All existing trainer source is preserved; the sole addition is the audit module.
 original = subprocess.check_output(['git','show',BASE+':rust_robotics_train/src/trainer.rs']).decode()
 assert p.read_text().startswith(original)
 paths = [Path('Cargo.lock'), Path('Cargo.toml'),Path('AGENTS.md'),Path('.github/workflows/ppo-epsilon.yml')]
