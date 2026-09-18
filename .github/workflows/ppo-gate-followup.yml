@@ -1,0 +1,126 @@
+name: PPO gate attribution and lockfile validation
+
+on:
+  push:
+    branches: ["audit/ppo-fixed-tensor-20260918"]
+    paths: [".github/workflows/ppo-gate-followup.yml", "audits/ppo_boundary/gate_followup.py"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify fixed-tensor results and nested native evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/gate/fixed /tmp/gate/native-evidence /tmp/gate/out
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10560769288/zip > /tmp/gate/fixed.zip
+          echo '53302b0ec6127e372fbc0836636d3403c9041251bed2cf0e9c72841ea6842b3b  /tmp/gate/fixed.zip' | sha256sum --check
+          python - <<'PY'
+          import zipfile,hashlib,json
+          from pathlib import Path
+          def unpack(path,root):
+              with zipfile.ZipFile(path) as z:
+                  assert all(not n.startswith('/') and '..' not in Path(n).parts for n in z.namelist())
+                  z.extractall(root)
+              m=json.loads((root/'manifest.json').read_text())
+              for n,h in m.items(): assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+              print('Verified',len(m),'members')
+          root=Path('/tmp/gate')
+          unpack(root/'fixed.zip',root/'fixed')
+          unpack(root/'fixed/native-archive.zip',root/'native-evidence')
+          PY
+      - name: Install pinned reference
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > /tmp/gate/out/python-freeze.txt
+      - name: Attribute recorded gate event and continue its one-event control
+        run: |
+          cp audits/ppo_boundary/gate_followup.py /tmp/gate/out/
+          git rev-parse HEAD > /tmp/gate/out/executed-commit.txt
+          python audits/ppo_boundary/gate_followup.py --fixed /tmp/gate/fixed --native /tmp/gate/native-evidence/native --output /tmp/gate/out 2>&1 | tee /tmp/gate/out/execution.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-gate-${{ github.run_id }}
+          path: /tmp/gate/out/
+          retention-days: 30
+          if-no-files-found: error
+
+  lockfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ff4934a636974727632355371f575e651dc44a61
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Prepare exactly the reviewed rustls version and checksum change
+        run: |
+          mkdir -p /tmp/rustls-only
+          cp Cargo.lock /tmp/rustls-only/before.lock
+          python - <<'PY'
+          import pathlib,tomllib,hashlib,json
+          p=pathlib.Path('Cargo.lock');text=p.read_text()
+          old='name = "rustls"\nversion = "0.23.44"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba"'
+          new='name = "rustls"\nversion = "0.23.45"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"'
+          assert text.count(old)==1
+          result=text.replace(old,new)
+          before=tomllib.loads(text);after=tomllib.loads(result)
+          assert [v for v in before['package'] if v['name']!='rustls']==[v for v in after['package'] if v['name']!='rustls']
+          p.write_text(result)
+          pathlib.Path('/tmp/rustls-only/expected-sha256.txt').write_text(hashlib.sha256(p.read_bytes()).hexdigest()+'\n')
+          PY
+          cargo metadata --locked --format-version 1 > /tmp/rustls-only/metadata.json
+          cargo audit --json > /tmp/rustls-only/audit.json
+          git diff --check
+          git diff -- Cargo.lock > /tmp/rustls-only/lock.patch
+          cp Cargo.lock /tmp/rustls-only/Cargo.lock
+      - name: Store validated lockfile blob for subsequent review, without changing any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import pathlib,json,hashlib
+          p=pathlib.Path('Cargo.lock')
+          assert hashlib.sha256(p.read_bytes()).hexdigest()==pathlib.Path('/tmp/rustls-only/expected-sha256.txt').read_text().strip()
+          pathlib.Path('/tmp/rustls-only/blob-input.json').write_text(json.dumps({'content':p.read_text(),'encoding':'utf-8'}))
+          PY
+          gh api --method POST repos/yongkyuns/RustRobotics/git/blobs --input /tmp/rustls-only/blob-input.json > /tmp/rustls-only/blob-result.json
+          rm /tmp/rustls-only/blob-input.json
+          git hash-object Cargo.lock > /tmp/rustls-only/local-blob-sha.txt
+          python - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('/tmp/rustls-only')
+          assert json.loads((root/'blob-result.json').read_text())['sha']==(root/'local-blob-sha.txt').read_text().strip()
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rustls-only-${{ github.run_id }}
+          path: /tmp/rustls-only/
+          retention-days: 30
+          if-no-files-found: error
