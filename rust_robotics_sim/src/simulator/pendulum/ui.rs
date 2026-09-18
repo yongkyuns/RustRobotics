@@ -385,7 +385,7 @@ impl InvertedPendulum {
                 metrics.total_updates, metrics.total_episodes, metrics.mean_episode_return
             ));
             if total > 0 {
-                ui.label(format!("Replicas {total}/{ready}/{busy}"));
+                ui.label(format!("Environments {total}/{ready}/{busy}"));
             }
         } else {
             ui.label("Trainer not initialized.");
@@ -395,13 +395,13 @@ impl InvertedPendulum {
             .default_open(false)
             .show(ui, |ui| {
                 #[cfg(target_arch = "wasm32")]
-                ui.label("Web: CPU workers.");
+                ui.label("Web: one learner worker; pooled environments.");
 
                 Grid::new(("ppo_trainer_compact_grid", self.id))
                     .num_columns(4)
                     .spacing([10.0, 4.0])
                     .show(ui, |ui| {
-                        ui.label("Parallel");
+                        ui.label("Environments");
                         ui.add(
                             DragValue::new(&mut self.parallel_trainers)
                                 .range(1..=32)
@@ -415,7 +415,7 @@ impl InvertedPendulum {
                         );
                         ui.end_row();
 
-                        ui.label("Rollout");
+                        ui.label("Steps/env");
                         ui.add(
                             DragValue::new(&mut self.trainer_config.ppo.rollout_steps)
                                 .range(32..=8192)
@@ -521,7 +521,7 @@ impl InvertedPendulum {
             ui.separator();
             ui.collapsing("PPO Trainer", |ui| {
                 #[cfg(target_arch = "wasm32")]
-                ui.label("Web: CPU workers.");
+                ui.label("Web: one learner worker; pooled environments.");
 
                 ui.horizontal_wrapped(|ui| {
                     if ui
@@ -556,7 +556,7 @@ impl InvertedPendulum {
                     .num_columns(2)
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| {
-                        ui.label("Parallel");
+                        ui.label("Environments");
                         ui.add(
                             DragValue::new(&mut self.parallel_trainers)
                                 .range(1..=32)
@@ -572,7 +572,7 @@ impl InvertedPendulum {
                         );
                         ui.end_row();
 
-                        ui.label("Rollout");
+                        ui.label("Steps/env");
                         ui.add(
                             DragValue::new(&mut self.trainer_config.ppo.rollout_steps)
                                 .range(32..=8192)
@@ -612,7 +612,7 @@ impl InvertedPendulum {
 
                 if let Some(metrics) = self.trainer_backend.metrics() {
                     if total > 0 {
-                        ui.label(format!("Replicas {}/{}/{}", total, ready, busy));
+                        ui.label(format!("Environments {}/{}/{}", total, ready, busy));
                     }
                     ui.label(format!(
                         "Upd {}  Step {}  Ep {}",

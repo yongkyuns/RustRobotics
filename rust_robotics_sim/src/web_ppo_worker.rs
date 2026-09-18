@@ -42,6 +42,24 @@ struct WorkerSharedStateInput {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct WorkerTrainerConfig {
+    #[serde(flatten)]
+    config: PpoTrainerConfig,
+    #[serde(default = "one_environment")]
+    environment_count: usize,
+    // Optional caller-owned seed also makes real worker regressions reproducible.
+    // Existing calls omit it and retain entropy-seeded initialization.
+    #[serde(default)]
+    seed: Option<u64>,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn one_environment() -> usize {
+    1
+}
+
+#[cfg(target_arch = "wasm32")]
 fn next_session_id() -> u32 {
     NEXT_SESSION_ID.with(|next| {
         let id = next.get();
@@ -58,9 +76,28 @@ fn js_err(message: impl Into<String>) -> JsValue {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn rust_robotics_ppo_worker_create_trainer(config: JsValue) -> Result<JsValue, JsValue> {
-    let config: PpoTrainerConfig =
+    let input: WorkerTrainerConfig =
         serde_wasm_bindgen::from_value(config).map_err(|err| js_err(err.to_string()))?;
-    let session = PpoTrainerSession::new(config);
+    if input.environment_count == 0
+        || input
+            .config
+            .ppo
+            .rollout_steps
+            .checked_mul(input.environment_count)
+            .is_none()
+    {
+        return Err(js_err(
+            "invalid PPO environment count or pooled rollout size",
+        ));
+    }
+    let session = match input.seed {
+        Some(seed) => PpoTrainerSession::new_seeded_with_environments(
+            input.config,
+            seed,
+            input.environment_count,
+        ),
+        None => PpoTrainerSession::new_with_environments(input.config, input.environment_count),
+    };
     let response = WorkerTrainerCreated {
         session_id: next_session_id(),
         metrics: session.metrics().clone(),

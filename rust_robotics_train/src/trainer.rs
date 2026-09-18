@@ -30,6 +30,10 @@ use serde::{Deserialize, Serialize};
 mod distribution;
 use distribution::{standard_normal, SquashedGaussian};
 
+#[path = "ppo_rollout_pool.rs"]
+mod rollout_pool;
+use rollout_pool::{RolloutCollector, RolloutCursor, RolloutEnvironment};
+
 const OBS_DIM: usize = 4;
 
 /// Configuration for a pendulum PPO training session.
@@ -82,7 +86,7 @@ struct RolloutBatch {
 ///
 /// A session owns:
 ///
-/// - the current environment state
+/// - one or more independent environment/episode/RNG states
 /// - actor / critic networks
 /// - optimizer state
 /// - running metrics
@@ -107,6 +111,9 @@ pub struct PpoTrainerSession {
     environment_rng: StdRng,
     action_rng: StdRng,
     update_rng: StdRng,
+    // Stream zero retains the original fields/seeding contract above. Additional
+    // streams contain only environment/episode/RNG state, not independent agents.
+    additional_environments: Vec<RolloutEnvironment>,
 }
 
 impl PpoTrainerSession {
@@ -169,7 +176,52 @@ impl PpoTrainerSession {
             environment_rng,
             action_rng,
             update_rng,
+            additional_environments: Vec::new(),
         }
+    }
+
+    /// Creates one learner with several environment streams and fresh randomness.
+    /// `ppo.rollout_steps` is the number of transitions PER environment/update.
+    /// Collection is synchronous; this does not promise CPU-worker parallelism.
+    pub fn new_with_environments(config: PpoTrainerConfig, environments: usize) -> Self {
+        Self::new_seeded_with_environments(config, rand::thread_rng().gen(), environments)
+    }
+
+    /// Reproducible shared-policy collection. One environment is exactly the
+    /// original seeded session, including initialization and every RNG stream.
+    /// Additional streams use a separate, fixed seed domain; adding streams does
+    /// not alter the initial models or any existing stream's initial randomness.
+    ///
+    /// Panics for zero environments or an overflowing rollout size. As with
+    /// `new_seeded`, replay is within the same numerical backend/build only.
+    pub fn new_seeded_with_environments(
+        config: PpoTrainerConfig,
+        seed: u64,
+        environments: usize,
+    ) -> Self {
+        assert!(environments > 0, "PPO requires at least one environment");
+        assert!(
+            config.ppo.rollout_steps.checked_mul(environments).is_some(),
+            "PPO pooled rollout size overflows usize"
+        );
+        let env_config = config.env;
+        let mut session = Self::new_seeded(config, seed);
+        let mut streams = StdRng::seed_from_u64(seed ^ 0x504f_4f4c_4544_0001);
+        for _ in 1..environments {
+            session
+                .additional_environments
+                .push(RolloutEnvironment::new(
+                    env_config,
+                    streams.gen(),
+                    streams.gen(),
+                ));
+        }
+        session
+    }
+
+    /// Number of persistent environments sharing this session's actor/critic.
+    pub fn environment_count(&self) -> usize {
+        1 + self.additional_environments.len()
     }
 
     /// Returns the immutable training configuration for this session.
@@ -187,7 +239,7 @@ impl PpoTrainerSession {
         self.actor.valid().snapshot(self.config.action_std)
     }
 
-    /// Exports both actor and critic state for replica synchronization.
+    /// Exports actor and critic weights for an explicit external warm start.
     pub fn shared_state(&self) -> PpoSharedState {
         PpoSharedState {
             policy: self.snapshot(),
@@ -217,8 +269,8 @@ impl PpoTrainerSession {
 
     /// Runs a requested number of PPO updates.
     ///
-    /// Each update collects a fresh rollout, then performs one optimization pass
-    /// over that rollout using shuffled minibatches.
+    /// Each update collects every environment under one frozen actor/critic,
+    /// then optimizes the union for the configured epochs with shuffled minibatches.
     pub fn train_updates(&mut self, num_updates: usize) {
         for _ in 0..num_updates {
             let rollout = self.collect_rollout();
@@ -246,86 +298,53 @@ impl PpoTrainerSession {
     }
 
     fn collect_rollout_with_rng<R: Rng + ?Sized>(&mut self, rng: &mut R) -> RolloutBatch {
-        let rollout_steps = self.config.ppo.rollout_steps;
-        let mut observations = Vec::with_capacity(rollout_steps);
-        let mut latent_actions = Vec::with_capacity(rollout_steps);
-        let mut old_log_probs = Vec::with_capacity(rollout_steps);
-        let mut rewards = Vec::with_capacity(rollout_steps);
-        let mut values = Vec::with_capacity(rollout_steps);
-        let mut terminals = Vec::with_capacity(rollout_steps);
-        let mut returns = Vec::with_capacity(rollout_steps);
-        let mut advantages = Vec::with_capacity(rollout_steps);
-        let mut path_start = 0;
-        let distribution = SquashedGaussian::new(self.config.action_std, self.actor.action_limit);
-
-        for index in 0..rollout_steps {
-            let observation = self.current_observation;
-            let mean = self.policy_latent_mean(observation);
-            let value = self.value_estimate(observation);
-            let sample = distribution.sample(mean, rng);
-            let step = self
-                .env
-                .step_with_rng(sample.action, &mut self.environment_rng);
-
-            observations.push(observation);
-            latent_actions.push(sample.latent);
-            old_log_probs.push(sample.log_prob);
-            rewards.push(step.reward);
-            values.push(value);
-            terminals.push(step.terminated());
-            self.episode_return += step.reward;
-            self.metrics.total_env_steps += 1;
-
-            // Every reset ends a GAE trace. Only true task termination removes
-            // the bootstrap; time limits use the final observation BEFORE reset.
-            // A buffer cutoff finishes targets without ending the live episode.
-            if step.done || index + 1 == rollout_steps {
-                let bootstrap_value = if step.terminated() {
-                    0.0
-                } else {
-                    self.value_estimate(step.observation)
-                };
-                let (path_returns, path_advantages) = compute_gae(
-                    &rewards[path_start..],
-                    &values[path_start..],
-                    &terminals[path_start..],
-                    bootstrap_value,
-                    self.config.ppo.gamma,
-                    self.config.ppo.gae_lambda,
-                );
-                returns.extend(path_returns);
-                advantages.extend(path_advantages);
-                path_start = rewards.len();
-            }
-
-            self.current_observation = step.observation;
-            if step.done {
-                let episode_return = std::mem::take(&mut self.episode_return);
-                self.metrics.total_episodes += 1;
-                self.metrics.last_episode_return = episode_return;
-                if self.metrics.total_episodes == 1 {
-                    self.metrics.best_episode_return = episode_return;
-                } else {
-                    self.metrics.best_episode_return =
-                        self.metrics.best_episode_return.max(episode_return);
-                }
-                push_recent(&mut self.recent_episode_returns, episode_return, 32);
-                self.metrics.mean_episode_return =
-                    mean_slice(&self.recent_episode_returns).unwrap_or(episode_return);
-                self.current_observation = self.env.reset_with_rng(&mut self.environment_rng);
-            }
+        // All streams see the SAME frozen actor and critic. No optimization is
+        // allowed until the complete pool has been collected. Each call below
+        // independently closes terminal, timeout and buffer-cutoff GAE traces.
+        let mut collector = RolloutCollector {
+            config: &self.config,
+            device: &self.device,
+            actor: &self.actor,
+            critic: &self.critic,
+            metrics: &mut self.metrics,
+            recent_episode_returns: &mut self.recent_episode_returns,
+        };
+        let mut rollout = collector.collect(
+            RolloutCursor {
+                env: &mut self.env,
+                current_observation: &mut self.current_observation,
+                episode_return: &mut self.episode_return,
+                environment_rng: &mut self.environment_rng,
+            },
+            rng,
+        );
+        for stream in &mut self.additional_environments {
+            let RolloutEnvironment {
+                env,
+                current_observation,
+                episode_return,
+                environment_rng,
+                action_rng,
+            } = stream;
+            let next = collector.collect(
+                RolloutCursor {
+                    env,
+                    current_observation,
+                    episode_return,
+                    environment_rng,
+                },
+                action_rng,
+            );
+            rollout.observations.extend(next.observations);
+            rollout.latent_actions.extend(next.latent_actions);
+            rollout.old_log_probs.extend(next.old_log_probs);
+            rollout.returns.extend(next.returns);
+            rollout.advantages.extend(next.advantages);
         }
-
-        // Keep the existing whole-rollout normalization, not per-episode scaling.
-        let advantages = normalize(&advantages);
-        self.metrics.last_mean_advantage = mean_slice(&advantages).unwrap_or(0.0);
-        RolloutBatch {
-            observations,
-            latent_actions,
-            old_log_probs,
-            returns,
-            advantages,
-        }
+        // Normalize ONCE over the union, never separately per stream/episode.
+        rollout.advantages = normalize(&rollout.advantages);
+        self.metrics.last_mean_advantage = mean_slice(&rollout.advantages).unwrap_or(0.0);
+        rollout
     }
 
     /// Optimizes actor and critic networks from a prepared rollout batch.
@@ -419,6 +438,7 @@ impl PpoTrainerSession {
         self.metrics.last_value_loss = last_value_loss;
     }
 
+    #[cfg(test)]
     /// Computes the unsquashed Gaussian mean predicted by the actor.
     fn policy_latent_mean(&self, observation: [f32; 4]) -> f32 {
         let policy = self.actor.valid();
@@ -426,15 +446,6 @@ impl PpoTrainerSession {
             <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
         >(&self.device, &[observation]);
         tensor_scalar(&policy.latent_mean(tensor))
-    }
-
-    /// Computes the critic's scalar value estimate for one observation.
-    fn value_estimate(&self, observation: [f32; 4]) -> f32 {
-        let critic = self.critic.valid();
-        let tensor = obs_tensor::<
-            <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
-        >(&self.device, &[observation]);
-        tensor_scalar(&critic.forward(tensor))
     }
 }
 
@@ -566,3 +577,7 @@ mod rollout_tests;
 #[cfg(test)]
 #[path = "ppo_seed_tests.rs"]
 mod seed_tests;
+
+#[cfg(test)]
+#[path = "ppo_pool_tests.rs"]
+mod pool_tests;
