@@ -1,0 +1,147 @@
+name: Seed203 recovery action credit
+
+on:
+  push:
+    branches: ["audit/ppo-seed203-credit-20260918"]
+    paths: [".github/workflows/ppo-seed203-credit.yml", "audits/ppo_seed203_credit/native.rs", "audits/ppo_seed203_credit/prepare.py", "audits/ppo_seed203_credit/probe.py", "audits/ppo_seed203_credit/test_probe.py"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CREDIT_BUILD: /tmp/credit-build
+      RUSTUP_TOOLCHAIN: 1.98.1
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify immutable inputs and prepare the native branching ABI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$CREDIT_BUILD"
+          python audits/ppo_seed203_credit/prepare.py 2>&1 | tee "$CREDIT_BUILD/preparation.log"
+      - name: Check unchanged native plant and regression contracts
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$CREDIT_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$CREDIT_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$CREDIT_BUILD/integration-tests.log"
+          cargo build --locked --release -p rust_robotics_train --lib
+          mkdir -p "$CREDIT_BUILD/library"
+          cp target/release/librust_robotics_train.so "$CREDIT_BUILD/library/librust_robotics_train.so"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Install pinned policy inference runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6
+          python -m pip freeze > "$CREDIT_BUILD/python-freeze.txt"
+      - name: Freeze all panels and execute predeclared controls
+        run: |
+          python -m unittest discover -s audits/ppo_seed203_credit -p 'test_*.py' -v 2>&1 | tee "$CREDIT_BUILD/python-tests.log"
+          python audits/ppo_seed203_credit/probe.py select --inputs "$CREDIT_BUILD/inputs" --output "$CREDIT_BUILD"
+          python audits/ppo_seed203_credit/probe.py controls --inputs "$CREDIT_BUILD/inputs" --output "$CREDIT_BUILD/controls" --panels "$CREDIT_BUILD/panels.json" --library "$CREDIT_BUILD/library/librust_robotics_train.so" 2>&1 | tee "$CREDIT_BUILD/controls.log"
+          grep -F 'CREDIT CONTROLS PASS' "$CREDIT_BUILD/controls.log"
+      - name: Retain preparation and restore original source
+        if: always()
+        run: |
+          mkdir -p "$CREDIT_BUILD"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['CREDIT_BUILD'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p!=root/'manifest.json'},indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/src/env.rs rust_robotics_train/Cargo.toml
+          git diff --exit-code d3f59f9bf38d4038ba7c5008e3a3b41c15e99835 -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seed203-credit-build
+          path: /tmp/credit-build/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  probe:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: Paired credit ${{ matrix.arm }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [baseline, extra-frozen, extra-refresh]
+    env:
+      CREDIT_BUILD: /tmp/credit-build
+      CREDIT_OUT: /tmp/credit-${{ matrix.arm }}
+      CREDIT_ARM: ${{ matrix.arm }}
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: seed203-credit-build
+          path: /tmp/credit-build
+      - name: Verify exact build, source and frozen panels
+        run: |
+          mkdir -p "$CREDIT_OUT"
+          python - <<'PY'
+          import hashlib,json,os,shutil
+          from pathlib import Path
+          root=Path(os.environ['CREDIT_BUILD']);out=Path(os.environ['CREDIT_OUT'])
+          for n,h in json.loads((root/'manifest.json').read_text()).items(): assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          for n in ['panels.json','baseline.txt','commit.txt','input-artifacts.json','manifest.json']:
+              shutil.copyfile(root/n,out/('build-'+n))
+          PY
+      - name: Install the identical pinned inference runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6
+          python -m pip freeze > "$CREDIT_OUT/python-freeze.txt"
+      - name: Run both first-action branches and every predetermined continuation
+        run: |
+          python "$CREDIT_BUILD/sources/audits/ppo_seed203_credit/probe.py" measure --inputs "$CREDIT_BUILD/inputs" --output "$CREDIT_OUT" --panels "$CREDIT_BUILD/panels.json" --library "$CREDIT_BUILD/library/librust_robotics_train.so" --arm "$CREDIT_ARM" 2>&1 | tee "$CREDIT_OUT/execution.log"
+          grep -F 'CREDIT COMPLETE' "$CREDIT_OUT/execution.log"
+      - name: Retain all outcomes including failures
+        if: always()
+        run: |
+          mkdir -p "$CREDIT_OUT"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['CREDIT_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seed203-credit-${{ matrix.arm }}
+          path: ${{ env.CREDIT_OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
