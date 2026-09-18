@@ -1,15 +1,14 @@
-"""Reproduce the first reviewed patch, then apply explicit contract corrections.
+"""Apply the reviewed shared-plant correction and permanent contract fixtures.
 The historical preparation is pinned; the final production commit contains only
 ordinary source and permanent tests, not this generator or its audit history.
 """
 from pathlib import Path
+import re
 import subprocess
 original = subprocess.check_output(['git','show',
     '08fa3d57e01cc176d90fef2c30875461eec5669e:audits/plant_fix/apply.py']).decode()
 exec(compile(original, 'original-plant-patch.py', 'exec'))
 
-# RNG reference tests independently reproduce draw order, not the old physical
-# discretization. Shared-plant dynamics have independent Lagrange/RK4 tests.
 seed = 'rust_robotics_train/src/ppo_seed_tests.rs'
 edit(seed, 'use rust_robotics_algo::{control::StateSpace, prelude::Vector4};',
      'use rust_robotics_algo::{cart_pole::CartPoleParameters, prelude::Vector4};')
@@ -20,9 +19,7 @@ edit(seed, '''        // Reuse only the unchanged plant matrix, not production n
         // Independent physics checks live in cart_pole::tests.
         let next = CartPoleParameters::from(env.model()).step(
             Vector4::from_column_slice(&x), clipped + action_noise + disturbance, c.dt);''')
-# Guarantee a single negative terminal episode independently of whether the
-# integrator moves position during the first step. Keep the original assertion
-# that the first negative return becomes best (rather than max(0, return)).
+# Guarantee one negative terminal episode instead of summing separate episodes.
 rollout = 'rust_robotics_train/src/ppo_rollout_tests.rs'
 edit(rollout, '''    env.max_angle_rad = 0.0;
     let mut session = session(env, 2);
@@ -32,8 +29,6 @@ edit(rollout, '''    env.max_angle_rad = 0.0;
     let mut session = session(env, 1);
     let expected = trace(&session, 1).0;''')
 
-# Centralize activation. Publishing a new snapshot while already in Policy mode
-# must not reset the trajectory, but entering Policy mode must use its reset law.
 domain = 'rust_robotics_sim/src/simulator/pendulum/domain.rs'
 edit(domain, '''    pub fn set_policy_controller(&mut self, snapshot: &PolicySnapshot) {
         self.controller = Controller::policy(snapshot.clone());
@@ -43,8 +38,6 @@ edit(domain, '''    pub fn set_policy_controller(&mut self, snapshot: &PolicySna
         self.controller_selection = ControllerKind::Policy;
         if entering_policy { self.reset_state(); }
     }''')
-# Expose the seeded wrapper internally so tests exercise the same path used by
-# the application, not merely a hand-copied dynamics helper.
 edit(domain, '''    pub fn step_with_noise(&mut self, dt: f32, noise: NoiseConfig) {
         self.configure_training_noise(noise);''', '''    pub fn step_with_noise(&mut self, dt: f32, noise: NoiseConfig) {
         self.step_with_rng(dt, noise, &mut rand::thread_rng());
@@ -54,16 +47,21 @@ edit(domain, '''    pub fn step_with_noise(&mut self, dt: f32, noise: NoiseConfi
         self.configure_training_noise(noise);''')
 edit(domain, '            self.step_policy_with_rng(dt, &mut rand::thread_rng());',
      '            self.step_policy_with_rng(dt, rng);')
-edit(domain, '''        assert_eq!(dt, self.trainer_config.env.dt, "PPO live timestep must match training");''',
-    '''        if self.active_training_environment.is_some() && self.trainer_backend.snapshot().is_none() {
+p = Path(domain); text = p.read_text()
+pattern = r'        assert_eq!\(\s*dt,\s*self\.trainer_config\.env\.dt,\s*"PPO live timestep must match training"\s*\);'
+matches = list(re.finditer(pattern, text)); assert len(matches) == 1
+match = matches[0]
+guard = '''        if self.active_training_environment.is_some() && self.trainer_backend.snapshot().is_none() {
             // A web reset may not have published its new snapshot yet. Never
             // execute retained old weights on the newly configured environment.
             self.last_control_error = Some("Waiting for the matching PPO policy snapshot.".to_owned());
             return;
         }
-        assert_eq!(dt, self.trainer_config.env.dt, "PPO live timestep must match training");''')
-# Original patch has already been rustfmt'd; use the formatted anchor if needed.
+'''
+p.write_text(text[:match.start()] + guard + text[match.start():])
 
+# Resolve global settings before a DOM action can create a trainer, not only on
+# the next animation frame, so a start cannot immediately invalidate itself.
 runtime = 'rust_robotics_sim/src/simulator/runtime.rs'
 p = Path(runtime); text = p.read_text()
 for method, call in [('set_pendulum_controller_kind', '            pendulum.select_controller_kind(kind);'),
@@ -79,7 +77,6 @@ for method, call in [('set_pendulum_controller_kind', '            pendulum.sele
     text = text[:start] + section + text[end:]
 p.write_text(text)
 
-# Adjust the explicit-state fixture for activation now doing a real reset.
 contract = Path('rust_robotics_sim/src/simulator/pendulum/contract_tests.rs')
 text = contract.read_text()
 anchor = '        sim.set_policy_controller(&policy);'
