@@ -1,7 +1,6 @@
 //! Disposable audit of ongoing critic fitting. Ordinary PPO runs first unchanged.
 use super::*;
 use std::{cell::RefCell, io::Write, path::Path};
-
 type Inner = <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend;
 
 #[derive(Clone, Debug)]
@@ -15,12 +14,23 @@ pub(super) struct Row {
 }
 thread_local! {
     static ROWS: RefCell<Option<Vec<Row>>> = const { RefCell::new(None) };
+    static STEPS: RefCell<Option<usize>> = const { RefCell::new(None) };
 }
 pub(super) fn observe(row: Row) {
     ROWS.with(|r| { if let Some(r) = r.borrow_mut().as_mut() { r.push(row); } });
 }
 pub(super) fn bootstrap(value: f32) {
     ROWS.with(|r| { if let Some(r) = r.borrow_mut().as_mut() { r.last_mut().unwrap().bootstrap = value; } });
+}
+pub(super) fn ordinary_minibatch(session: &PpoTrainerSession, indices: &[usize]) {
+    STEPS.with(|s| { if let Some(s) = s.borrow_mut().as_mut() { *s += 1; } });
+    let update = session.metrics.total_updates + 1;
+    if ![1,128,512,2048].contains(&update) { return; }
+    if let Ok(out) = std::env::var("PPO_CRITIC_TRACE") {
+        let path = Path::new(&out).join(format!("ordinary-indices-{update}.jsonl"));
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(f,"{indices:?}").unwrap();
+    }
 }
 fn collect(session: &mut PpoTrainerSession) -> (RolloutBatch, Vec<Row>) {
     ROWS.with(|r| { assert!(r.borrow().is_none()); *r.borrow_mut() = Some(Vec::new()); });
@@ -88,6 +98,8 @@ fn trace_batch(path: &Path, batch: &RolloutBatch, rows: &[Row]) {
     std::fs::write(path, text).unwrap();
 }
 fn critic_epoch(session: &mut PpoTrainerSession, batch: &RolloutBatch, targets: &[f32], indices: &[usize]) {
+    // As in production, skipping Adam at zero also preserves existing moments.
+    if session.config.ppo.value_loss_coef == 0.0 { return; }
     for chunk in indices.chunks(session.config.ppo.mini_batch_size) {
         let observations = gather_observations(&batch.observations, chunk);
         let returns = gather_scalars(targets, chunk);
@@ -104,11 +116,13 @@ impl PpoTrainerSession {
     pub(crate) fn audit_critic_update(&mut self, mode: u32, extra_rng: &mut StdRng) {
         assert!(mode <= 2 && self.environment_count() == 1);
         assert_eq!(self.config.ppo.epochs_per_update, 4);
+        assert!(self.config.ppo.value_loss_coef > 0.0);
         let (batch, rows) = collect(self);
         let before_mse = mse(&predictions(self, &batch.observations), &batch.returns);
-        // The actual production actor and critic optimizer, with frozen actor
-        // likelihoods/advantages and original minibatch RNG, execute unchanged.
+        // Actual production optimization, unchanged except for an observer.
+        STEPS.with(|s| *s.borrow_mut() = Some(0));
         self.optimize(&batch);
+        assert_eq!(STEPS.with(|s| s.borrow_mut().take().unwrap()), 16);
         let actor = self.snapshot();
         let metrics = self.metrics.clone();
         let rngs = [rng_probe(&self.environment_rng), rng_probe(&self.action_rng), rng_probe(&self.update_rng)];
@@ -137,8 +151,6 @@ impl PpoTrainerSession {
                 }
             }
         }
-        // Extra fitting is not allowed to touch the actor, original RNGs,
-        // physical environment, metrics or stored actor targets.
         assert_eq!(actor, self.snapshot());
         assert_eq!(metrics, self.metrics);
         assert_eq!(rngs, [rng_probe(&self.environment_rng), rng_probe(&self.action_rng), rng_probe(&self.update_rng)]);
@@ -176,7 +188,7 @@ mod tests {
             assert_eq!(base.snapshot(),candidate.snapshot()); assert_eq!(base.metrics(),candidate.metrics());
             assert_ne!(base.shared_state().value,candidate.shared_state().value);
             assert_eq!(rng_probe(&base.update_rng),rng_probe(&candidate.update_rng));
-            let x=base.env.clone();assert_eq!(x.state(),candidate.env.state());
+            assert_eq!(base.env.state(),candidate.env.state());
         }
     }
     #[test]
@@ -200,10 +212,12 @@ mod tests {
         assert_eq!(actual,vec![-0.875,-10.0,8.0,9.75]);
     }
     #[test]
-    fn zero_value_weight_does_not_move_critic_in_extra_kernel() {
-        let mut s=session(201);let (b,_)=collect(&mut s);s.config.ppo.value_loss_coef=0.0;
-        // Production skips Adam at zero coefficient. The audit experiment only
-        // permits the positive default and does not silently generalize that API.
-        assert_eq!(s.config.ppo.value_loss_coef,0.0);assert_eq!(b.observations.len(),512);
+    fn zero_value_weight_does_not_move_critic_with_warm_adam() {
+        let mut s=session(201);s.train_updates(1);let (b,_)=collect(&mut s);
+        s.config.ppo.value_loss_coef=0.0;
+        let before=s.shared_state().value;
+        let indices:Vec<_>=(0..b.observations.len()).collect();
+        critic_epoch(&mut s,&b,&b.returns,&indices);
+        assert_eq!(before,s.shared_state().value);
     }
 }
