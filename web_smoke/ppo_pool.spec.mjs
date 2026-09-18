@@ -77,8 +77,6 @@ for (const count of [1, 3]) {
       expect(split.metrics.total_env_steps).toBe(4 * 8 * count);
       expect(split.metrics.total_episodes).toBeGreaterThanOrEqual(2 * count);
       expect(split.shared_state).not.toEqual(first.shared_state);
-      // Compare against the same real learner running directly in this WASM
-      // instance, not a mock or a portable inference-only reconstruction.
       const direct = await page.evaluate((cfg) => {
         const api = globalThis.wasm_bindgen;
         const created = api.rust_robotics_ppo_worker_create_trainer(cfg);
@@ -145,5 +143,72 @@ test("browser coordinator reports pooled environments and one coherent update bu
   expect(state.total_replicas).toBe(3);
   expect(state.metrics.total_env_steps).toBe(state.metrics.total_updates * 3 * 32);
   expect(state.snapshot_ready).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test("worker and direct WASM share the configured nonlinear plant", async ({ page }) => {
+  const errors = await boot(page);
+  const config = { ...configuration(3),
+    plant: { length_m: 0.7, cart_mass_kg: 1.6, pole_mass_kg: 0.3 } };
+  const handle = await page.evaluate((cfg) => globalThis.rustRoboticsPpoTrainerCreate(cfg), config);
+  try {
+    const initial = await ready(page, handle, 0);
+    const worker = await train(page, handle, 4, 4);
+    const comparison = await page.evaluate((cfg) => {
+      const api = globalThis.wasm_bindgen;
+      const custom = api.rust_robotics_ppo_worker_create_trainer(cfg);
+      const { plant, ...legacy } = cfg;
+      const defaults = api.rust_robotics_ppo_worker_create_trainer(legacy);
+      try {
+        return { custom: api.rust_robotics_ppo_worker_train(custom.session_id, 4),
+          defaults: api.rust_robotics_ppo_worker_train(defaults.session_id, 4) };
+      } finally {
+        api.rust_robotics_ppo_worker_destroy_trainer(custom.session_id);
+        api.rust_robotics_ppo_worker_destroy_trainer(defaults.session_id);
+      }
+    }, config);
+    expect(worker.shared_state).toEqual(comparison.custom.shared_state);
+    expect(worker.metrics).toEqual(comparison.custom.metrics);
+    expect(worker.metrics.total_env_steps).toBe(4 * 8 * 3);
+    expect(worker.shared_state).not.toEqual(comparison.defaults.shared_state);
+    expect(worker.shared_state).not.toEqual(initial.shared_state);
+    expect(errors).toEqual([]);
+  } finally {
+    await page.evaluate((h) => globalThis.rustRoboticsPpoTrainerDestroy(h), handle);
+  }
+});
+
+test("changing the displayed plant invalidates PPO until explicit restart", async ({ page }) => {
+  const errors = await boot(page);
+  await page.waitForFunction(() => globalThis.rustRoboticsEmbedGetState?.().payload?.pendulums?.length > 0);
+  const id = await page.evaluate(() => globalThis.rustRoboticsEmbedGetState().payload.pendulums[0].id);
+  const patch = async (value) => page.evaluate(([id, value]) =>
+    globalThis.wasm_bindgen.rust_robotics_test_patch_pendulum(id, JSON.stringify(value)), [id, value]);
+  const state = async () => page.evaluate((id) => globalThis.rustRoboticsEmbedGetState()
+    .payload.pendulums.find((p) => p.id === id), id);
+  await patch({ policy: { parallel_trainers: 2, rollout_steps: 32, epochs_per_update: 1,
+    training_updates_per_tick: 1 }, trainer_action: "start" });
+  await expect.poll(async () => (await state()).policy_trainer.metrics?.total_updates ?? 0).toBeGreaterThanOrEqual(1);
+  await patch({ trainer_action: "stop" });
+  await expect.poll(async () => !(await state()).policy_trainer.busy).toBe(true);
+  await patch({ beam_length: 0.7, cart_mass: 1.6, ball_mass: 0.3 });
+  await expect.poll(async () => {
+    const p = await state();
+    return !p.policy_trainer.training_active && !p.policy_trainer.snapshot_ready &&
+      !p.policy_trainer.initialized && p.policy_trainer.last_error?.includes("restart");
+  }).toBe(true);
+  await patch({ trainer_action: "use" });
+  expect((await state()).policy_trainer.snapshot_ready).toBe(false);
+  await patch({ trainer_action: "start" });
+  await expect.poll(async () => (await state()).policy_trainer.metrics?.total_updates ?? 0).toBeGreaterThanOrEqual(1);
+  await patch({ trainer_action: "stop" });
+  await expect.poll(async () => !(await state()).policy_trainer.busy).toBe(true);
+  const current = await state();
+  expect(current.pendulum.beam_length).toBeCloseTo(0.7);
+  expect(current.pendulum.cart_mass).toBeCloseTo(1.6);
+  expect(current.pendulum.ball_mass).toBeCloseTo(0.3);
+  expect(current.policy_trainer.snapshot_ready).toBe(true);
+  expect(current.policy_trainer.last_error).toBeNull();
+  expect(current.policy_trainer.metrics.total_env_steps).toBe(current.policy_trainer.metrics.total_updates * 2 * 32);
   expect(errors).toEqual([]);
 });
