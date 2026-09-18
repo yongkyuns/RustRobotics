@@ -32,6 +32,7 @@ def main():
     a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True)
     torch.set_num_threads(1);torch.set_num_interop_threads(1);torch.use_deterministic_algorithms(True)
     assert torch.__version__=='2.8.0+cpu' and np.__version__=='2.2.6'
+    (a.output/'torch-config.txt').write_text(torch.__config__.show())
     sys.path.insert(0,str(a.fixed));sys.path.insert(0,str(a.native/'sources/audits/ppo_boundary'))
     import fixed_tensors as fixed
     import compare as prior
@@ -55,12 +56,14 @@ def main():
             'free_gradient_replay_error':float(abs(gb-free['gradients'][t,1,:]).max()),'gate_mismatches':locations,
             'gradient_gap_before':float(abs(gb-ga).max()),'gradient_gap_after_derivative_only_gate_control':float(abs(gc-ga).max()),
             'loss_native':la,'loss_free':lb,'loss_controlled':lc,'forward_loss_exactly_unchanged':lb==lc}
-    assert result['native_gradient_replay_error']==result['free_gradient_replay_error']==0
-    assert len(locations)==1 and locations[0]['layer']==2 and lb==lc
+    gradient_replay_exact=result['native_gradient_replay_error']==result['free_gradient_replay_error']==0
+    result['exact_gradient_replay_check']=gradient_replay_exact
+    # Retain contrary measurements before asserting; the original check is
+    # enforced at the end rather than losing the evidence on an early exception.
     (a.output/'gate-probe.json').write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2),flush=True)
+    assert len(locations)==1 and locations[0]['layer']==2 and lb==lc
 
-    # A single artificial backward-gate intervention, then continue unmodified
-    # actual SB3 PPO.train with persistent parameters and optimizer moments.
     BasePPO=fixed.PPO;events=[]
     class GateControlledPPO(BasePPO):
         def __init__(self,*args,**kwargs):
@@ -86,15 +89,19 @@ def main():
     controlled=fixed.run_case(c,adam,'gate33',prior,a.output)
     assert events==[{'transaction':33,'backward_mask_changes':1,'forward_exact':True}]
     check=np.load(a.output/f'{name}-gate33.npz')
-    assert np.array_equal(check['states'][:t],free['states'][:t]),'prefix changed'
-    assert np.array_equal(check['states'][:,0,:],free['states'][:,0,:]),'unmodified actor changed'
+    prefix_equal=np.array_equal(check['states'][:t],free['states'][:t])
+    actor_equal=np.array_equal(check['states'][:,0,:],free['states'][:,0,:])
     original=json.loads((a.fixed/'results'/f'{name}-free.json').read_text())
     summary={'primary_original_result_unchanged':original['pass'],'primary_original_maximum_errors':original['maximum_errors'],
              'posthoc_gate_control_result':controlled['pass'],'posthoc_gate_control_maximum_errors':controlled['maximum_errors'],
-             'events':events,'prefix_bitwise_equal':True,'actor_entire_path_bitwise_equal':True,
+             'events':events,'prefix_bitwise_equal':prefix_equal,'actor_entire_path_bitwise_equal':actor_equal,
+             'exact_gradient_replay_check':gradient_replay_exact,
              'scope':'Only the identified derivative was controlled once. This is numerical attribution, not a PPO production fix or learned performance.'}
     (a.output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
-    print(json.dumps(result,indent=2));print(json.dumps(summary,indent=2))
+    print(json.dumps(summary,indent=2),flush=True)
+    assert prefix_equal,'prefix changed'
+    assert actor_equal,'unmodified actor changed'
+    assert gradient_replay_exact,'recorded gradient arrays did not replay exactly; measurements retained'
 
 
 if __name__=='__main__':main()
