@@ -47,6 +47,12 @@ insert_once(pool, '                *cursor.current_observation = cursor.env.rese
             #[cfg(test)]
             super::boundary_probe::record_next(*cursor.current_observation);
         }''')
+# The production constructor uses AdamConfig::new() for both networks. Export
+# the same actual compiled configuration; never infer epsilon from another library.
+insert_once(Path('audits/ppo_boundary/probe.rs'),
+            '    fs::create_dir_all(out).unwrap();',
+            '''    fs::create_dir_all(out).unwrap();
+    fs::write(out.join("adam-config.json"), format!("{}", AdamConfig::new())).unwrap();''')
 subprocess.run(['cargo', 'fmt', '--all'], check=True)
 subprocess.run(['git', 'diff', '--check'], check=True)
 changed = subprocess.check_output(['git', 'diff', '--name-only', '--', *PROTECTED]).decode().splitlines()
