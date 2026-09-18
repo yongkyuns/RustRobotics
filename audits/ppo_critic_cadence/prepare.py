@@ -52,15 +52,17 @@ pub extern "C" fn rr_trainer_free_critic(handle: u64) -> u32 {
 anchor='#[cfg(test)]\nmod tests {';assert bridge.count(anchor)==1
 (ROOT/'bridge.rs').write_text(bridge.replace(anchor,addition+'\n'+anchor))
 (ROOT/'reference.py').write_bytes(reference)
-# Retain the previous evaluator's observation-only wrapper, unchanged. Its
-# parent configuration constructor is not invoked by this study.
 evaluator=evaluator.replace("NATIVE/'sources/audits/ppo_recovery_batches/reference.py'","NATIVE/'sources/audits/ppo_critic_cadence/reference.py'")
 evaluator=evaluator.replace("NATIVE=Path(os.environ['PPO_BATCH_NATIVE'])","NATIVE=Path(os.environ['PPO_CRITIC_NATIVE'])")
 evaluator=evaluator.replace('r.LIB.rr_trainer_create_batch.argtypes=[C.c_uint64,C.c_uint32];r.LIB.rr_trainer_create_batch.restype=C.c_uint64','')
 (ROOT/'evaluation_wrapper.py').write_text(evaluator)
 p=Path('rust_robotics_train/Cargo.toml');assert '[lib]' not in p.read_text();p.write_text(p.read_text()+'\n[lib]\ncrate-type = ["rlib", "cdylib"]\n')
 p=Path('rust_robotics_train/src/lib.rs');p.write_text(p.read_text()+'\n#[path = "../../audits/ppo_critic_cadence/bridge.rs"]\nmod critic_bridge;\n')
-p=Path('rust_robotics_train/src/trainer.rs');p.write_text(p.read_text()+'\n#[path = "../../audits/ppo_critic_cadence/native.rs"]\nmod critic_audit;\n')
+p=Path('rust_robotics_train/src/trainer.rs');s=p.read_text()
+a='                last_value_loss = value_loss_scalar;'
+hook='                critic_audit::ordinary_minibatch(self, chunk);\n'
+assert s.count(a)==1;s=s.replace(a,hook+a)
+p.write_text(s+'\n#[path = "../../audits/ppo_critic_cadence/native.rs"]\nmod critic_audit;\n')
 p=Path('rust_robotics_train/src/ppo_rollout_pool.rs');s=p.read_text()
 a='            observations.push(observation);'
 b='''            critic_audit::observe(critic_audit::Row {
@@ -81,7 +83,7 @@ assert sorted(changed)==sorted(expected),changed
 for n in ['trainer.rs','lib.rs']:
     p=Path('rust_robotics_train/src')/n
     original=subprocess.check_output(['git','show',BASE+':'+str(p)]).decode()
-    assert p.read_text().startswith(original),n
+    assert p.read_text().replace(hook,'').startswith(original),n
 files=list(ROOT.glob('*'))+[Path('Cargo.lock'),Path('Cargo.toml'),Path('AGENTS.md')]
 for crate in ['rust_robotics_train','rust_robotics_core','rust_robotics_algo']:
     files+=list(Path(crate).rglob('*.rs'))+list(Path(crate).rglob('Cargo.toml'))
