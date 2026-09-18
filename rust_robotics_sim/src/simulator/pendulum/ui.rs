@@ -281,6 +281,11 @@ impl InvertedPendulum {
     }
 
     fn show_controller_summary(&self, ui: &mut Ui, available_policy: Option<&PolicySnapshot>) {
+        if self.policy_environment_stale {
+            ui.label(
+                "Plant/noise changed. Restart PPO training; old policy execution is disabled.",
+            );
+        }
         match &self.controller {
             Controller::LQR(model) => {
                 ui.label(format!(
@@ -486,6 +491,11 @@ impl InvertedPendulum {
         available_policy: Option<&PolicySnapshot>,
         controller_width: f32,
     ) {
+        if self.policy_environment_stale {
+            ui.label(
+                "Plant/noise changed. Restart PPO training; old policy execution is disabled.",
+            );
+        }
         ui.set_width(controller_width);
         ui.set_max_width(controller_width);
         ui.label("Controller:");

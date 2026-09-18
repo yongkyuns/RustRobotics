@@ -48,6 +48,10 @@ const OBS_DIM: usize = 4;
 ///   each update (`sync_policy_each_update`)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PpoTrainerConfig {
+    /// The physical plant used by every rollout stream. Old serialized configs
+    /// without this field retain the historical physical parameter defaults.
+    #[serde(default)]
+    pub plant: rust_robotics_algo::cart_pole::CartPoleParameters,
     pub env: PendulumEnvConfig,
     pub ppo: PpoConfig,
     pub hidden_dim: usize,
@@ -60,6 +64,7 @@ pub struct PpoTrainerConfig {
 impl Default for PpoTrainerConfig {
     fn default() -> Self {
         Self {
+            plant: Default::default(),
             env: PendulumEnvConfig::default(),
             ppo: PpoConfig::default(),
             hidden_dim: 64,
@@ -149,7 +154,7 @@ impl PpoTrainerSession {
         let mut environment_rng = child();
         let action_rng = child();
         let update_rng = child();
-        let env = PendulumEnv::new_with_rng(Default::default(), config.env, &mut environment_rng);
+        let env = PendulumEnv::new_with_rng(config.plant.model(), config.env, &mut environment_rng);
         let current_observation = env.observation_with_rng(&mut environment_rng);
         let actor = PolicyNetwork {
             mlp: Mlp::new_with_rng(&device, OBS_DIM, config.hidden_dim, 1, &mut actor_rng),
@@ -205,12 +210,14 @@ impl PpoTrainerSession {
             "PPO pooled rollout size overflows usize"
         );
         let env_config = config.env;
+        let model = config.plant.model();
         let mut session = Self::new_seeded(config, seed);
         let mut streams = StdRng::seed_from_u64(seed ^ 0x504f_4f4c_4544_0001);
         for _ in 1..environments {
             session
                 .additional_environments
                 .push(RolloutEnvironment::new(
+                    model,
                     env_config,
                     streams.gen(),
                     streams.gen(),
@@ -581,3 +588,7 @@ mod seed_tests;
 #[cfg(test)]
 #[path = "ppo_pool_tests.rs"]
 mod pool_tests;
+
+#[cfg(test)]
+#[path = "plant_tests.rs"]
+mod plant_tests;

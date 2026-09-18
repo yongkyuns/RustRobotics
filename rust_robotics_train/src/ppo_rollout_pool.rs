@@ -14,9 +14,14 @@ pub(super) struct RolloutEnvironment {
 }
 
 impl RolloutEnvironment {
-    pub(super) fn new(config: PendulumEnvConfig, environment_seed: u64, action_seed: u64) -> Self {
+    pub(super) fn new(
+        model: rust_robotics_algo::inverted_pendulum::Model,
+        config: PendulumEnvConfig,
+        environment_seed: u64,
+        action_seed: u64,
+    ) -> Self {
         let mut environment_rng = StdRng::seed_from_u64(environment_seed);
-        let env = PendulumEnv::new_with_rng(Default::default(), config, &mut environment_rng);
+        let env = PendulumEnv::new_with_rng(model, config, &mut environment_rng);
         let current_observation = env.observation_with_rng(&mut environment_rng);
         Self {
             env,
