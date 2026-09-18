@@ -1,0 +1,188 @@
+name: PPO epsilon-only learning comparison
+
+on:
+  push:
+    branches: ["audit/ppo-epsilon-20260918"]
+    paths: [".github/workflows/ppo-epsilon.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      PPO_EPS_OUT: /tmp/c4-native
+      PPO_EPS_NATIVE: /tmp/c4-native
+      PPO_REF_LIBRARY: /tmp/c4-native/library/librust_robotics_train.so
+      PPO_C3_ARCHIVE: /tmp/c3-original.zip
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/workflows/ppo-epsilon.yml
+      - name: Recover immutable C3 source and prepare epsilon-only constructor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$PPO_EPS_OUT"
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10108479426/zip > "$PPO_C3_ARCHIVE"
+          python audits/ppo_epsilon/prepare.py 2>&1 | tee "$PPO_EPS_OUT/prepare.log"
+          python -m py_compile audits/ppo_epsilon/*.py
+      - name: Require native replay, ABI, regression and epsilon-isolation controls
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$PPO_EPS_OUT/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$PPO_EPS_OUT/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$PPO_EPS_OUT/integration-tests.log"
+          cargo build --locked --release -p rust_robotics_train --lib 2>&1 | tee "$PPO_EPS_OUT/build.log"
+          mkdir -p "$PPO_EPS_OUT/library"
+          cp target/release/librust_robotics_train.so "$PPO_REF_LIBRARY"
+          ldd "$PPO_REF_LIBRARY" > "$PPO_EPS_OUT/linkage.txt"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Install pinned independent implementation
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu 2>&1 | tee "$PPO_EPS_OUT/install-torch.log"
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0 2>&1 | tee "$PPO_EPS_OUT/install-reference.log"
+          python -m pip freeze > "$PPO_EPS_OUT/python-freeze.txt"
+      - name: Require actual reference and evaluation-isolation controls
+        run: |
+          python audits/ppo_epsilon/experiment.py controls --output "$PPO_EPS_OUT/python-controls" 2>&1 | tee "$PPO_EPS_OUT/python-controls.log"
+          grep -F 'EPSILON CONTROLS PASS' "$PPO_EPS_OUT/python-controls.log"
+      - name: Retain provenance and restore protected source
+        if: always()
+        run: |
+          mkdir -p "$PPO_EPS_OUT"
+          python - <<'PY'
+          import pathlib,hashlib,json,os
+          root=pathlib.Path(os.environ['PPO_EPS_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/Cargo.toml rust_robotics_train/src/lib.rs rust_robotics_train/src/trainer.rs
+          git diff --exit-code d3f59f9bf38d4038ba7c5008e3a3b41c15e99835 -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-epsilon-native
+          path: /tmp/c4-native/
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    needs: native
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    name: Epsilon ${{ matrix.arm }} seed ${{ matrix.seed }}
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        arm: [rust-e5, rust-e8, sb3-e5, sb3-e8]
+        seed: [201, 202, 203, 204]
+    env:
+      PPO_EPS_NATIVE: /tmp/c4-native
+      PPO_REF_LIBRARY: /tmp/c4-native/library/librust_robotics_train.so
+      PPO_EPS_PRIOR: /tmp/c4-prior
+      PPO_EPS_OUT: /tmp/c4-${{ matrix.arm }}-${{ matrix.seed }}
+      C4_ARM: ${{ matrix.arm }}
+      C4_SEED: ${{ matrix.seed }}
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/workflows/ppo-epsilon.yml
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-epsilon-native
+          path: /tmp/c4-native
+      - name: Verify exact native build and retain experiment provenance
+        run: |
+          mkdir -p "$PPO_EPS_OUT"
+          python - <<'PY'
+          import pathlib,hashlib,json,shutil,os
+          root=pathlib.Path(os.environ['PPO_EPS_NATIVE']);out=pathlib.Path(os.environ['PPO_EPS_OUT'])
+          manifest=json.loads((root/'manifest.json').read_text())
+          for n,h in manifest.items(): assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          for n in ['manifest.json','commit.txt','baseline.txt','adam-default.json','adam-e5.json','adam-e8.json']:
+              shutil.copyfile(root/n,out/('native-'+n))
+          shutil.copyfile(root/'sources/audits/ppo_epsilon/experiment.py',out/'experiment.py')
+          PY
+      - name: Recover original unchanged-arm checkpoints for replay comparison
+        if: matrix.arm == 'rust-e5' || matrix.arm == 'sb3-e8'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import os,pathlib,json,hashlib,subprocess,zipfile
+          ids={
+              ('rust-e5',201):(10108760901,'439dbc9d6b2647824610d03dd455cba7472eb9c1ba2ba3a37f0438c2afa0a105'),
+              ('rust-e5',202):(10108760560,'21f482347d3c5a95ada8916f9be99c678f939ffc7bbee64abac5ca9ec6370a6f'),
+              ('rust-e5',203):(10108708320,'89842d156680015397779c00043c90d5b07d9c46c0e52f54b906ebb96c603600'),
+              ('rust-e5',204):(10108691274,'48b4ec2b6aade136ff3aa6701648170dfe4fa08efe3af079ffc7924a0dc53dfa'),
+              ('sb3-e8',201):(10108958956,'19950c2542f1580da7a1e59df64d17c76bcd525df57aa7949181a7c7b969258e'),
+              ('sb3-e8',202):(10108934512,'1123ebe6ef78b7bcf9125c5db170295d06cb646290afd3c19b6054aaacfd38f5'),
+              ('sb3-e8',203):(10108996170,'3e0393a03cf3636bec03cbf588e71faee5dc6d065ab366bdcb3ccf9f527e19fc'),
+              ('sb3-e8',204):(10108901170,'2ebab6174327198a590327d53ca1a9775864ef4c36b259611fa6d11aa3a4c3cb')}
+          artifact,digest=ids[(os.environ['C4_ARM'],int(os.environ['C4_SEED']))]
+          out=pathlib.Path(os.environ['PPO_EPS_OUT']);raw=out/'prior-c3.zip'
+          with raw.open('wb') as f: subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip'],stdout=f,check=True)
+          assert hashlib.sha256(raw.read_bytes()).hexdigest()==digest
+          root=pathlib.Path(os.environ['PPO_EPS_PRIOR']);root.mkdir(exist_ok=True)
+          with zipfile.ZipFile(raw) as z:
+              assert all(not n.startswith('/') and '..' not in pathlib.Path(n).parts for n in z.namelist())
+              z.extractall(root)
+          for n,h in json.loads((root/'manifest.json').read_text()).items(): assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          (out/'prior-artifact.json').write_text(json.dumps({'id':artifact,'sha256':digest})+'\n')
+          PY
+      - name: Install identical pinned Python dependencies
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu 2>&1 | tee "$PPO_EPS_OUT/install-torch.log"
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0 2>&1 | tee "$PPO_EPS_OUT/install-reference.log"
+          python -m pip freeze > "$PPO_EPS_OUT/python-freeze.txt"
+      - name: Execute full fixed budget from random initialization
+        run: |
+          python "$PPO_EPS_OUT/experiment.py" measure --arm "$C4_ARM" --seed "$C4_SEED" --output "$PPO_EPS_OUT" 2>&1 | tee "$PPO_EPS_OUT/measurement.log"
+          grep -F 'EPSILON MEASUREMENT COMPLETE' "$PPO_EPS_OUT/measurement.log"
+      - name: Retain all checkpoints and failures
+        if: always()
+        run: |
+          mkdir -p "$PPO_EPS_OUT"
+          python - <<'PY'
+          import pathlib,hashlib,json,os
+          root=pathlib.Path(os.environ['PPO_EPS_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-epsilon-${{ matrix.arm }}-${{ matrix.seed }}
+          path: ${{ env.PPO_EPS_OUT }}/
+          retention-days: 30
+          if-no-files-found: error
