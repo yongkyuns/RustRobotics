@@ -62,7 +62,7 @@ changes = subprocess.check_output(['git','diff','--name-only','--',*PROTECTED]).
 assert sorted(changes) == sorted(['rust_robotics_train/Cargo.toml','rust_robotics_train/src/lib.rs','rust_robotics_train/src/trainer.rs']), changes
 original = subprocess.check_output(['git','show',BASE+':rust_robotics_train/src/trainer.rs']).decode()
 assert p.read_text().startswith(original)
-paths = [Path('Cargo.lock'), Path('Cargo.toml'),Path('AGENTS.md'),Path('.github/workflows/ppo-epsilon.yml')]
+paths = [Path('Cargo.lock'), Path('Cargo.toml'),Path('AGENTS.md')]
 for crate in ['rust_robotics_train','rust_robotics_core','rust_robotics_algo']:
     paths += list(Path(crate).rglob('*.rs')) + list(Path(crate).rglob('Cargo.toml'))
 paths += [p for p in root.iterdir() if p.is_file()]
@@ -70,6 +70,9 @@ for p in paths:
     dest = out/'sources'/p
     dest.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(p,dest)
+# upload-artifact excludes hidden directories by default. Preserve this exact
+# source at an explicit visible path so manifest verification remains strict.
+shutil.copyfile('.github/workflows/ppo-epsilon.yml',out/'workflow-source.yml')
 (out/'preparation.patch').write_bytes(subprocess.check_output(['git','diff']))
 (out/'commit.txt').write_bytes(subprocess.check_output(['git','rev-parse','HEAD']))
 (out/'baseline.txt').write_text(BASE+'\n')
