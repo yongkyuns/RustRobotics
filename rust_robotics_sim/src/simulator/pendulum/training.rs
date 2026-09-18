@@ -64,7 +64,8 @@ impl InvertedPendulum {
         }
         if self.training_active {
             self.trainer_config.env.dt = PENDULUM_FIXED_DT;
-            self.trainer_backend.tick(self.training_updates_per_tick.max(1));
+            self.trainer_backend
+                .tick(self.training_updates_per_tick.max(1));
         } else {
             self.trainer_backend.refresh();
         }

@@ -910,6 +910,8 @@ impl InvertedPendulum {
     /// The exact PPO environment path, including pre-reset observations and
     /// termination after Stop. The caller owns noise draws; no GUI clock is used.
     pub(crate) fn step_policy_with_rng<R: Rng + ?Sized>(&mut self, dt: f32, rng: &mut R) {
+        self.lqr_cache = None;
+        self.mpc_cache = None;
         self.validate_training_environment();
         if self.policy_environment_stale {
             self.last_control_error = Some("Plant/noise changed: restart PPO training.".to_owned());
