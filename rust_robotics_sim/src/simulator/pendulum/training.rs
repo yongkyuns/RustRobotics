@@ -64,18 +64,18 @@ impl InvertedPendulum {
         }
         if self.training_active {
             self.trainer_config.env.dt = PENDULUM_FIXED_DT;
-            self.trainer_backend
-                .tick(self.training_updates_per_tick.max(1));
+            self.trainer_backend.tick(self.training_updates_per_tick.max(1));
         } else {
             self.trainer_backend.refresh();
         }
+        if self.controller_selection != ControllerKind::Policy {
+            return;
+        }
         if let Some(snapshot) = self.trainer_backend.snapshot().cloned() {
-            if self.controller_selection == ControllerKind::Policy {
-                if self.controller.kind() == ControllerKind::Policy {
-                    self.controller.sync_policy(&snapshot);
-                } else {
-                    self.set_policy_controller(&snapshot);
-                }
+            if self.controller.kind() == ControllerKind::Policy {
+                self.controller.sync_policy(&snapshot);
+            } else {
+                self.set_policy_controller(&snapshot);
             }
         }
     }
