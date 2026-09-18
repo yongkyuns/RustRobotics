@@ -1,0 +1,101 @@
+name: PPO cart-centering diagnosis
+on:
+  push:
+    branches: ["audit/ppo-cart-centering-20260918"]
+    paths: [".github/workflows/ppo-cart-centering.yml"]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Recover and verify all frozen C4 inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/c5/inputs /tmp/c5/results
+          python - <<'PY'
+          import hashlib,json,pathlib,subprocess,zipfile
+          records=[
+          ('native',10562966062,'17ebe5551c5cb1d610580775d3a9831423e9070f6de4257f5dc2c8135b983cd4'),
+          ('rust-e5-201',10563045597,'2a017b3627afc0a5439cc2b94206a06c60bd855ee2bf68290b22afbba93268ed'),
+          ('rust-e5-202',10563205791,'d3209e6000bc4e370f7f635fc2eb718ea7f8bfcfa3fb780bb0a66834f0c59d87'),
+          ('rust-e5-203',10562645811,'ef45e90316e4dcba6da1a4d888a0837df9c7d4b7933b7a32cf3e0874d54687d2'),
+          ('rust-e5-204',10562082079,'db5cea6d4c223abc921333a683d1e5d792c525b504eace6fdc7003e512cc718f'),
+          ('rust-e8-201',10562895691,'a96e1629474d5ea92a11b460392e52ef671b4998776bee5cec7530b15254bb62'),
+          ('rust-e8-202',10563141064,'e0f7f205e05a32b3dd225059d567ddd8e9ca66fbdb27be72ef7299e7152f9ca5'),
+          ('rust-e8-203',10562216880,'f469e083e2995bfb1928b6af4816bbe6154a1bde24f441b7ff4ff4e2e92097fd'),
+          ('rust-e8-204',10562821448,'15e1f3d16e44e8c63a55b3d1bd4332ce7ad438911f681a8061c798fa203e13c9'),
+          ('sb3-e5-201',10562266864,'de79a15b3b8f697984cb2af66af18c30bd4c6202de4b0bf184d6c215b797401f'),
+          ('sb3-e5-202',10562627578,'d7f1c686e343e716307ab623a8b23fce55f9862dff5c90363121e3b863bc5ea5'),
+          ('sb3-e5-203',10563022510,'8bd7a5809958e3839e18abe5761dd3e09a5a12ee243d3f5177040dac42754b02'),
+          ('sb3-e5-204',10562211895,'383627805a859313c596f2e0447127c6dbc720ab17e2a8b0b867ca2d580c06e9'),
+          ('sb3-e8-201',10562502689,'d6323c2885f66b100f024d6f0aba5a91fd0360c5c8057bc63b51dd4626c3bb51'),
+          ('sb3-e8-202',10562882447,'189784c03a201c371030622068268b62e9739689f47f5102635d358bab662eac'),
+          ('sb3-e8-203',10562398036,'f0175446330806eb116ffa16b390a4be88156563bcb2a742cedee63b07931a3a'),
+          ('sb3-e8-204',10562977306,'09003994e2e733ba6d0be8662e412418af6bbf71e8910f5d64cfe64f39f5f168')]
+          root=pathlib.Path('/tmp/c5');members=0
+          for name,ident,digest in records:
+              raw=root/'inputs'/f'{name}.zip'
+              with raw.open('wb') as f:subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{ident}/zip'],stdout=f,check=True)
+              assert hashlib.sha256(raw.read_bytes()).hexdigest()==digest,name
+              with zipfile.ZipFile(raw) as z:
+                  assert all(not n.startswith('/') and '..' not in pathlib.Path(n).parts for n in z.namelist())
+                  manifest=json.loads(z.read('manifest.json'))
+                  for n,h in manifest.items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+                  members+=len(manifest);z.extractall(root/'unpacked'/name)
+          (root/'input-record.json').write_text(json.dumps({'archives':records,'verified_members':members},indent=2)+'\n')
+          print('Verified',len(records),'archives and',members,'members')
+          PY
+      - name: Install pinned numeric runtime and retain sources
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6
+          python -m pip freeze > /tmp/c5/python-freeze.txt
+          cp audits/ppo_cart_centering/*.py /tmp/c5/
+          cp .github/workflows/ppo-cart-centering.yml /tmp/c5/workflow-source.yml
+          git rev-parse HEAD > /tmp/c5/executed-commit.txt
+      - name: Run independent diagnostic controls
+        run: |
+          python -m unittest discover -s audits/ppo_cart_centering -p 'test_*.py' -v 2>&1 | tee /tmp/c5/tests.log
+      - name: Run all original policies and both cart-channel exchange directions
+        run: |
+          python audits/ppo_cart_centering/diagnose.py --root /tmp/c5/unpacked --out /tmp/c5/results 2>&1 | tee /tmp/c5/execution.log
+          python - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('/tmp/c5/results')
+          assert json.loads((root/'costs.json').read_text())['episodes']==2304
+          assert len(json.loads((root/'equilibria.json').read_text()))==16
+          PY
+          git diff --exit-code
+      - name: Preserve every outcome and verify source protection
+        if: always()
+        run: |
+          mkdir -p /tmp/c5
+          python - <<'PY'
+          import hashlib,json,pathlib,shutil
+          root=pathlib.Path('/tmp/c5');shutil.rmtree(root/'unpacked',ignore_errors=True)
+          manifest={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'}
+          (root/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-cart-centering-${{ github.run_id }}
+          path: /tmp/c5/
+          retention-days: 30
+          if-no-files-found: error
