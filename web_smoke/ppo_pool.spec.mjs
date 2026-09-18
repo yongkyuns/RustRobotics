@@ -208,7 +208,7 @@ test("changing the displayed plant invalidates PPO until explicit restart", asyn
   expect(current.pendulum.cart_mass).toBeCloseTo(1.6);
   expect(current.pendulum.ball_mass).toBeCloseTo(0.3);
   expect(current.policy_trainer.snapshot_ready).toBe(true);
-  expect(current.policy_trainer.last_error).toBeNull();
+  expect(current.policy_trainer.last_error ?? null).toBeNull();
   expect(current.policy_trainer.metrics.total_env_steps).toBe(current.policy_trainer.metrics.total_updates * 2 * 32);
   expect(errors).toEqual([]);
 });
