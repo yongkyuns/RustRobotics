@@ -1,0 +1,176 @@
+name: PPO longer training and robustness
+
+on:
+  push:
+    branches: ["audit/ppo-long-training-20260918"]
+    paths: [".github/workflows/ppo-long-training.yml", "audits/long_training/run.py", "audits/long_training/robustness.rs"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      LONG_BUILD: /tmp/long-bundle/original
+      LONG_ROBUSTNESS: /tmp/long-bundle/robustness
+      PPO_REF_LIBRARY: /tmp/long-bundle/original/librust_robotics_train.so
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify immutable native training build and source baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/long-bundle/original /tmp/long-bundle/controls
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_algo rust_robotics_core rust_robotics_train rust_robotics_sim docs Cargo.lock
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10571541845/zip > /tmp/long-bundle/original-build.zip
+          echo 'd6a470655467d059e14440c645c6ac73aa0040b26b1bebd9228f302538d440a7  /tmp/long-bundle/original-build.zip' | sha256sum --check
+          python - <<'PY'
+          import zipfile,json
+          from pathlib import Path
+          root=Path('/tmp/long-bundle')
+          with zipfile.ZipFile(root/'original-build.zip') as z:
+              assert all(not n.startswith('/') and '..' not in Path(n).parts for n in z.namelist())
+              z.extractall(root/'original')
+          assert json.loads((root/'original/candidate.json').read_text())['sha']=='3ba003a8858a9850e82f3ec30958df24a401884b'
+          PY
+          mkdir -p rust_robotics_train/examples
+          cp audits/long_training/robustness.rs rust_robotics_train/examples/long_run_robustness.rs
+          cp audits/long_training/run.py /tmp/long-bundle/run.py
+          cp .github/workflows/ppo-long-training.yml /tmp/long-bundle/workflow.yml
+          git rev-parse HEAD > /tmp/long-bundle/audit-commit.txt
+          rustc -Vv > /tmp/long-bundle/rustc.txt
+      - name: Require actual-runtime evaluation controls and unchanged native tests
+        run: |
+          cargo fmt --all
+          cp rust_robotics_train/examples/long_run_robustness.rs /tmp/long-bundle/robustness.rs
+          cargo clippy --locked -p rust_robotics_train --example long_run_robustness -- -D warnings 2>&1 | tee /tmp/long-bundle/clippy.log
+          cargo test --locked --release -p rust_robotics_train --example long_run_robustness 2>&1 | tee /tmp/long-bundle/evaluator-tests.log
+          cargo test --locked --release -p rust_robotics_train 2>&1 | tee /tmp/long-bundle/training-tests.log
+          cargo build --locked --release -p rust_robotics_train --example long_run_robustness
+          cp target/release/examples/long_run_robustness "$LONG_ROBUSTNESS"
+          rm rust_robotics_train/examples/long_run_robustness.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_algo rust_robotics_core rust_robotics_train rust_robotics_sim docs Cargo.lock
+      - name: Install pinned read-only reference evaluation runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > /tmp/long-bundle/python-freeze.txt
+      - name: Require compiled-environment and training-state isolation
+        run: |
+          python /tmp/long-bundle/run.py controls --out /tmp/long-bundle/controls 2>&1 | tee /tmp/long-bundle/controls.log
+          grep -F 'LONG TRAINING PREFLIGHT PASS' /tmp/long-bundle/controls.log
+      - name: Preserve exact build evidence
+        if: always()
+        run: |
+          mkdir -p /tmp/long-bundle
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          root=Path('/tmp/long-bundle')
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: long-training-build
+          path: /tmp/long-bundle/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  measure:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        seed: [201, 202, 203, 204]
+    name: Continuous training seed ${{ matrix.seed }}
+    env:
+      LONG_BUILD: /tmp/long-bundle/original
+      LONG_ROBUSTNESS: /tmp/long-bundle/robustness
+      PPO_REF_LIBRARY: /tmp/long-bundle/original/librust_robotics_train.so
+      SEED: ${{ matrix.seed }}
+      OUT: /tmp/long-${{ matrix.seed }}
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: long-training-build
+          path: /tmp/long-bundle
+      - name: Verify executable and retain original one-million-step results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$OUT"
+          python - <<'PY'
+          import os,subprocess,json,hashlib,shutil
+          from pathlib import Path
+          root=Path('/tmp/long-bundle');out=Path(os.environ['OUT']);seed=int(os.environ['SEED'])
+          for n,h in json.loads((root/'manifest.json').read_text()).items(): assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          (root/'robustness').chmod(0o755)
+          pairs={201:(10571585086,'7c78d020705935dcfa946ab497cfbd9ecd79df07593c8323d470593cabcfa628'),
+              202:(10571517950,'2661df8177bce10df95359bc22bed2734ebc5b440ed48fda1d36f2a5c0f5c3fa'),
+              203:(10571497957,'c886d3ebf0db3f25eb3a1417dbbe50a8f0ff8d4d4f60837fa541640301ff236e'),
+              204:(10571237825,'4f79e4775d915bdf77b54300a0cbf6975bf558a4300542c7d0e74b40e3238f4c')}
+          artifact,digest=pairs[seed]
+          with (out/'prior.zip').open('wb') as f: subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip'],stdout=f,check=True)
+          assert hashlib.sha256((out/'prior.zip').read_bytes()).hexdigest()==digest
+          for n in ['manifest.json','audit-commit.txt','run.py','robustness.rs']:
+              shutil.copyfile(root/n,out/('build-'+n))
+          PY
+      - name: Install identical pinned short-panel inference runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > "$OUT/python-freeze.txt"
+      - name: Train one persistent session through all fixed budgets and evaluate
+        run: |
+          python /tmp/long-bundle/run.py measure --seed "$SEED" --prior "$OUT/prior.zip" --out "$OUT" 2>&1 | tee "$OUT/execution.log"
+          grep -F 'LONG TRAINING COMPLETE' "$OUT/execution.log"
+      - name: Retain every checkpoint and failure
+        if: always()
+        run: |
+          mkdir -p "$OUT"
+          python - <<'PY'
+          from pathlib import Path
+          import os,hashlib,json
+          root=Path(os.environ['OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: long-training-${{ matrix.seed }}
+          path: ${{ env.OUT }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
