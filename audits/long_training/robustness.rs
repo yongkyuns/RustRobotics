@@ -61,7 +61,7 @@ fn environment(s: &Scenario, key: u64, episode: usize) -> (PendulumEnv, StdRng, 
 fn load_policy(path: &Path) -> Result<PolicySnapshot, Box<dyn Error>> {
     let bytes = fs::read(path)?;
     if bytes.len() != 4545 * 4 { return Err("unexpected actor snapshot length".into()); }
-    let values: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+    let values: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
     if !values.iter().all(|v| v.is_finite()) { return Err("nonfinite actor".into()); }
     let mut offset = 0;
     let mut layer = |ni, no| {
