@@ -1,0 +1,204 @@
+name: Shared PPO plant correction
+on:
+  push:
+    branches: [audit/ppo-shared-plant-fix-20260918]
+    paths: [.github/workflows/ppo-plant-fix.yml, 'audits/plant_fix/**']
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      candidate: ${{ steps.commit.outputs.candidate }}
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Apply the source correction
+        run: |
+          mkdir -p /tmp/plant-build
+          python audits/plant_fix/apply.py 2>&1 | tee /tmp/plant-build/apply.log
+          # This physics test deliberately starts beyond the training terminal.
+          # Give it an explicit larger limit; do not change the task defaults.
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('rust_robotics_sim/src/simulator/pendulum/tests.rs');s=p.read_text()
+          anchor='    let initial_angle = sim.state[2];\n    sim.step(PENDULUM_FIXED_DT);'
+          assert s.count(anchor)==1
+          p.write_text(s.replace(anchor,'    sim.trainer_config.env.max_angle_rad = 4.0;\n'+anchor))
+          PY
+          cargo fmt --all
+          git diff --check
+      - name: Run independent physics and native training contracts
+        run: |
+          cargo clippy --locked -p rust_robotics_algo -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee /tmp/plant-build/clippy.log
+          cargo test --locked --release -p rust_robotics_algo --lib 2>&1 | tee /tmp/plant-build/physics-tests.log
+          cargo test --locked --release -p rust_robotics_train 2>&1 | tee /tmp/plant-build/training-tests.log
+      - name: Store reviewed production source as a commit, without changing a branch
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git add rust_robotics_algo/src/cart_pole.rs rust_robotics_algo/src/lib.rs rust_robotics_train/src rust_robotics_train/tests rust_robotics_sim/src/simulator/pendulum rust_robotics_sim/src/simulator/runtime.rs
+          git diff --cached --binary > /tmp/plant-build/production.patch
+          python - <<'PY'
+          import subprocess,json,pathlib
+          base='d3f59f9bf38d4038ba7c5008e3a3b41c15e99835'
+          paths=subprocess.check_output(['git','diff','--cached','--name-only']).decode().splitlines()
+          assert paths and all(p.startswith(('rust_robotics_algo/src/','rust_robotics_train/','rust_robotics_sim/src/simulator/')) for p in paths)
+          assert not any('mujoco' in p or p=='rust_robotics_algo/src/control/mod.rs' for p in paths)
+          tree=json.loads(subprocess.check_output(['gh','api',f'repos/yongkyuns/RustRobotics/git/commits/{base}']))['tree']['sha']
+          payload={'base_tree':tree,'tree':[{'path':p,'mode':'100644','type':'blob','content':pathlib.Path(p).read_text()} for p in paths]}
+          path=pathlib.Path('/tmp/plant-build/tree-input.json');path.write_text(json.dumps(payload))
+          result=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/yongkyuns/RustRobotics/git/trees','--input',str(path)]))
+          payload={'message':'fix: share nonlinear cart-pole physics and matched PPO environment wiring','tree':result['sha'],'parents':[base]}
+          path.write_text(json.dumps(payload))
+          result=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/yongkyuns/RustRobotics/git/commits','--input',str(path)]))
+          pathlib.Path('/tmp/plant-build/candidate.json').write_text(json.dumps(result,indent=2))
+          import os
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('candidate='+result['sha']+'\n')
+          for p in paths:
+              dest=pathlib.Path('/tmp/plant-build/changed-source')/p;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(pathlib.Path(p).read_bytes())
+          path.unlink()
+          PY
+      - name: Build observation-only evaluation ABI around the corrected source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10108479426/zip > /tmp/plant-build/prior-native.zip
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile,hashlib,json
+          raw=Path('/tmp/plant-build/prior-native.zip').read_bytes()
+          assert hashlib.sha256(raw).hexdigest()=='615ac5ef521e7d28b3f8e3c19b4b5070949d79489b1ea256bcea7c7265dff100'
+          with zipfile.ZipFile('/tmp/plant-build/prior-native.zip') as z:
+              for n,h in json.loads(z.read('manifest.json')).items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              Path('audits/plant_fix/bridge.rs').write_bytes(z.read('sources/audits/ppo_crosscheck/bridge.rs'))
+              Path('/tmp/plant-build/reference.py').write_bytes(z.read('sources/audits/ppo_crosscheck/reference.py'))
+          p=Path('rust_robotics_train/Cargo.toml');assert '[lib]' not in p.read_text();p.write_text(p.read_text()+'\n[lib]\ncrate-type = ["rlib", "cdylib"]\n')
+          p=Path('rust_robotics_train/src/lib.rs');p.write_text(p.read_text()+'\n#[path = "../../audits/plant_fix/bridge.rs"]\nmod plant_audit_bridge;\n')
+          PY
+          cargo build --locked --release -p rust_robotics_train --lib 2>&1 | tee /tmp/plant-build/build.log
+          cp target/release/librust_robotics_train.so /tmp/plant-build/
+          cp audits/plant_fix/{retest.py,bridge.rs} /tmp/plant-build/
+          rustc -Vv > /tmp/plant-build/rustc.txt
+          git rev-parse HEAD > /tmp/plant-build/preparation-commit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-plant-build
+          path: /tmp/plant-build/
+          include-hidden-files: true
+          retention-days: 30
+
+  runtime:
+    needs: native
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.native.outputs.candidate }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native simulator dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+          curl -L --fail -o /tmp/mujoco.tar.gz https://github.com/google-deepmind/mujoco/releases/download/3.4.0/mujoco-3.4.0-linux-x86_64.tar.gz
+          tar xf /tmp/mujoco.tar.gz -C /tmp
+          echo 'MUJOCO_HOME=/tmp/mujoco-3.4.0' >> "$GITHUB_ENV"
+          echo 'LD_LIBRARY_PATH=/tmp/mujoco-3.4.0/lib' >> "$GITHUB_ENV"
+      - name: Run actual live integration and parity tests
+        run: |
+          mkdir -p /tmp/plant-runtime
+          cargo clippy --locked -p rust_robotics_sim --all-targets -- -D warnings 2>&1 | tee /tmp/plant-runtime/clippy.log
+          cargo test --locked -p rust_robotics_sim --lib 2>&1 | tee /tmp/plant-runtime/native-tests.log
+          cargo check --locked -p rust_robotics_sim --target wasm32-unknown-unknown 2>&1 | tee /tmp/plant-runtime/wasm.log
+          cargo check --locked -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features 2>&1 | tee /tmp/plant-runtime/wasm-legacy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-plant-runtime
+          path: /tmp/plant-runtime/
+          retention-days: 30
+
+  learning:
+    needs: [native, runtime]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [201, 202, 203, 204]
+    env:
+      PLANT_BUILD: /tmp/plant-build
+      PPO_REF_LIBRARY: /tmp/plant-build/librust_robotics_train.so
+      SEED: ${{ matrix.seed }}
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: shared-plant-build
+          path: /tmp/plant-build
+      - name: Recover immutable historical linear-trained policy checkpoints
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/plant-results /tmp/prior
+          python - <<'PY'
+          import os,subprocess,hashlib,json,zipfile
+          from pathlib import Path
+          ids={201:(10108760901,'439dbc9d6b2647824610d03dd455cba7472eb9c1ba2ba3a37f0438c2afa0a105'),202:(10108760560,'21f482347d3c5a95ada8916f9be99c678f939ffc7bbee64abac5ca9ec6370a6f'),203:(10108708320,'89842d156680015397779c00043c90d5b07d9c46c0e52f54b906ebb96c603600'),204:(10108691274,'48b4ec2b6aade136ff3aa6701648170dfe4fa08efe3af079ffc7924a0dc53dfa')}
+          ident,digest=ids[int(os.environ['SEED'])]
+          raw=subprocess.check_output(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{ident}/zip'])
+          assert hashlib.sha256(raw).hexdigest()==digest
+          p=Path('/tmp/plant-results/historical.zip');p.write_bytes(raw)
+          with zipfile.ZipFile(p) as z:
+              for n,h in json.loads(z.read('manifest.json')).items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              assert all(not n.startswith('/') and '..' not in Path(n).parts for n in z.namelist())
+              z.extractall('/tmp/prior')
+          PY
+      - name: Install pinned evaluation runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > /tmp/plant-results/python-freeze.txt
+      - name: Execute full unchanged PPO budget and same-task transfer comparison
+        run: |
+          cp /tmp/plant-build/candidate.json /tmp/plant-results/
+          python /tmp/plant-build/retest.py --seed "$SEED" --prior /tmp/prior --out /tmp/plant-results 2>&1 | tee /tmp/plant-results/measurement.log
+          grep -F 'PLANT RETEST COMPLETE' /tmp/plant-results/measurement.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-plant-learning-${{ matrix.seed }}
+          path: /tmp/plant-results/
+          retention-days: 30
