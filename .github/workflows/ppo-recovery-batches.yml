@@ -1,0 +1,169 @@
+name: PPO recovery batch comparison
+
+on:
+  push:
+    branches: ["audit/ppo-recovery-batches-20260918"]
+    paths: [".github/workflows/ppo-recovery-batches.yml", "audits/ppo_recovery_batches/native.rs", "audits/ppo_recovery_batches/prepare.py", "audits/ppo_recovery_batches/measure.py"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      PPO_BATCH_OUT: /tmp/recovery-native
+      PPO_BATCH_NATIVE: /tmp/recovery-native
+      PPO_BATCH_PRIOR: /tmp/c4-native.zip
+      PPO_REF_LIBRARY: /tmp/recovery-native/library/librust_robotics_train.so
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare verified observation-only hooks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$PPO_BATCH_OUT"
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10562966062/zip > "$PPO_BATCH_PRIOR"
+          cp "$PPO_BATCH_PRIOR" "$PPO_BATCH_OUT/prior-native.zip"
+          python -m py_compile audits/ppo_recovery_batches/*.py
+          python audits/ppo_recovery_batches/prepare.py 2>&1 | tee "$PPO_BATCH_OUT/preparation.log"
+      - name: Require native regression and observer controls
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$PPO_BATCH_OUT/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$PPO_BATCH_OUT/unit-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$PPO_BATCH_OUT/integration-tests.log"
+          cargo build --locked --release -p rust_robotics_train --lib 2>&1 | tee "$PPO_BATCH_OUT/build.log"
+          mkdir -p "$PPO_BATCH_OUT/library"
+          cp target/release/librust_robotics_train.so "$PPO_REF_LIBRARY"
+          cargo fmt --all -- --check
+      - name: Install pinned evaluation runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > "$PPO_BATCH_OUT/python-freeze.txt"
+      - name: Require real-ABI and evaluation observer parity
+        run: |
+          python - <<'PY' 2>&1 | tee "$PPO_BATCH_OUT/reference-controls.log"
+          import os,sys,pathlib
+          root=pathlib.Path(os.environ['PPO_BATCH_OUT'])
+          sys.path.insert(0,str(root/'sources/audits/ppo_recovery_batches'))
+          import measure as m
+          m.torch.set_num_threads(1);m.torch.set_num_interop_threads(1);m.torch.use_deterministic_algorithms(True)
+          out=root/'reference-controls';out.mkdir()
+          m.r.controls(out)
+          h=m.r.LIB.rr_trainer_create_batch(201,0)
+          model,env,_=m.r.make_model('matched',201,m.r.weights(h),m.r.weights(h,True))
+          original=m.r.evaluate(model,1,201,1048576)
+          observed=m.evaluate(model,201,1048576,out)
+          assert original==observed,'evaluation wrapper changed outcomes'
+          env.close();assert m.r.LIB.rr_trainer_free(h)==0
+          print('RECOVERY REFERENCE CONTROLS PASS')
+          PY
+          grep -F 'RECOVERY REFERENCE CONTROLS PASS' "$PPO_BATCH_OUT/reference-controls.log"
+      - name: Preserve all results and restore source
+        if: always()
+        run: |
+          mkdir -p "$PPO_BATCH_OUT"
+          python - <<'PY'
+          import os,pathlib,json,hashlib
+          root=pathlib.Path(os.environ['PPO_BATCH_OUT'])
+          files={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'}
+          (root/'manifest.json').write_text(json.dumps(files,indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/Cargo.toml rust_robotics_train/src/lib.rs rust_robotics_train/src/trainer.rs
+          git diff --exit-code d3f59f9bf38d4038ba7c5008e3a3b41c15e99835 -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-native
+          path: /tmp/recovery-native/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    needs: native
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: Recovery ${{ matrix.arm }} seed ${{ matrix.seed }}
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        arm: [baseline, large-single, pooled]
+        seed: [201, 202, 203, 204]
+    env:
+      PPO_BATCH_NATIVE: /tmp/recovery-native
+      PPO_REF_LIBRARY: /tmp/recovery-native/library/librust_robotics_train.so
+      OUT: /tmp/recovery-${{ matrix.arm }}-${{ matrix.seed }}
+      ARM: ${{ matrix.arm }}
+      SEED: ${{ matrix.seed }}
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: recovery-native
+          path: /tmp/recovery-native
+      - name: Verify source/build and prepare outcome directory
+        run: |
+          mkdir -p "$OUT"
+          python - <<'PY'
+          import pathlib,os,json,hashlib,shutil
+          root=pathlib.Path(os.environ['PPO_BATCH_NATIVE']);out=pathlib.Path(os.environ['OUT'])
+          for n,h in json.loads((root/'manifest.json').read_text()).items():assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          for n in ['manifest.json','commit.txt','baseline.txt']:shutil.copyfile(root/n,out/('native-'+n))
+          shutil.copyfile(root/'sources/audits/ppo_recovery_batches/measure.py',out/'measure.py')
+          PY
+      - name: Install identical pinned evaluation runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > "$OUT/python-freeze.txt"
+      - name: Run full fixed training budget with all checkpoints
+        run: |
+          python "$OUT/measure.py" --arm "$ARM" --seed "$SEED" --output "$OUT" 2>&1 | tee "$OUT/execution.log"
+          grep -F 'RECOVERY MEASUREMENT COMPLETE' "$OUT/execution.log"
+      - name: Preserve every outcome and failure
+        if: always()
+        run: |
+          mkdir -p "$OUT"
+          python - <<'PY'
+          import os,pathlib,json,hashlib
+          root=pathlib.Path(os.environ['OUT'])
+          files={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'}
+          (root/'manifest.json').write_text(json.dumps(files,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-${{ matrix.arm }}-${{ matrix.seed }}
+          path: ${{ env.OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
