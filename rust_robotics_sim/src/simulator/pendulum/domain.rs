@@ -33,10 +33,11 @@ use rand::Rng;
 use rb::inverted_pendulum::*;
 use rb::prelude::*;
 use rust_robotics_algo as rb;
+use rust_robotics_algo::cart_pole::CartPoleParameters;
 use rust_robotics_core::PolicySnapshot;
 #[cfg(target_arch = "wasm32")]
 use rust_robotics_core::PpoMetrics;
-use rust_robotics_train::PpoTrainerConfig;
+use rust_robotics_train::{PendulumEnv, PendulumEnvConfig, PpoTrainerConfig};
 use serde::{Deserialize, Serialize};
 
 /// Pendulum state vector with ordering `[x, x_dot, theta, theta_dot]`.
@@ -480,6 +481,9 @@ pub struct InvertedPendulum {
     pub(crate) data: TimeTable,
     pub(crate) time_init: f32,
     pub(crate) visual_episode_steps: usize,
+    pub(crate) policy_observation: Option<[f32; 4]>,
+    pub(crate) active_training_environment: Option<(CartPoleParameters, PendulumEnvConfig)>,
+    pub(crate) policy_environment_stale: bool,
     pub(crate) trainer_config: PpoTrainerConfig,
     pub(crate) trainer_backend: PpoTrainerCoordinator,
     pub(crate) training_active: bool,
@@ -514,6 +518,9 @@ impl Default for InvertedPendulum {
             time_init: 0.0,
             data,
             visual_episode_steps: 0,
+            policy_observation: None,
+            active_training_environment: None,
+            policy_environment_stale: false,
             trainer_config,
             trainer_backend: PpoTrainerCoordinator::default(),
             training_active: false,
@@ -567,46 +574,9 @@ impl InvertedPendulum {
         &self.model
     }
 
-    /// Continuous-time nonlinear cart-pole dynamics.
-    ///
-    /// The state uses `theta = 0` for the upright equilibrium and positive
-    /// angles tilt the rod to the left in the scene renderer. The equations
-    /// below are the point-mass cart-pole model transformed into that sign
-    /// convention:
-    ///
-    /// - `x_ddot = (u + m sin(theta) (g cos(theta) - l theta_dot^2)) / (M + m sin^2(theta))`
-    /// - `theta_ddot = (g sin(theta) + cos(theta) x_ddot) / l`
-    ///
-    /// which linearize to the same unstable upright model used by LQR / MPC.
-    fn plant_derivative(&self, state: State, control: f32) -> State {
-        let x_dot = state[1];
-        let theta = state[2];
-        let theta_dot = state[3];
-
-        let m_cart = self.model.m_cart;
-        let m_ball = self.model.m_ball;
-        let l_bar = self.model.l_bar;
-
-        let sin_theta = theta.sin();
-        let cos_theta = theta.cos();
-        let denom = m_cart + m_ball * sin_theta * sin_theta;
-
-        let x_ddot = (control
-            + m_ball * sin_theta * (g * cos_theta - l_bar * theta_dot * theta_dot))
-            / denom;
-        let theta_ddot = (g * sin_theta + cos_theta * x_ddot) / l_bar;
-
-        vector![x_dot, x_ddot, theta_dot, theta_ddot]
-    }
-
-    /// Advances the nonlinear plant by one RK4 step under a constant force.
+    /// Classical controllers and PPO use the same physical RK4 plant.
     fn integrate_plant_rk4(&self, state: State, control: f32, dt: f32) -> State {
-        let k1 = self.plant_derivative(state, control);
-        let k2 = self.plant_derivative(state + k1 * (0.5 * dt), control);
-        let k3 = self.plant_derivative(state + k2 * (0.5 * dt), control);
-        let k4 = self.plant_derivative(state + k3 * dt, control);
-
-        state + (k1 + k2 * 2.0 + k3 * 2.0 + k4) * (dt / 6.0)
+        CartPoleParameters::from(self.model).step(state, control, dt)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -628,7 +598,14 @@ impl InvertedPendulum {
             learning_rate: self.trainer_config.ppo.learning_rate,
             action_std: self.trainer_config.action_std,
             metrics: self.trainer_backend.metrics().cloned(),
-            last_error: self.trainer_backend.last_error().map(str::to_owned),
+            last_error: if self.policy_environment_stale {
+                Some(
+                    "Plant/noise changed: restart PPO training before using this policy."
+                        .to_owned(),
+                )
+            } else {
+                self.trainer_backend.last_error().map(str::to_owned)
+            },
         }
     }
 
@@ -768,6 +745,7 @@ impl InvertedPendulum {
             }
         }
 
+        self.validate_training_environment();
         if let Some(action) = patch.trainer_action {
             match action {
                 PendulumTrainerAction::Start => self.start_training(),
@@ -810,6 +788,21 @@ impl InvertedPendulum {
     /// 3. perturb the applied force if actuation noise is enabled and advance the
     ///    true nonlinear plant with RK4
     pub fn step_with_noise(&mut self, dt: f32, noise: NoiseConfig) {
+        self.step_with_rng(dt, noise, &mut rand::thread_rng());
+    }
+
+    pub(crate) fn step_with_rng<R: Rng + ?Sized>(
+        &mut self,
+        dt: f32,
+        noise: NoiseConfig,
+        rng: &mut R,
+    ) {
+        self.configure_training_noise(noise);
+        self.validate_training_environment();
+        if self.controller.kind() == ControllerKind::Policy {
+            self.step_policy_with_rng(dt, rng);
+            return;
+        }
         let mut measured_state = self.state;
         if noise.is_active() {
             let profile = noise.profile();
@@ -914,8 +907,71 @@ impl InvertedPendulum {
         }
     }
 
+    /// The exact PPO environment path, including pre-reset observations and
+    /// termination after Stop. The caller owns noise draws; no GUI clock is used.
+    pub(crate) fn step_policy_with_rng<R: Rng + ?Sized>(&mut self, dt: f32, rng: &mut R) {
+        self.lqr_cache = None;
+        self.mpc_cache = None;
+        self.validate_training_environment();
+        if self.policy_environment_stale {
+            self.last_control_error = Some("Plant/noise changed: restart PPO training.".to_owned());
+            return;
+        }
+        if self.active_training_environment.is_some() && self.trainer_backend.snapshot().is_none() {
+            // A web reset may not have published its new snapshot yet. Never
+            // execute retained old weights on the newly configured environment.
+            self.last_control_error =
+                Some("Waiting for the matching PPO policy snapshot.".to_owned());
+            return;
+        }
+        assert_eq!(
+            dt, self.trainer_config.env.dt,
+            "PPO live timestep must match training"
+        );
+        let mut env = PendulumEnv::from_state(
+            self.model,
+            self.trainer_config.env,
+            self.state,
+            self.visual_episode_steps,
+        );
+        let observation = self
+            .policy_observation
+            .take()
+            .unwrap_or_else(|| env.observation_with_rng(rng));
+        let Controller::Policy(policy) = &self.controller else {
+            unreachable!("PPO path only");
+        };
+        let result = env.step_with_rng(policy.act(observation), rng);
+        self.state = env.state();
+        self.visual_episode_steps += 1;
+        self.policy_observation = Some(result.observation);
+        self.last_control_error = None;
+        self.data.add(
+            self.data.time_last() + dt,
+            vec![
+                self.state[0],
+                self.state[1],
+                self.state[2],
+                self.state[3],
+                env.last_applied_force(),
+            ],
+        );
+        if result.done {
+            self.policy_observation = Some(env.reset_with_rng(rng));
+            self.state = env.state();
+            self.visual_episode_steps = 0;
+            self.time_init = 0.0;
+            self.data.clear();
+        }
+    }
+
     pub fn set_policy_controller(&mut self, snapshot: &PolicySnapshot) {
+        let entering_policy = self.controller.kind() != ControllerKind::Policy;
         self.controller = Controller::policy(snapshot.clone());
+        self.controller_selection = ControllerKind::Policy;
+        if entering_policy {
+            self.reset_state();
+        }
     }
 
     pub fn sync_policy_controller(&mut self, snapshot: &PolicySnapshot) {
@@ -956,6 +1012,7 @@ impl Simulate for InvertedPendulum {
     fn match_state_with(&mut self, other: &dyn Simulate) {
         if let Some(data) = other.get_state().downcast_ref::<State>() {
             self.state.clone_from(data);
+            self.policy_observation = None;
         }
     }
 
@@ -964,7 +1021,16 @@ impl Simulate for InvertedPendulum {
     }
 
     fn reset_state(&mut self) {
-        self.state = vector![0., 0., rand(0.4), 0.];
+        if self.controller.kind() == ControllerKind::Policy {
+            let mut rng = rand::thread_rng();
+            let mut env =
+                PendulumEnv::from_state(self.model, self.trainer_config.env, self.state, 0);
+            self.policy_observation = Some(env.reset_with_rng(&mut rng));
+            self.state = env.state();
+        } else {
+            self.state = vector![0., 0., rand(0.4), 0.];
+            self.policy_observation = None;
+        }
         self.time_init = 0.0;
         self.visual_episode_steps = 0;
         self.controller.reset_state();

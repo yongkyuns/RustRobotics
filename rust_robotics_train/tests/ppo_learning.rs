@@ -19,6 +19,7 @@ const MIN_MEAN_GAIN: f64 = 50.0;
 // production defaults instead of silently changing the qualification task.
 fn recipe() -> PpoTrainerConfig {
     PpoTrainerConfig {
+        plant: Default::default(),
         env: PendulumEnvConfig {
             dt: 0.01,
             max_force: 20.0,
@@ -427,7 +428,11 @@ fn constant_policy(bias: f32) -> PolicySnapshot {
 #[test]
 fn evaluator_obeys_policy_rewards_and_episode_ends() {
     let config = PendulumEnvConfig {
-        dt: 0.0,
+        dt: 0.01,
+        reward_position_weight: 0.0,
+        reward_velocity_weight: 0.0,
+        reward_angle_weight: 0.0,
+        reward_angular_velocity_weight: 0.0,
         max_steps: 3,
         reset_position_range_m: 0.0,
         reset_velocity_range_mps: 0.0,

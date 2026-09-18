@@ -3,7 +3,7 @@
 //! reset boundaries, entropy sampling and real Adam updates remain enabled.
 use super::*;
 use crate::ValueSnapshot;
-use rust_robotics_algo::{control::StateSpace, prelude::Vector4};
+use rust_robotics_algo::{cart_pole::CartPoleParameters, prelude::Vector4};
 
 const SEED: u64 = 0x5050_0031;
 
@@ -205,9 +205,13 @@ fn environment_draws_match_independent_reference() {
         } else {
             0.0
         };
-        // Reuse only the unchanged plant matrix, not production noise helpers.
-        let (a, b) = env.model().model(c.dt);
-        let next = a * Vector4::from_column_slice(&x) + b * (clipped + action_noise + disturbance);
+        // Reuse only the deterministic plant, never production noise helpers.
+        // Independent physics checks live in cart_pole::tests.
+        let next = CartPoleParameters::from(env.model()).step(
+            Vector4::from_column_slice(&x),
+            clipped + action_noise + disturbance,
+            c.dt,
+        );
         x = [next[0], next[1], next[2], next[3]];
         let expected_observation = observe_reference(x, c, &mut reference);
         let step = env.step_with_rng(action, &mut rng);
