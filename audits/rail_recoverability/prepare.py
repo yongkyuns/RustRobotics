@@ -13,6 +13,11 @@ native=Path('audits/rail_recoverability/native.rs')
 s=native.read_text()
 a='[-5.513626381788578, -10.400541535147066, 105.59570546082282, 42.01035971799431]'
 b='[-5.513626381392378, -10.400541538255077, 105.59570546384029, 42.01035972313336]'
+assert s.count(a)==1;s=s.replace(a,b)
+# Equivalent fixed-width byte decoding required by current strict Clippy.
+# The first failed preflight is retained; no measurement ran there.
+a='bytes.chunks_exact(4).map(|v|f32::from_le_bytes(v.try_into().unwrap()))'
+b='bytes.as_chunks::<4>().0.iter().map(|v|f32::from_le_bytes(*v))'
 assert s.count(a)==1;native.write_text(s.replace(a,b))
 p=Path('rust_robotics_train/src/lib.rs');original=p.read_text()
 p.write_text(original+'\n#[cfg(test)]\n#[path = "../../audits/rail_recoverability/native.rs"]\nmod rail_diagnostic;\n')
