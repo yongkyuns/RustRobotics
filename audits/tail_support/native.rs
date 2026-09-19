@@ -131,7 +131,6 @@ fn emit_tail_support() {
         assert_eq!(fs::read(out.join(name)).unwrap(), fs::read(prior.join(name)).unwrap(),
             "incoming history mismatch: {name}");
     }
-    // Keep the actual incoming module/Adam identities, not reconstructed models.
     let anchor = Anchor::new(&s);
     optimize_traced(&mut s, &batch, &out.join("actual1"));
     let actual = s.snapshot(); let actual_critic = value_snapshot(&s);
@@ -168,10 +167,6 @@ fn emit_tail_support() {
     anchor.restore(&mut s); s.optimize(&batch);
     assert_eq!(s.snapshot(), actual); assert_eq!(flat(&value_snapshot(&s)), flat(&actual_critic));
     assert_eq!(s.metrics, actual_metrics);
-    let mut expected_after = Anchor::new(&s);
-    // Keep the existing native next-identical-step control as a unit test, not
-    // an extra uncounted optimization in this measurement.
-    expected_after.restore(&mut s);
     s.metrics.total_updates += 1;
     assert_eq!(s.metrics.total_env_steps, 4_194_304); assert_eq!(s.metrics.total_updates, 8192);
     let mut fresh = BufWriter::new(fs::File::create(out.join("fresh-reset.csv")).unwrap());
@@ -212,14 +207,18 @@ fn emit_tail_support() {
     reference.flush().unwrap();
     let tail_steps: usize = tails.iter().map(|t| t.rewards.len()).sum();
     let names: Vec<_> = policies.iter().map(|(name, _)| name).collect();
-    fs::write(out.join("complete.json"), format!(concat!(
+    let text = format!(concat!(
         "{{\"seed\":{seed},\"training_steps\":4194304,\"update\":8192,",
         "\"policies\":{names:?},\"old_bootstrap\":{old_bootstrap:?},\"tail_values\":{estimates:?},",
         "\"mean4\":{average:?},\"cutoff_state\":{cutoff_state:?},\"cutoff_observation\":{cutoff_observation:?},",
         "\"tail_steps\":{tail_steps},\"fresh_steps\":{fresh_steps},\"historical_steps\":{historical_steps},",
         "\"value_steps\":{value_steps},\"prefix_adam_steps_per_network\":131056,",
         "\"target_adam_steps_per_network\":112,\"historical_weights_exact\":true,",
-        "\"batch_exact\":true,\"internal_sham_exact\":true}}\n"))).unwrap();
+        "\"batch_exact\":true,\"internal_sham_exact\":true}}\n"),
+        seed=seed, names=names, old_bootstrap=old_bootstrap, estimates=estimates, average=average,
+        cutoff_state=cutoff_state, cutoff_observation=cutoff_observation, tail_steps=tail_steps,
+        fresh_steps=fresh_steps, historical_steps=historical_steps, value_steps=value_steps);
+    fs::write(out.join("complete.json"), text).unwrap();
     println!("SAMPLED TAIL COMPLETE {seed}");
 }
 
