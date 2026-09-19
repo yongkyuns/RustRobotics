@@ -1,0 +1,15 @@
+case,actor,critic,x
+constant-201-4194304-0,constant-201/actor-4194304.bin,constant-201/critic-4194304.bin,-0.24507572832192043
+constant-201-16777216-1,constant-201/actor-16777216.bin,constant-201/critic-16777216.bin,-0.54422201773290879
+constant-202-4194304-2,constant-202/actor-4194304.bin,constant-202/critic-4194304.bin,-0.72594523580786818
+constant-202-16777216-3,constant-202/actor-16777216.bin,constant-202/critic-16777216.bin,-1.7294811002839126
+constant-203-4194304-4,constant-203/actor-4194304.bin,constant-203/critic-4194304.bin,-0.20455887245939697
+constant-203-16777216-5,constant-203/actor-16777216.bin,constant-203/critic-16777216.bin,-0.91787834143626490
+constant-204-4194304-6,constant-204/actor-4194304.bin,constant-204/critic-4194304.bin,-0.34999482490359729
+constant-204-16777216-7,constant-204/actor-16777216.bin,constant-204/critic-16777216.bin,-0.80110306231789674
+actor-decay-201-16777216-8,actor-decay-201/actor-16777216.bin,actor-decay-201/critic-16777216.bin,0.95156816179738501
+actor-decay-202-16777216-9,actor-decay-202/actor-16777216.bin,actor-decay-202/critic-16777216.bin,-1.7179861227308426
+actor-decay-202-16777216-10,actor-decay-202/actor-16777216.bin,actor-decay-202/critic-16777216.bin,1.5734977902658800
+actor-decay-203-16777216-11,actor-decay-203/actor-16777216.bin,actor-decay-203/critic-16777216.bin,1.7486665740989265
+actor-decay-204-16777216-12,actor-decay-204/actor-16777216.bin,actor-decay-204/critic-16777216.bin,-1.3169526875963828
+actor-decay-204-16777216-13,actor-decay-204/actor-16777216.bin,actor-decay-204/critic-16777216.bin,2.2200851534829242
