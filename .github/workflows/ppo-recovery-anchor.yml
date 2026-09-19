@@ -1,0 +1,143 @@
+name: PPO recovery policy preservation
+
+on:
+  push:
+    branches: ["audit/ppo-recovery-anchor-20260919"]
+    paths: [".github/workflows/ppo-recovery-anchor.yml", "audits/recovery_anchor/native.rs", "audits/recovery_anchor/prepare.py"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      HORIZON_BUILD: /tmp/recovery-anchor-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Require preservation and unchanged-path controls
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python audits/recovery_anchor/prepare.py 2>&1 | tee "$HORIZON_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$HORIZON_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$HORIZON_BUILD/tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$HORIZON_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export the actual compiled test runner
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$HORIZON_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_BUILD'])
+          rows=[json.loads(x) for x in (root/'build.jsonl').read_text().splitlines()]
+          files=[r['executable'] for r in rows if r.get('reason')=='compiler-artifact' and r.get('executable') and r['target']['name']=='rust_robotics_train']
+          assert len(files)==1,files
+          shutil.copyfile(files[0],root/'runner')
+          PY
+          chmod +x "$HORIZON_BUILD/runner"
+          ldd "$HORIZON_BUILD/runner" > "$HORIZON_BUILD/linkage.txt"
+      - name: Preserve all results and restore protected files
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_BUILD'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_algo rust_robotics_core rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-anchor-build
+          path: /tmp/recovery-anchor-build/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  diagnose:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [201, 202, 203, 204]
+    name: Recovery preservation seed ${{ matrix.seed }}
+    env:
+      HORIZON_SEED: ${{ matrix.seed }}
+      HORIZON_BUILD: /tmp/recovery-anchor-build
+      HORIZON_OUT: /tmp/recovery-anchor-${{ matrix.seed }}
+      HORIZON_PRIOR: /tmp/recovery-anchor-prior
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: recovery-anchor-build
+          path: /tmp/recovery-anchor-build
+      - name: Verify executable and previous tail-support evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$HORIZON_OUT" "$HORIZON_PRIOR"
+          python - <<'PY'
+          import hashlib,json,os,shutil,subprocess,zipfile
+          from pathlib import Path
+          build=Path(os.environ['HORIZON_BUILD']);out=Path(os.environ['HORIZON_OUT']);prior=Path(os.environ['HORIZON_PRIOR'])
+          for n,h in json.loads((build/'manifest.json').read_text()).items(): assert hashlib.sha256((build/n).read_bytes()).hexdigest()==h,n
+          for n in ['manifest.json','commit.txt','baseline.txt']: shutil.copyfile(build/n,out/('build-'+n))
+          ids={201:(10583625782,'a31fbc2ddca458e14dc528f6fa912d04cf155914eaf52e18ad017a229b2db8a7'),202:(10583625786,'5766c17d8a43dda00b4c0938dbc31e0e4fccde534bdfea25a0e0b4a4168202ee'),203:(10583830536,'2dacac361685437c15f41dfa75ac591d31579fa006bded0a0ed8f671d1d38843'),204:(10584040286,'1fe925894f652654ec4f5cf9ca2a6730d56e2d2a3daff8cad87d733ba88aaed7')}
+          artifact,digest=ids[int(os.environ['HORIZON_SEED'])]
+          archive=out/'previous-tail-support.zip'
+          with archive.open('wb') as f: subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip'],stdout=f,check=True)
+          assert hashlib.sha256(archive.read_bytes()).hexdigest()==digest
+          with zipfile.ZipFile(archive) as z:
+              assert all(not n.startswith('/') and '..' not in Path(n).parts for n in z.namelist())
+              for n,h in json.loads(z.read('manifest.json')).items(): assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              names=['batch.json','actor-before.bin','critic-before.bin','actor-mean4.bin','critic-mean4.bin','targets-mean4.json']+[f'tail-{i}.json' for i in range(4)]
+              for n in names: (prior/n).write_bytes(z.read(n))
+          (out/'prior-source.json').write_text(json.dumps({'artifact':artifact,'sha256':digest})+'\n')
+          PY
+          chmod +x "$HORIZON_BUILD/runner"
+      - name: Execute all fixed variants without score-based selection
+        run: |
+          "$HORIZON_BUILD/runner" trainer::horizon_audit::tail_support::recovery_anchor::emit_recovery_anchor --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$HORIZON_OUT/execution.log"
+          grep -F "RECOVERY ANCHOR COMPLETE $HORIZON_SEED" "$HORIZON_OUT/execution.log"
+      - name: Preserve every result and failure
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_OUT"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-anchor-${{ matrix.seed }}
+          path: ${{ env.HORIZON_OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
