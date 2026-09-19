@@ -1,0 +1,113 @@
+name: PPO rest-point value and action credit
+
+on:
+  push:
+    branches: ["audit/ppo-rest-value-credit-20260918"]
+    paths: [".github/workflows/ppo-rest-value-credit.yml", "audits/rest_value_credit/probe.rs", "audits/rest_value_credit/cases.csv"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Recover and verify all frozen source-policy artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/rest-credit/input /tmp/rest-credit/raw /tmp/rest-credit/results
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_algo rust_robotics_core rust_robotics_sim docs Cargo.lock
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess,json,hashlib,zipfile
+          records=[
+          ('constant-201',10575670492,'b5f7b01e243fa5582b39a0fa28a5406f8d50be957b943b2521e4e42afeb9f166'),
+          ('constant-202',10575376846,'f2181d48972b73e5fa6a5e1fd18efa394f2e267a442857ba537b3c29a3441985'),
+          ('constant-203',10575162039,'769c3dde8174671fea1019a397f473af8063e20fdbe10461c370378b7cb44f73'),
+          ('constant-204',10575520493,'01e6cff47e4201cac53e4bf4284de5e7967eba25ce363a3813b0a0709073d44b'),
+          ('actor-decay-201',10575500777,'b294ec4ccc29c6720e481fdc0ff84a754de79174b4d6e7ecc6491003eb81e65f'),
+          ('actor-decay-202',10575895206,'642236bdee82ab2dd3dd6d84fee576dcd18b6748260279f55d130b5b7864587a'),
+          ('actor-decay-203',10575436697,'acc81df684779a54a894156f54e3e66d9f1e3390ccbec80bc487b90dd2973d75'),
+          ('actor-decay-204',10575161992,'781b43dd4a4ee356367c45a6d8726ddb75e8abc8e96016e8690c3adcd446a67a')]
+          root=Path('/tmp/rest-credit');meta=[]
+          for name,aid,digest in records:
+              archive=root/'raw'/(name+'.zip')
+              with archive.open('wb') as f: subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{aid}/zip'],stdout=f,check=True)
+              assert hashlib.sha256(archive.read_bytes()).hexdigest()==digest,name
+              out=root/'input'/name;out.mkdir()
+              with zipfile.ZipFile(archive) as z:
+                  manifest=json.loads(z.read('manifest.json'))
+                  for path,h in manifest.items(): assert hashlib.sha256(z.read(path)).hexdigest()==h,(name,path)
+                  for cp in [4194304,16777216]:
+                      for kind in ['actor','critic']:
+                          p=f'{kind}-{cp}.bin';(out/p).write_bytes(z.read(p))
+                  if name.startswith('constant'):
+                      (out/'batch-8193.json').write_bytes(z.read('batch-8193.json'))
+                  meta.append({'name':name,'artifact':aid,'sha256':digest,'verified_members':len(manifest)})
+          (root/'input-artifacts.json').write_text(json.dumps(meta,indent=2)+'\n')
+          PY
+          cp audits/rest_value_credit/cases.csv /tmp/rest-credit/input/cases.csv
+          cp audits/rest_value_credit/probe.rs /tmp/rest-credit/probe-authored.rs
+          cp .github/workflows/ppo-rest-value-credit.yml /tmp/rest-credit/workflow.yml
+          git rev-parse HEAD > /tmp/rest-credit/commit.txt
+          rustc -Vv > /tmp/rest-credit/rustc.txt
+          mkdir -p rust_robotics_train/examples
+          cp audits/rest_value_credit/probe.rs rust_robotics_train/examples/rest_value_credit.rs
+      - name: Require runtime controls before any diagnostic continuations
+        run: |
+          cargo fmt --all
+          cp rust_robotics_train/examples/rest_value_credit.rs /tmp/rest-credit/probe-executed.rs
+          cargo clippy --locked -p rust_robotics_train --example rest_value_credit -- -D warnings 2>&1 | tee /tmp/rest-credit/clippy.log
+          cargo test --locked --release -p rust_robotics_train --example rest_value_credit 2>&1 | tee /tmp/rest-credit/probe-tests.log
+          cargo test --locked --release -p rust_robotics_train --lib 2>&1 | tee /tmp/rest-credit/trainer-tests.log
+          cargo build --locked --release -p rust_robotics_train --example rest_value_credit 2>&1 | tee /tmp/rest-credit/build.log
+          cp target/release/examples/rest_value_credit /tmp/rest-credit/probe
+          cp Cargo.lock /tmp/rest-credit/Cargo.lock
+          cp rust_robotics_train/src/env.rs /tmp/rest-credit/env.rs
+          rm rust_robotics_train/examples/rest_value_credit.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_algo rust_robotics_core rust_robotics_sim docs Cargo.lock
+      - name: Execute all frozen paired continuations
+        run: |
+          /tmp/rest-credit/probe /tmp/rest-credit/input /tmp/rest-credit/results 2>&1 | tee /tmp/rest-credit/execution.log
+          grep -F 'REST CREDIT COMPLETE 7196 trajectories' /tmp/rest-credit/execution.log
+      - name: Preserve all measured outcomes and failures
+        if: always()
+        run: |
+          mkdir -p /tmp/rest-credit
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          root=Path('/tmp/rest-credit')
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rest-value-credit-${{ github.run_id }}
+          path: /tmp/rest-credit/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
