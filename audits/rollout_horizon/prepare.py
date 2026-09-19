@@ -14,6 +14,13 @@ def change(path, old, new):
     assert text.count(old)==1,(str(path),text.count(old))
     path.write_text(text.replace(old,new))
 
+# Retain the original failed source in its first-run artifact. The prepared
+# source uses the actual StepResult field and verifies the duplicate observation.
+native=Path('audits/rollout_horizon/native.rs')
+change(native,'step.truncated()).unwrap();','step.truncated).unwrap();')
+change(native,'    assert_eq!(rows.len(), batch.observations.len());',
+    '''    assert_eq!(rows.len(), batch.observations.len());
+    assert_eq!(rows.iter().map(|r|r.latent).collect::<Vec<_>>(),batch.latent_actions);''')
 trainer=Path('rust_robotics_train/src/trainer.rs')
 pool=Path('rust_robotics_train/src/ppo_rollout_pool.rs')
 change(trainer,'                last_value_loss = value_loss_scalar;',
