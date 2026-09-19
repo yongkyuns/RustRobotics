@@ -1,0 +1,175 @@
+name: PPO lambda-one credit and learning
+
+on:
+  push:
+    branches: ["audit/ppo-lambda-one-credit-20260918"]
+    paths: [".github/workflows/ppo-lambda-credit.yml", "audits/lambda_credit/prepare.py", "audits/lambda_credit/native_tests.rs", "audits/lambda_credit/study.py"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      LAMBDA_BUILD: /tmp/lambda-build
+      LONG_BUILD: /tmp/lambda-build
+      LONG_ROBUSTNESS: /tmp/lambda-build/robustness
+      PPO_REF_LIBRARY: /tmp/lambda-build/librust_robotics_train.so
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Recover immutable witness and native evaluator evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10576391630/zip > /tmp/witness.zip
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10571679369/zip > /tmp/long-build.zip
+          mkdir -p "$LAMBDA_BUILD"
+          python audits/lambda_credit/prepare.py 2>&1 | tee "$LAMBDA_BUILD/prepare.log"
+          python -m py_compile audits/lambda_credit/*.py
+      - name: Require native regression and lambda-isolation controls
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$LAMBDA_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$LAMBDA_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --bin lambda-credit-probe 2>&1 | tee "$LAMBDA_BUILD/probe-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$LAMBDA_BUILD/integration-tests.log"
+          cargo build --locked --release -p rust_robotics_train --lib --bin lambda-credit-probe 2>&1 | tee "$LAMBDA_BUILD/build.log"
+          cp target/release/librust_robotics_train.so "$PPO_REF_LIBRARY"
+          cp target/release/lambda-credit-probe "$LAMBDA_BUILD/probe"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Install pinned read-only evaluation and statistical runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0 scipy==1.17.0
+          python -m pip freeze > "$LAMBDA_BUILD/python-freeze.txt"
+      - name: Require real environment and persistent training isolation
+        run: |
+          python audits/lambda_credit/study.py controls --out "$LAMBDA_BUILD/controls" 2>&1 | tee "$LAMBDA_BUILD/controls.log"
+          grep -F 'LAMBDA PREFLIGHT PASS' "$LAMBDA_BUILD/controls.log"
+      - name: Execute every frozen lambda-one counterfactual
+        run: |
+          "$LAMBDA_BUILD/probe" "$LAMBDA_BUILD/witness/input" "$LAMBDA_BUILD/candidate" 2>&1 | tee "$LAMBDA_BUILD/witness.log"
+          python audits/lambda_credit/study.py gate --out "$LAMBDA_BUILD/gate" 2>&1 | tee "$LAMBDA_BUILD/gate.log"
+          grep -F 'LAMBDA CREDIT GATE PASS' "$LAMBDA_BUILD/gate.log"
+      - name: Retain all outcomes and verify source restoration
+        if: always()
+        run: |
+          mkdir -p "$LAMBDA_BUILD"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,shutil
+          root=Path(os.environ['LAMBDA_BUILD'])
+          for n in ['witness','previous-build']:
+              if (root/n).exists(): shutil.rmtree(root/n)
+          m={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'}
+          (root/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/Cargo.toml rust_robotics_train/src/lib.rs rust_robotics_train/src/trainer.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_algo rust_robotics_core rust_robotics_sim docs Cargo.lock
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lambda-credit-build
+          path: /tmp/lambda-build/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: Lambda ${{ matrix.arm }} seed ${{ matrix.seed }}
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        arm: [baseline, lambda-one]
+        seed: [201, 202, 203, 204]
+    env:
+      LAMBDA_BUILD: /tmp/lambda-build
+      PPO_REF_LIBRARY: /tmp/lambda-build/librust_robotics_train.so
+      LAMBDA_OUT: /tmp/lambda-${{ matrix.arm }}-${{ matrix.seed }}
+      ARM: ${{ matrix.arm }}
+      SEED: ${{ matrix.seed }}
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: lambda-credit-build
+          path: /tmp/lambda-build
+      - name: Verify gated build and recover matched historical checkpoints
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$LAMBDA_OUT"
+          python - <<'PY'
+          from pathlib import Path
+          import json,hashlib,os,shutil,subprocess
+          root=Path(os.environ['LAMBDA_BUILD']);out=Path(os.environ['LAMBDA_OUT'])
+          for n,h in json.loads((root/'manifest.json').read_text()).items():assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          assert json.loads((root/'gate/gate.json').read_text())['passed']
+          (root/'robustness').chmod(0o755)
+          for n in ['manifest.json','commit.txt','baseline.txt']:
+              shutil.copyfile(root/n,out/('build-'+n))
+          ids={201:(10573100831,'cf6497a87869145e4d383d4aca9b636467a7a3ab1d0c9a6bf518ce95a6c17c8a'),202:(10572855997,'0f8486099c8d68ec58bdcbd40b47a27da5271027ad388299e241735c21442277'),203:(10573290549,'caf7dceaeeb59683aef29c54a8122342381b3b18cdcf3a813ae6d7593c6fb998'),204:(10572317499,'45dab4e0dfef39ee950898b48bbf9a8b5b137e1b4759a932135081043a0e76a2')}
+          i,h=ids[int(os.environ['SEED'])]
+          with (out/'prior.zip').open('wb') as f:subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{i}/zip'],stdout=f,check=True)
+          assert hashlib.sha256((out/'prior.zip').read_bytes()).hexdigest()==h
+          (out/'prior-artifact.json').write_text(json.dumps({'id':i,'sha256':h})+'\n')
+          PY
+      - name: Install unchanged pinned evaluator runtime
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0
+          python -m pip freeze > "$LAMBDA_OUT/python-freeze.txt"
+      - name: Execute all fixed budgets without changing update cadence
+        run: |
+          python "$LAMBDA_BUILD/sources/audits/lambda_credit/study.py" measure --arm "$ARM" --seed "$SEED" --prior "$LAMBDA_OUT/prior.zip" --out "$LAMBDA_OUT" 2>&1 | tee "$LAMBDA_OUT/execution.log"
+          grep -F 'LAMBDA TRAINING COMPLETE' "$LAMBDA_OUT/execution.log"
+      - name: Preserve every checkpoint and failure
+        if: always()
+        run: |
+          mkdir -p "$LAMBDA_OUT"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ['LAMBDA_OUT'])
+          m={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'}
+          (root/'manifest.json').write_text(json.dumps(m,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lambda-${{ matrix.arm }}-${{ matrix.seed }}
+          path: ${{ env.LAMBDA_OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
