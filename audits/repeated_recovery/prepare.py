@@ -5,11 +5,13 @@ import os,shutil,subprocess
 BASE='4739f370558b9443708c920ac30614f86e3c07bb'
 OUT=Path(os.environ['HORIZON_BUILD'])
 PROTECTED=['rust_robotics_train','rust_robotics_core','rust_robotics_algo','rust_robotics_sim','Cargo.lock','docs']
-# The environment exposes Debug, not a public step_count accessor. Compare its
-# full debug representation in this diagnostic without adding a production API.
+# Preserve the failed preflight separately. NdArrayDevice is Copy; copying it
+# leaves identical device selection without a lint-rejected redundant clone.
 p=Path('audits/repeated_recovery/native.rs');s=p.read_text()
-a='assert_eq!(a.env.step_count(),b.env.step_count());'
-assert s.count(a)==1
+a='device:s.device.clone()';assert s.count(a)==1;s=s.replace(a,'device:s.device')
+# Environment exposes Debug, not a public step-count accessor. Compare its full
+# representation in this diagnostic without adding a production-facing API.
+a='assert_eq!(a.env.step_count(),b.env.step_count());';assert s.count(a)==1
 p.write_text(s.replace(a,'assert_eq!(format!("{:?}",a.env),format!("{:?}",b.env));'))
 subprocess.run(['python','audits/recovery_rewards/prepare.py'],check=True)
 p=Path('audits/recovery_anchor/native.rs');s=p.read_text();assert s.count('mod recovery_rewards;')==1
