@@ -1,0 +1,80 @@
+name: Preserve fresh-cohort raw evidence
+on:
+  push:
+    branches: ["audit/ppo-fresh-recovery-20260919"]
+    paths: [".github/workflows/ppo-fresh-package.yml"]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  preserve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: yongkyuns/RustRobotics
+      SOURCE_RUN: '35453178361'
+    steps:
+      - name: Observe the already-running experiment without starting or retrying it
+        run: |
+          mkdir -p /tmp/fresh-package/raw
+          gh run watch "$SOURCE_RUN" --repo "$REPO" --exit-status > /tmp/fresh-package/watch.log 2>&1 || true
+          gh api "repos/$REPO/actions/runs/$SOURCE_RUN" > /tmp/fresh-package/run.json
+          gh api "repos/$REPO/actions/runs/$SOURCE_RUN/jobs?per_page=100" > /tmp/fresh-package/jobs.json
+          gh api "repos/$REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" > /tmp/fresh-package/published-artifacts.json
+      - name: Copy unchanged archives and verify every published digest
+        run: |
+          python - <<'PY'
+          import concurrent.futures,hashlib,json,os,subprocess,zipfile
+          from pathlib import Path
+          root=Path('/tmp/fresh-package')
+          run=json.loads((root/'run.json').read_text())
+          assert run['status']=='completed' and run['head_sha']=='123a14ede4ce3a7e33f85e0c36781b353079ba89'
+          payload=json.loads((root/'published-artifacts.json').read_text())
+          artifacts=payload['artifacts']
+          assert payload['total_count']==len(artifacts),'unhandled pagination'
+          expected={'fresh-recovery-build'}|{f'fresh-recovery-{arm}-{seed}' for arm in ['baseline95','ordinary','near-union','recovery-union'] for seed in range(41001,41009)}
+          assert len({a['name'] for a in artifacts})==len(artifacts)
+          def copy(a):
+              assert a['name'] in expected and not a['expired']
+              assert a['workflow_run']['head_sha']==run['head_sha']
+              path=root/'raw'/(a['name']+'.zip')
+              with path.open('wb') as f:
+                  subprocess.run(['gh','api',f"repos/{os.environ['REPO']}/actions/artifacts/{a['id']}/zip"],stdout=f,check=True)
+              digest=hashlib.sha256(path.read_bytes()).hexdigest()
+              assert a['digest']=='sha256:'+digest and path.stat().st_size==a['size_in_bytes']
+              with zipfile.ZipFile(path) as z:
+                  names=z.namelist();assert len(names)==len(set(names))
+                  assert all(not n.startswith('/') and '..' not in Path(n).parts for n in names)
+                  m=json.loads(z.read('manifest.json'))
+                  assert set(names)==set(m)|{'manifest.json'}
+                  for n,h in m.items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              return a['name'],dict(id=a['id'],sha256=digest,size_bytes=path.stat().st_size,payload_members=len(m),run=run['id'])
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+              records=dict(executor.map(copy,artifacts))
+          (root/'artifacts.json').write_text(json.dumps(records,indent=2,sort_keys=True)+'\n')
+          missing=sorted(expected-set(records))
+          (root/'collection.json').write_text(json.dumps(dict(source_head=run['head_sha'],source_conclusion=run['conclusion'],archives=len(records),missing=missing),indent=2)+'\n')
+          assert not missing,'cohort evidence incomplete; partial artifacts retained'
+          PY
+      - name: Hash the outer evidence collection
+        if: always()
+        run: |
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('/tmp/fresh-package');root.mkdir(exist_ok=True)
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fresh-cohort-raw-35453178361
+          path: /tmp/fresh-package/
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
