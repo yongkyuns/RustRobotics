@@ -1,0 +1,144 @@
+name: PPO reward-bearing recovery coverage
+
+on:
+  push:
+    branches: ["audit/ppo-recovery-rewards-20260919"]
+    paths: [".github/workflows/ppo-recovery-rewards.yml", "audits/recovery_rewards/native.rs", "audits/recovery_rewards/prepare.py"]
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      HORIZON_BUILD: /tmp/reward-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Require unchanged-path and reward-support controls
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python audits/recovery_rewards/prepare.py 2>&1 | tee "$HORIZON_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$HORIZON_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$HORIZON_BUILD/tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$HORIZON_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export the actual compiled diagnostic endpoint
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$HORIZON_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_BUILD'])
+          rows=[json.loads(l) for l in (root/'build.jsonl').read_text().splitlines()]
+          exe=[r['executable'] for r in rows if r.get('reason')=='compiler-artifact' and r.get('executable') and r['target']['name']=='rust_robotics_train']
+          assert len(exe)==1,exe
+          shutil.copyfile(exe[0],root/'runner')
+          PY
+          chmod +x "$HORIZON_BUILD/runner"
+          ldd "$HORIZON_BUILD/runner" > "$HORIZON_BUILD/linkage.txt"
+      - name: Preserve source and every result; restore protected paths
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_BUILD'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_algo rust_robotics_core rust_robotics_sim Cargo.lock docs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-rewards-build
+          path: /tmp/reward-build/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  diagnose:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [201, 202, 203, 204]
+    name: Reward coverage seed ${{ matrix.seed }}
+    env:
+      HORIZON_SEED: ${{ matrix.seed }}
+      HORIZON_BUILD: /tmp/reward-build
+      HORIZON_OUT: /tmp/reward-${{ matrix.seed }}
+      HORIZON_PRIOR: /tmp/reward-prior
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: recovery-rewards-build
+          path: /tmp/reward-build
+      - name: Verify executable and immutable previous intervention
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$HORIZON_OUT" "$HORIZON_PRIOR"
+          python - <<'PY'
+          import hashlib,json,os,shutil,subprocess,zipfile
+          from pathlib import Path
+          build=Path(os.environ['HORIZON_BUILD']);out=Path(os.environ['HORIZON_OUT']);prior=Path(os.environ['HORIZON_PRIOR'])
+          for n,h in json.loads((build/'manifest.json').read_text()).items(): assert hashlib.sha256((build/n).read_bytes()).hexdigest()==h,n
+          for n in ['manifest.json','commit.txt','baseline.txt']: shutil.copyfile(build/n,out/('build-'+n))
+          ids={201:(10584833062,'004552d7b5074cff992b21ddefc16daf4b656b8980beb963bafad464116bf661'),202:(10585122626,'9bd9b109be063ea7e7d0cf83d353a55b53581e3cc391e5b2313c05f76528808e'),203:(10584408423,'6ef5491e7e50ffa50ae402809492adba4da25b087c3c6b8fcc59ee541c082a1a'),204:(10584288596,'a9babc4e4f5d577cb276ad55469507e186a5c5e173250c3eec7a571c98b16c1c')}
+          artifact,digest=ids[int(os.environ['HORIZON_SEED'])]
+          archive=out/'prior-recovery-anchor.zip'
+          with archive.open('wb') as f: subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip'],stdout=f,check=True)
+          assert hashlib.sha256(archive.read_bytes()).hexdigest()==digest
+          with zipfile.ZipFile(archive) as z:
+              for n,h in json.loads(z.read('manifest.json')).items():
+                  assert not n.startswith('/') and '..' not in Path(n).parts
+                  assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+                  if n.endswith(('.json','.bin')):
+                      dest=prior/n;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(z.read(n))
+          (out/'prior-source.json').write_text(json.dumps({'artifact':artifact,'sha256':digest})+'\n')
+          PY
+          chmod +x "$HORIZON_BUILD/runner"
+      - name: Execute every predefined bank and independent policy evaluation
+        run: |
+          "$HORIZON_BUILD/runner" trainer::horizon_audit::tail_support::recovery_anchor::recovery_rewards::emit_recovery_rewards --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$HORIZON_OUT/execution.log"
+          grep -F "RECOVERY REWARDS COMPLETE $HORIZON_SEED" "$HORIZON_OUT/execution.log"
+      - name: Preserve all outcomes and failures
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_OUT"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-rewards-${{ matrix.seed }}
+          path: ${{ env.HORIZON_OUT }}/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
