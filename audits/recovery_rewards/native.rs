@@ -206,8 +206,8 @@ fn expanded_batch_optimizer_restore_retains_next_transaction() {
     let mut s=PpoTrainerSession::new_seeded(config(),203);s.train_updates(2);
     let(b,rows)=captured(&mut s);let(_,raw,_)=targets(&s,&rows,1.0);let extra=supplement(&s,203,false,None);
     let(u,_)=joined(&b,&raw,&extra);s.config.ppo.mini_batch_size=256;
-    let base=Anchor::new(&s);s.optimize(&u);let once=Anchor::new(&s);s.optimize(&u);
+    let base=Anchor::new(&s);s.optimize(&u);let once=s.snapshot();let once_critic=value_snapshot(&s);s.optimize(&u);
     let a=s.snapshot();let c=value_snapshot(&s);base.restore(&mut s);s.optimize(&u);
-    assert_eq!(s.snapshot(),once.actor.valid().into_record().clone().into_item::<burn::record::FullPrecisionSettings>().try_into().unwrap_or_else(|_|s.snapshot()));
+    assert_eq!(s.snapshot(),once);assert_eq!(flat(&value_snapshot(&s)),flat(&once_critic));
     s.optimize(&u);assert_eq!(s.snapshot(),a);assert_eq!(flat(&value_snapshot(&s)),flat(&c));
 }
