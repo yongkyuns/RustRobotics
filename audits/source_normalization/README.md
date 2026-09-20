@@ -1,33 +1,23 @@
-# Source-normalization experiment — published, execution pending
+# Source-normalization experiment — complete, candidate not qualified
 
-This study follows the outward-mixture trade-off attribution in #35. It is not a report of controller performance.
+The experiment and independent verification are complete. See [RESULTS.md](RESULTS.md) for the full protocol-bound report, contrary outcomes, costs and limitations.
 
-## Registered comparison
+Executed source: `a799c6d35c3753266fa382230d734e2d7de18312`. Workflow run `35482824488` completed on its first attempt with all nine jobs successful. Registration: issue #35 comment `5746872084`, posted before execution. The prior queued status is retained in Git history; no duplicate run was dispatched to replace it.
 
-The protocol was posted before dispatch: issue #35 comment **5746872084**. The training source is pinned to **a799c6d35c3753266fa382230d734e2d7de18312**; workflow run **35482824488**. At this status note, GitHub reports the native preflight as **queued**, with no executed steps. No new Rust compilation, preflight pass, training completion, or controller score is claimed.
+The experiment holds the four-of-eight outward-start mixture fixed and compares global advantage normalization, separate source means with a common global scale, and separate source means and scales. Only actor advantages change. Eight exposed training histories each branch into three 512-update continuations. This is development, not a fresh held-out cohort.
 
-The three arms use the exact same executed outward-start mixture, target construction, optimizer cadence and initial complete learner state. The groups are first768 retained nominal-origin samples and final256 outward-origin samples, not labels for every observed state.
+## Decision
 
-| Arm | Centring | Scale |
-|---|---|---|
-| global | Whole1024-sample mean | Whole1024-sample standard deviation |
-| source-center | Separate means for768/256 groups | Same global standard deviation |
-| source-standardize | Separate means for768/256 groups | Separate group standard deviations |
+**The preregistered separate-mean/separate-scale candidate fails the development screen and all three absolute robustness panels.**
 
-All moments use the inherited sequential-f32 population formula and1e-6 standard-deviation floor. Only actor advantages change. Raw return targets, critic loss, primary and supplemental sampling, nonlinear plant, reward, noise, exploration, network architecture and optimizer settings remain unchanged. There is no teacher, imitation penalty, gradient projection, adaptive mixture or evaluation-selected update.
+| Final policy | Five-minute deterministic /512 | Five-minute stochastic /512 | Sixty-second outward /512 |
+|---|---:|---:|---:|
+| Global normalization |504|503|474|
+| Separate means, common scale |504|503|460|
+| Separate means and scales |503|500|465|
 
-The predeclared candidate is source-standardize; source-center is a mechanistic control, not a post-hoc alternative winner. Each of eight exposed histories41001–41008 is replayed through4096 prior updates; three full-state descendants then receive512 additional updates. Checkpoints0/32/128/512 are fixed. Global control weights must reproduce every historical half-outward checkpoint exactly. A replay mismatch stops and is retained.
+The candidate repairs eight of twelve previously exposed angle-failure cases, but those historical examples do not override poorer whole-panel completion. Normalization formulas and first-update isolation were verified; mathematically removing cross-source coupling was insufficient for reliable control.
 
-Fresh evaluation draws use training_seed+0x04000000, the same existing six panels, first-failure stopping, explicit completion denominators and final-ten-second centring. This is development on exposed histories, not fresh held-out qualification. The twelve known seed41008 angle-failure cases are separately labelled historical witness tests, never new acceptance data.
+Native preflight passed 102 tests plus ordinary integration controls. Independent analysis checked all nine original ZIPs, 21,504 new-domain episode records, 36 historical witness records, selected optimizer transactions and 228 retained full trajectories. The complete offline replay passed 67 tests and regenerated all ten numerical reports byte-for-byte, explicitly retaining both failed controller screens. See the full report for ignored endpoints, aggregate-only replications, historical-input retention and unexported-state limitations.
 
-Advancement requires resolved long-outward completion AND discounted-return gains over global normalization under the registered paired-history99% multiplicity-adjusted intervals, plus nominal survival retention versus both control and incoming policy and at least61/64 nominal successes for each history. The original stricter absolute screen is separately reported. No normalization formula or average-score gain overrides a failed controller screen.
-
-## Accounting and verification
-
-Each continuation arm/history uses262144 main interactions,2359296 supplemental interactions and at most1048576 sampled-tail interactions. Each network performs8192 Adam steps and2097152 gradient-sample visits. Prefix replay, evaluation and diagnostic witness costs are additional. Equal main counters do not imply sample efficiency versus ordinary PPO.
-
-The workflow requires strict Clippy, all inherited native/unit/integration controls, normalization mathematics and zero-variance tests, scope restoration, unchanged first critic updates, and ordinary/global replay with persistent Adam/RNG history. These are requirements, not results while preflight remains queued. Audit preparation adds a reversible advantage-only hook; protected production sources are restored after building.
-
-A standalone Python verifier has passed **59 synthetic/unit tests** locally, using Python3.13.5,NumPy2.3.5,SciPy1.17.0. It checks declared identities, missing/corrupt evidence, fixed statistical rules, normalization formula/isolation, GAE, retained critic targets and numerical snapshots. This does not compile Rust or establish any learning result. It explicitly emits an incomplete result when any of the nine required raw archives is missing. Selected real trajectories/optimizer outputs can only be verified after artifacts exist.
-
-Do not dispatch a duplicate run merely because this one is queued. Do not retry a completed measurement for a better score. No production default, PR38, master or deployed asset has been modified by this study. Passing execution checks would still not imply passing controller qualification.
+Keep the existing recipe's global normalization. No production default, PR #38, master, deployed asset or fallback controller was changed or merged. Successful CI and evidence replay do not establish controller qualification.
