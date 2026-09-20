@@ -1,0 +1,104 @@
+name: PPO reward versus survival replay
+on:
+  push:
+    branches: ["audit/ppo-reward-alignment-20260920"]
+    paths: [".github/workflows/ppo-reward-alignment.yml", "audits/reward_alignment/replay.rs"]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      ALIGN_INPUT: /tmp/alignment-input
+      ALIGN_OUT: /tmp/reward-alignment
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Attach the unchanged frozen evaluator and selected-case endpoint
+        run: |
+          mkdir -p "$ALIGN_OUT"
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import os,shutil,subprocess
+          p=Path('rust_robotics_train/src/lib.rs')
+          p.write_text(p.read_text()+'\n#[cfg(test)]\n#[path = "../../audits/reflection_consistency/native.rs"]\nmod reflection_audit;\n')
+          p=Path('audits/reflection_consistency/native.rs')
+          p.write_text(p.read_text()+'\n#[path = "../reward_alignment/replay.rs"]\nmod reward_alignment;\n')
+          subprocess.run(['cargo','fmt','--all'],check=True)
+          out=Path(os.environ['ALIGN_OUT'])
+          paths=[Path('Cargo.lock'),Path('Cargo.toml'),Path('AGENTS.md'),Path('audits/reflection_consistency/native.rs'),Path('audits/reward_alignment/replay.rs')]
+          for crate in ['rust_robotics_train','rust_robotics_core','rust_robotics_algo']:
+              paths+=list(Path(crate).rglob('*.rs'))+list(Path(crate).rglob('Cargo.toml'))
+          for p in paths:
+              d=out/'sources'/p;d.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,d)
+          shutil.copyfile('.github/workflows/ppo-reward-alignment.yml',out/'workflow.yml')
+          (out/'commit.txt').write_bytes(subprocess.check_output(['git','rev-parse','HEAD']))
+          (out/'preparation.patch').write_bytes(subprocess.check_output(['git','diff']))
+          (out/'rustc.txt').write_bytes(subprocess.check_output(['rustc','-Vv']))
+          PY
+      - name: Require reflection and ordinary learner controls
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$ALIGN_OUT/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$ALIGN_OUT/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$ALIGN_OUT/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Verify immutable input policy and outcomes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10597837264/zip > /tmp/alignment-prior.zip
+          python - <<'PY'
+          from pathlib import Path
+          import os,hashlib,json,zipfile
+          raw=Path('/tmp/alignment-prior.zip').read_bytes()
+          digest='b915c76d4fe28be4dddcc686214a37e1901bba2c47ee2511195c0d2774883039'
+          assert hashlib.sha256(raw).hexdigest()==digest
+          dest=Path(os.environ['ALIGN_INPUT']);dest.mkdir(parents=True,exist_ok=True)
+          out=Path(os.environ['ALIGN_OUT'])
+          with zipfile.ZipFile('/tmp/alignment-prior.zip') as z:
+              m=json.loads(z.read('manifest.json'));assert set(z.namelist())==set(m)|{'manifest.json'}
+              for n,h in m.items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              for n in ['actor.bin','evaluation.csv']:(dest/n).write_bytes(z.read(n))
+              (out/'prior-manifest.json').write_bytes(z.read('manifest.json'))
+              (out/'original-evaluation.csv').write_bytes(z.read('evaluation.csv'))
+          (out/'source.json').write_text(json.dumps({'artifact_id':10597837264,'sha256':digest,'run':35486221478,'seed':41003},sort_keys=True)+'\n')
+          PY
+      - name: Replay the single selected case under all three frozen mappings
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib reflection_audit::reward_alignment::emit_reward_alignment -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$ALIGN_OUT/replay.log"
+          grep -F 'REWARD ALIGNMENT REPLAY COMPLETE' "$ALIGN_OUT/replay.log"
+      - name: Preserve all outcomes and restore production source
+        if: always()
+        run: |
+          git restore -- rust_robotics_train/src/lib.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import os,hashlib,json
+          root=Path(os.environ['ALIGN_OUT']);root.mkdir(parents=True,exist_ok=True)
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reward-alignment-replay
+          path: /tmp/reward-alignment/
+          retention-days: 30
+          if-no-files-found: error
