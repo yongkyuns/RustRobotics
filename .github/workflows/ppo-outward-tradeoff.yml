@@ -1,0 +1,101 @@
+name: Outward-mixture frozen failure traces
+on:
+  push:
+    branches: ["audit/ppo-outward-tradeoff-20260919"]
+    paths: [".github/workflows/ppo-outward-tradeoff.yml", "audits/outward_tradeoff/trace.rs"]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      TRADE_OUT: /tmp/trade-replay
+      TRADE_INPUT: /tmp/trade-input
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Attach test-only trace replay and retain exact sources
+        run: |
+          mkdir -p "$TRADE_OUT"
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import os,shutil,subprocess
+          p=Path('rust_robotics_train/src/lib.rs')
+          p.write_text(p.read_text()+'\n#[cfg(test)]\n#[path = "../../audits/outward_tradeoff/trace.rs"]\nmod trade_trace;\n')
+          subprocess.run(['cargo','fmt','--all'],check=True)
+          out=Path(os.environ['TRADE_OUT'])
+          paths=[Path('Cargo.lock'),Path('Cargo.toml'),Path('AGENTS.md'),Path('audits/outward_tradeoff/trace.rs')]
+          for crate in ['rust_robotics_train','rust_robotics_core','rust_robotics_algo']:
+              paths+=list(Path(crate).rglob('*.rs'))+list(Path(crate).rglob('Cargo.toml'))
+          for p in paths:
+              d=out/'sources'/p;d.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,d)
+          shutil.copyfile('.github/workflows/ppo-outward-tradeoff.yml',out/'workflow.yml')
+          (out/'patch.diff').write_bytes(subprocess.check_output(['git','diff']))
+          (out/'commit.txt').write_bytes(subprocess.check_output(['git','rev-parse','HEAD']))
+          (out/'rustc.txt').write_bytes(subprocess.check_output(['rustc','-Vv']))
+          PY
+      - name: Require ordinary regression and new trace controls
+        run: |
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$TRADE_OUT/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$TRADE_OUT/tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$TRADE_OUT/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Recover immutable source outcomes and frozen policies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10588899995/zip > "$TRADE_OUT/original-41008.zip"
+          python - <<'PY'
+          import hashlib,json,os,zipfile
+          from pathlib import Path
+          raw=Path(os.environ['TRADE_OUT'])/'original-41008.zip'
+          assert hashlib.sha256(raw.read_bytes()).hexdigest()=='3fbbc68cf0d4e4e4ecaa785abe144b0745bef19498f4bd13f9c027880728bc9c'
+          dest=Path(os.environ['TRADE_INPUT']);dest.mkdir(parents=True,exist_ok=True)
+          with zipfile.ZipFile(raw) as z:
+              m=json.loads(z.read('manifest.json'));assert set(z.namelist())==set(m)|{'manifest.json'}
+              for n,h in m.items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              wanted=['evaluation.csv','actor-0.bin']+[f'{arm}/actor-{cp}.bin' for arm in ['reset-only','half-outward'] for cp in [128,512]]
+              for n in wanted:
+                  d=dest/n;d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes(z.read(n))
+          PY
+      - name: Replay every selected historical case, not training
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib trade_trace::emit -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$TRADE_OUT/replay.log"
+          grep -F 'TRADEOFF FROZEN TRACE REPLAY COMPLETE' "$TRADE_OUT/replay.log"
+      - name: Preserve successes or failures and restore source
+        if: always()
+        run: |
+          mkdir -p "$TRADE_OUT"
+          git restore -- rust_robotics_train/src/lib.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ['TRADE_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: outward-tradeoff-traces
+          path: /tmp/trade-replay/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
