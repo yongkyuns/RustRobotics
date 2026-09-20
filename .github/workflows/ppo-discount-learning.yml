@@ -1,0 +1,141 @@
+name: PPO discount learning comparison
+on:
+  push:
+    branches: ["audit/ppo-discount-learning-20260920"]
+    paths: [".github/workflows/ppo-discount-learning.yml", "audits/discount_learning/native.rs", "audits/discount_learning/prepare.py"]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      HORIZON_BUILD: /tmp/discount-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Require discount propagation and unchanged physical collection
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python audits/discount_learning/prepare.py 2>&1 | tee "$HORIZON_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$HORIZON_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$HORIZON_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$HORIZON_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export exactly the tested executable
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$HORIZON_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_BUILD'])
+          rows=[json.loads(l) for l in (root/'build.jsonl').read_text().splitlines()]
+          bins=[r['executable'] for r in rows if r.get('reason')=='compiler-artifact' and r.get('executable') and r['target']['name']=='rust_robotics_train']
+          assert len(bins)==1,bins
+          shutil.copyfile(bins[0],root/'runner')
+          PY
+          chmod +x "$HORIZON_BUILD/runner"
+          ldd "$HORIZON_BUILD/runner" > "$HORIZON_BUILD/linkage.txt"
+      - name: Preserve every outcome and restore protected sources
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib
+          root=Path(os.environ['HORIZON_BUILD'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: discount-learning-build
+          path: /tmp/discount-build/
+          retention-days: 30
+          include-hidden-files: true
+          if-no-files-found: error
+  train:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [41001, 41002, 41003, 41004, 41005, 41006, 41007, 41008]
+        arm: [gamma99, gamma995]
+    name: Discount ${{ matrix.arm }} seed ${{ matrix.seed }}
+    env:
+      HORIZON_SEED: ${{ matrix.seed }}
+      DISCOUNT_ARM: ${{ matrix.arm }}
+      HORIZON_OUT: /tmp/discount-${{ matrix.arm }}-${{ matrix.seed }}
+      HORIZON_PRIOR: /tmp/discount-prior
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: discount-learning-build
+          path: /tmp/discount-build
+      - name: Verify exact executable and immutable historical comparator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,shutil,subprocess,zipfile
+          root=Path('/tmp/discount-build');out=Path(os.environ['HORIZON_OUT']);dest=Path(os.environ['HORIZON_PRIOR'])
+          out.mkdir(parents=True,exist_ok=True);dest.mkdir(parents=True,exist_ok=True)
+          for n,h in json.loads((root/'manifest.json').read_text()).items():assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          for n in ['manifest.json','commit.txt','baseline.txt']:shutil.copyfile(root/n,out/('build-'+n))
+          ids={41001:(10597053094,'a59922a66b4a9fa09b0b6c9c8105be202525d903949f92300f606a30aa537514'),41002:(10596358808,'df1cb882640246f6bac80053cd125f9501f1ac8c66abeb287c5553f84a92547f'),41003:(10596903929,'3ce5290282b145f95b561399c6c8bbdba47aecc1843d90512f26db8aeaceb980'),41004:(10597238269,'a7422dfeed70f0be7b413bcf524853f3839d8499f49c8f9468e24b707b2db250'),41005:(10597362842,'ee4c718b3402b5788057dba8cb47d0b4d218ca0aa1ddb9a0a6174fc6447456c1'),41006:(10596358543,'28f1ec251c4cc1964db42918870d2cd8b8fb7255d5d73d666092aefe1a995000'),41007:(10597072987,'ce008001876fa2e950408f2dfdbdbbc7b80552a97e2b690f502bc6f8e060be15'),41008:(10596764630,'1c5af0a6a3ec5d1b8ff43890dbb0c108b336ee21f6265e30ac13f0259e73158d')}
+          artifact,digest=ids[int(os.environ['HORIZON_SEED'])]
+          raw=Path('/tmp/discount-source.zip')
+          with raw.open('wb') as f:subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip'],stdout=f,check=True)
+          assert hashlib.sha256(raw.read_bytes()).hexdigest()==digest
+          with zipfile.ZipFile(raw) as z:
+              m=json.loads(z.read('manifest.json'));assert set(z.namelist())==set(m)|{'manifest.json'}
+              for n,h in m.items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              (out/'prior-manifest.json').write_bytes(z.read('manifest.json'))
+              names=[f'{k}-0.bin' for k in ['actor','critic']]+[f'global/{k}-{c}.bin' for k in ['actor','critic'] for c in [32,128,512]]
+              for n in names:
+                  for base in [dest,out/'historical']:
+                      d=base/n;d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes(z.read(n))
+          (out/'source.json').write_text(json.dumps({'artifact_id':artifact,'sha256':digest,'original_run':35482824488,'source_commit':'a799c6d35c3753266fa382230d734e2d7de18312','used_as_warm_start':False},sort_keys=True,indent=2)+'\n')
+          PY
+          chmod +x /tmp/discount-build/runner
+      - name: Train once from scratch and evaluate every prescribed checkpoint
+        run: |
+          /tmp/discount-build/runner trainer::horizon_audit::tail_support::recovery_anchor::recovery_rewards::repeated_recovery::outward_mix::discount_learning::emit_discount_learning --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$HORIZON_OUT/execution.log"
+          grep -F "DISCOUNT LEARNING COMPLETE $HORIZON_SEED $DISCOUNT_ARM" "$HORIZON_OUT/execution.log"
+      - name: Retain all results including failures
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib
+          root=Path(os.environ['HORIZON_OUT']);root.mkdir(parents=True,exist_ok=True)
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: discount-${{ matrix.arm }}-${{ matrix.seed }}
+          path: ${{ env.HORIZON_OUT }}/
+          retention-days: 30
+          include-hidden-files: true
+          if-no-files-found: error
