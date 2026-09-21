@@ -10,7 +10,7 @@ pub(crate) struct Sample {
 }
 pub(crate) struct Captured {
     pub(crate) samples: Vec<Sample>,
-    pub(crate) batch: Option<RolloutBatch>,
+    pub(super) batch: Option<RolloutBatch>,
 }
 thread_local! {
     static ACTIVE: RefCell<Option<Captured>> = const { RefCell::new(None) };
@@ -55,7 +55,7 @@ pub(crate) fn supplemental(state: [f32; 4], observation: [f32; 4], latent: f32) 
         }
     });
 }
-pub(crate) fn fitting(batch: &RolloutBatch) {
+pub(super) fn fitting(batch: &RolloutBatch) {
     ACTIVE.with(|s| {
         if let Some(c) = s.borrow_mut().as_mut() {
             assert!(c.batch.is_none());
