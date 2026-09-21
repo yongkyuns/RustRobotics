@@ -1,0 +1,142 @@
+name: PPO paired action-credit correction
+on:
+  push:
+    branches: ["audit/ppo-paired-action-credit-20260921"]
+    paths: [".github/workflows/ppo-paired-action-credit.yml", "audits/paired_action_credit/native.rs", "audits/paired_action_credit/capture.rs", "audits/paired_action_credit/prepare.py"]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      HORIZON_BUILD: /tmp/paired-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Require pair semantics, observation isolation and persistent-Adam controls
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python audits/paired_action_credit/prepare.py 2>&1 | tee "$HORIZON_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$HORIZON_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$HORIZON_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$HORIZON_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export tested executable and discover exact endpoint
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$HORIZON_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil,subprocess
+          from pathlib import Path
+          out=Path(os.environ['HORIZON_BUILD'])
+          rows=[json.loads(line) for line in (out/'build.jsonl').read_text().splitlines()]
+          bins=[r['executable'] for r in rows if r.get('reason')=='compiler-artifact' and r.get('executable') and r['target']['name']=='rust_robotics_train']
+          assert len(bins)==1,bins
+          shutil.copyfile(bins[0],out/'runner');(out/'runner').chmod(0o755)
+          tests=subprocess.check_output([str(out/'runner'),'--list']).decode().splitlines()
+          endpoints=[line.removesuffix(': test') for line in tests if line.endswith('::emit_paired_action_credit: test')]
+          assert len(endpoints)==1,endpoints
+          (out/'endpoint.txt').write_text(endpoints[0]+'\n')
+          PY
+          ldd "$HORIZON_BUILD/runner" > "$HORIZON_BUILD/linkage.txt"
+      - name: Preserve all build evidence and restore protected sources
+        if: always()
+        run: |
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_algo rust_robotics_core rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ['HORIZON_BUILD']);root.mkdir(parents=True,exist_ok=True)
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paired-credit-build
+          path: /tmp/paired-build/
+          retention-days: 30
+          if-no-files-found: error
+  measure:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [41004, 41006]
+    name: Paired credit seed ${{ matrix.seed }}
+    env:
+      HORIZON_SEED: ${{ matrix.seed }}
+      HORIZON_PRIOR: /tmp/paired-prior
+      HORIZON_OUT: /tmp/paired-${{ matrix.seed }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: paired-credit-build
+          path: /tmp/paired-build
+      - name: Verify immutable selected update and exact executable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,subprocess,zipfile,shutil
+          build=Path('/tmp/paired-build');out=Path(os.environ['HORIZON_OUT']);prior=Path(os.environ['HORIZON_PRIOR'])
+          out.mkdir(parents=True,exist_ok=True);prior.mkdir(parents=True,exist_ok=True)
+          for n,h in json.loads((build/'manifest.json').read_text()).items():assert hashlib.sha256((build/n).read_bytes()).hexdigest()==h,n
+          for n in ['manifest.json','commit.txt']:shutil.copyfile(build/n,out/('build-'+n))
+          refs={41004:(10619378853,'de50bd26ac8e363b2c2d98c9e0f8aafdb7c53f8889ac56a1441654316772177f',4137),41006:(10620305749,'c6ed988a1d4a293b11c5037a8c9886afb31ab83c5b45cb2549427d559b462b96',4140)}
+          artifact,digest,target=refs[int(os.environ['HORIZON_SEED'])]
+          raw=Path('/tmp/paired-history.zip')
+          with raw.open('wb') as f:subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip'],stdout=f,check=True)
+          assert hashlib.sha256(raw.read_bytes()).hexdigest()==digest
+          with zipfile.ZipFile(raw) as z:
+              manifest=json.loads(z.read('manifest.json'));assert set(z.namelist())==set(manifest)|{'manifest.json'}
+              for n,h in manifest.items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              names=['updates.csv','independent/evaluation.csv']+[f'{kind}-{cp}.bin' for kind in ['actor','critic'] for cp in [0,1024,4096,4128,target-1,target]]
+              names+=sorted(n for n in manifest if n.startswith(f'update-{target}/'))
+              for n in names:
+                  data=z.read(n)
+                  for root in [prior,out/'reference']:
+                      dest=root/n;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data)
+              (out/'prior-manifest.json').write_bytes(z.read('manifest.json'))
+          (out/'source.json').write_text(json.dumps({'artifact_id':artifact,'sha256':digest,'run':35554192268,'seed':int(os.environ['HORIZON_SEED']),'selected_update':target},sort_keys=True)+'\n')
+          PY
+          chmod +x /tmp/paired-build/runner
+      - name: Reproduce selected update and test paired action credit once
+        run: |
+          endpoint=$(cat /tmp/paired-build/endpoint.txt)
+          /tmp/paired-build/runner "$endpoint" --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$HORIZON_OUT/execution.log"
+          grep -F "PAIRED ACTION CREDIT COMPLETE $HORIZON_SEED" "$HORIZON_OUT/execution.log"
+      - name: Preserve every outcome including failed correction
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib
+          root=Path(os.environ['HORIZON_OUT']);root.mkdir(parents=True,exist_ok=True)
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paired-credit-${{ matrix.seed }}
+          path: ${{ env.HORIZON_OUT }}/
+          retention-days: 30
+          if-no-files-found: error
