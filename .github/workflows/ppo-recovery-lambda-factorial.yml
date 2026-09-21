@@ -5,7 +5,12 @@ on:
     branches: ["audit/ppo-recovery-lambda-factorial-20260921"]
     paths:
       - ".github/workflows/ppo-recovery-lambda-factorial.yml"
-      - "audits/recovery_lambda/**"
+      - "audits/recovery_lambda/native.rs"
+      - "audits/recovery_lambda/prepare.py"
+
+concurrency:
+  group: ppo-recovery-lambda-factorial-20260921
+  cancel-in-progress: true
 
 permissions:
   contents: read
