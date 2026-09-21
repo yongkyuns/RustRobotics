@@ -504,7 +504,8 @@ impl Draw for ParticleFilter {
             "",
             PlotPoints::new(
                 self.px
-                    .column_iter()
+                    .as_slice()
+                    .chunks_exact(4)
                     .map(|state| [*state.get(0).unwrap() as f64, *state.get(1).unwrap() as f64])
                     .collect(),
             ),

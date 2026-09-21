@@ -28,12 +28,15 @@ pub mod prelude {
     pub use crate::*;
     pub use control::inverted_pendulum;
     pub use localization::particle_filter as pf;
+    // Transitional reexport for the runtime-sized SLAM API only.
+    pub use crate::vector;
     pub use nalgebra;
-    pub use nalgebra::{matrix, vector};
     pub use path_planning::{
         AStarPlanner, AStarResult, CircleObstacle, DijkstraPlanner, DijkstraResult, Grid,
         RrtConfig, RrtNode, RrtPlanner, RrtResult,
     };
+    pub use stack_algebra;
+    pub use stack_algebra::matrix;
 }
 
 pub use prelude::*;
