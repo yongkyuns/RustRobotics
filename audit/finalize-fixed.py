@@ -31,6 +31,8 @@ replace('rust_robotics_train/src/ppo_seed_tests.rs',
 replace('rust_robotics_train/tests/ppo_balancing_diagnostics.rs',
         'let mut maximum_absolute_state = env.state().map(f32::abs);',
         'let mut maximum_absolute_state: [f32; 4] = std::array::from_fn(|i| env.state()[i].abs());')
+replace('rust_robotics_sim/src/simulator/pendulum/domain.rs',
+        '*model.control(x, dt).index(0)', 'model.control(x, dt)[0]')
 replace('rust_robotics_sim/src/simulator/localization.rs',
         '''self.px
                     .column_iter()''',
