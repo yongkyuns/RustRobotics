@@ -19,8 +19,7 @@ regression = Path("audits/regression_window/native.rs")
 
 change(
     trainer,
-    """                let actor_grads =
-                    GradientsParams::from_grads(actor_loss.backward(), &self.actor);
+    """                let actor_grads = GradientsParams::from_grads(actor_loss.backward(), &self.actor);
                 self.actor = self.actor_optimizer.step(""",
     """                let actor_grads =
                     GradientsParams::from_grads(actor_loss.backward(), &self.actor);
