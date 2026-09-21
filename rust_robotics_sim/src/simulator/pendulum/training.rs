@@ -24,6 +24,7 @@ impl InvertedPendulum {
             self.trainer_backend.destroy();
             self.active_training_environment = None;
             self.active_training_settings = None;
+            self.trainer_settings_stale = false;
             self.policy_observation = None;
             self.policy_environment_stale = true;
             self.last_control_error = Some("Plant/noise changed: restart PPO training.".to_owned());
@@ -41,8 +42,10 @@ impl InvertedPendulum {
             // already-published policy to keep driving the unchanged plant.
             self.training_active = false;
             self.trainer_backend.destroy();
-            self.active_training_environment = None;
+            // Keep the environment contract of the already-published policy so a
+            // later plant/noise change still invalidates that policy correctly.
             self.active_training_settings = None;
+            self.trainer_settings_stale = true;
             self.policy_environment_stale = false;
             self.last_control_error =
                 Some("PPO trainer settings changed: restart PPO training.".to_owned());
@@ -114,6 +117,7 @@ impl InvertedPendulum {
             &self.trainer_config,
             self.parallel_trainers,
         ));
+        self.trainer_settings_stale = false;
         self.policy_environment_stale = false;
         self.last_control_error = None;
         self.policy_observation = None;
@@ -131,7 +135,8 @@ impl InvertedPendulum {
     pub(crate) fn start_training(&mut self) {
         self.validate_training_environment();
         self.controller_selection = ControllerKind::Policy;
-        let initialize = !self.trainer_backend.is_initialized();
+        let initialize =
+            !self.trainer_backend.is_initialized() || self.trainer_settings_stale;
         if initialize {
             self.reset_trainer();
         }
