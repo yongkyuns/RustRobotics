@@ -18,6 +18,7 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: 1.98.1
       CARGO_TERM_COLOR: never
+      MUJOCO_VERSION: 3.4.0
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,6 +27,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
+      - name: Install MuJoCo
+        run: |
+          curl -L --fail \
+            -o "$RUNNER_TEMP/mujoco.tar.gz" \
+            "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/mujoco.tar.gz" -C "$RUNNER_TEMP"
+          echo "MUJOCO_HOME=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mujoco-${MUJOCO_VERSION}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ppo-learning-release-v1
