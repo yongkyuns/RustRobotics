@@ -521,6 +521,7 @@ pub struct InvertedPendulum {
     pub(crate) policy_observation: Option<[f32; 4]>,
     pub(crate) active_training_environment: Option<(CartPoleParameters, PendulumEnvConfig)>,
     pub(crate) active_training_settings: Option<PpoLearnerSettings>,
+    pub(crate) trainer_settings_stale: bool,
     pub(crate) policy_environment_stale: bool,
     pub(crate) trainer_config: PpoTrainerConfig,
     pub(crate) trainer_backend: PpoTrainerCoordinator,
@@ -559,6 +560,7 @@ impl Default for InvertedPendulum {
             policy_observation: None,
             active_training_environment: None,
             active_training_settings: None,
+            trainer_settings_stale: false,
             policy_environment_stale: false,
             trainer_config,
             trainer_backend: PpoTrainerCoordinator::default(),
@@ -956,7 +958,10 @@ impl InvertedPendulum {
             self.last_control_error = Some("Plant/noise changed: restart PPO training.".to_owned());
             return;
         }
-        if self.active_training_environment.is_some() && self.trainer_backend.snapshot().is_none() {
+        if !self.trainer_settings_stale
+            && self.active_training_environment.is_some()
+            && self.trainer_backend.snapshot().is_none()
+        {
             // A web reset may not have published its new snapshot yet. Never
             // execute retained old weights on the newly configured environment.
             self.last_control_error =
