@@ -225,4 +225,81 @@ mod tests {
         assert_eq!(sim.state, reset_state);
         assert!(sim.last_control_error().unwrap().contains("Waiting"));
     }
+
+    #[test]
+    fn changing_learner_settings_invalidates_the_trainer_not_the_deployed_policy() {
+        let mut sim = InvertedPendulum::default();
+        sim.start_training();
+        assert!(sim.training_active && sim.trainer_backend.is_initialized());
+        assert!(sim.active_training_environment.is_some());
+        assert!(sim.active_training_settings.is_some());
+
+        sim.trainer_config.ppo.learning_rate *= 2.0;
+        sim.validate_training_environment();
+
+        assert!(!sim.training_active);
+        assert!(!sim.trainer_backend.is_initialized());
+        assert!(sim.trainer_settings_stale);
+        assert!(!sim.policy_environment_stale);
+        assert!(sim.active_training_environment.is_some());
+        assert!(sim.active_training_settings.is_none());
+        assert_eq!(sim.controller.kind(), ControllerKind::Policy);
+        assert!(sim
+            .last_control_error()
+            .unwrap()
+            .contains("trainer settings changed"));
+
+        // The already-published policy remains valid on the unchanged physical
+        // environment even though the stale learner has been destroyed.
+        sim.step_policy_with_rng(PENDULUM_FIXED_DT, &mut StdRng::seed_from_u64(91));
+        assert_eq!(sim.visual_episode_steps, 1);
+        assert!(!sim.policy_environment_stale);
+
+        // The retained physical contract must still protect that policy if the
+        // plant changes later.
+        sim.model.l_bar = 0.7;
+        sim.validate_training_environment();
+        assert!(sim.policy_environment_stale);
+        assert!(!sim.trainer_settings_stale);
+        assert!(sim.active_training_environment.is_none());
+    }
+
+    #[test]
+    fn restarting_after_a_settings_change_uses_the_new_contract() {
+        let mut sim = InvertedPendulum::default();
+        sim.start_training();
+        sim.trainer_config.action_std *= 1.5;
+        sim.parallel_trainers = 3;
+        sim.validate_training_environment();
+        assert!(sim.trainer_settings_stale && !sim.trainer_backend.is_initialized());
+
+        sim.start_training();
+
+        assert!(sim.training_active && sim.trainer_backend.is_initialized());
+        assert!(!sim.trainer_settings_stale && !sim.policy_environment_stale);
+        assert_eq!(
+            sim.active_training_settings,
+            Some(PpoLearnerSettings::from_config(
+                &sim.trainer_config,
+                sim.parallel_trainers
+            ))
+        );
+        assert_eq!(sim.trainer_backend.status().total, 3);
+    }
+
+    #[test]
+    fn update_cadence_change_does_not_rebuild_the_learner() {
+        let mut sim = InvertedPendulum::default();
+        sim.start_training();
+        let active_environment = sim.active_training_environment;
+        let active_settings = sim.active_training_settings;
+
+        sim.training_updates_per_tick = 7;
+        sim.validate_training_environment();
+
+        assert!(sim.training_active && sim.trainer_backend.is_initialized());
+        assert_eq!(sim.active_training_environment, active_environment);
+        assert_eq!(sim.active_training_settings, active_settings);
+        assert!(!sim.trainer_settings_stale && !sim.policy_environment_stale);
+    }
 }
