@@ -21,20 +21,29 @@ jobs:
       - name: Apply only the patched rustls release
         run: |
           cargo update -p rustls@0.23.44 --precise 0.23.45
+          git diff -- Cargo.lock
           python3 - <<'PY'
-          import os, pathlib, tomllib
-          before = tomllib.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'before.lock').read_text())
-          after = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
-          old = [p for p in before['package'] if p['name'] != 'rustls']
-          new = [p for p in after['package'] if p['name'] != 'rustls']
-          assert old == new, 'Refuse unrelated dependency changes'
-          old_tls = [p for p in before['package'] if p['name'] == 'rustls']
-          new_tls = [p for p in after['package'] if p['name'] == 'rustls']
-          assert len(old_tls) == len(new_tls) == 1
-          assert old_tls[0]['version'] == '0.23.44'
-          assert new_tls[0]['version'] == '0.23.45'
-          assert old_tls[0]['dependencies'] == new_tls[0]['dependencies']
+          import os, pathlib, re, tomllib
+          original = pathlib.Path(os.environ['RUNNER_TEMP'], 'before.lock').read_text()
+          resolved = pathlib.Path('Cargo.lock').read_text()
+          # Copy the actual Cargo-resolved package record, not a guessed checksum.
+          # Do not retain incidental resolver changes in unrelated package records.
+          pattern = r'(?ms)^\[\[package\]\]\nname = "rustls"\n.*?(?=^\[\[package\]\]|\Z)'
+          old_blocks = list(re.finditer(pattern, original))
+          new_blocks = list(re.finditer(pattern, resolved))
+          assert len(old_blocks) == len(new_blocks) == 1
+          old_tls = tomllib.loads(old_blocks[0].group())['package'][0]
+          new_tls = tomllib.loads(new_blocks[0].group())['package'][0]
+          assert old_tls['version'] == '0.23.44'
+          assert new_tls['version'] == '0.23.45'
+          assert old_tls['dependencies'] == new_tls['dependencies']
+          updated = original[:old_blocks[0].start()] + new_blocks[0].group() + original[old_blocks[0].end():]
+          before = tomllib.loads(original)
+          after = tomllib.loads(updated)
+          assert [p for p in before['package'] if p['name'] != 'rustls'] == [p for p in after['package'] if p['name'] != 'rustls']
+          pathlib.Path('Cargo.lock').write_text(updated)
           PY
+          # Fail rather than publish if the isolated package update is inconsistent.
           cargo metadata --locked --format-version 1 > /dev/null
           cargo audit
       - name: Commit only the qualified lockfile change
