@@ -59,3 +59,11 @@ The scaled two-input LQR fixture detects loss of the small singular direction.
 Existing seeded filter and training invariants remain enabled, with no weakened
 acceptance thresholds. Native/platform and real-browser CI remain required
 before merging. Audit preparation scripts/workflows are not production files.
+
+The dependency gate validates the committed resolution with
+`cargo metadata --locked`, rather than regenerating the lockfile and upgrading
+unrelated packages. Qualification exposed RUSTSEC-2026-0285 in the baseline's
+rustls 0.23.44. The lockfile includes the targeted 0.23.45 security patch; its
+isolated update passed locked metadata resolution and `cargo audit` without
+advisory suppression or changes to other package records. Application CI must
+still qualify the final commit before merging.
