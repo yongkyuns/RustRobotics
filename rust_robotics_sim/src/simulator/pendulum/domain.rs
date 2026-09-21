@@ -464,6 +464,43 @@ impl Controller {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PpoLearnerSettings {
+    rollout_steps: usize,
+    mini_batch_size: usize,
+    epochs_per_update: usize,
+    gamma_bits: u32,
+    gae_lambda_bits: u32,
+    clip_epsilon_bits: u32,
+    value_loss_coef_bits: u32,
+    entropy_coef_bits: u32,
+    learning_rate_bits: u64,
+    hidden_dim: usize,
+    action_std_bits: u32,
+    sync_policy_each_update: bool,
+    environment_count: usize,
+}
+
+impl PpoLearnerSettings {
+    pub(crate) fn from_config(config: &PpoTrainerConfig, environment_count: usize) -> Self {
+        Self {
+            rollout_steps: config.ppo.rollout_steps,
+            mini_batch_size: config.ppo.mini_batch_size,
+            epochs_per_update: config.ppo.epochs_per_update,
+            gamma_bits: config.ppo.gamma.to_bits(),
+            gae_lambda_bits: config.ppo.gae_lambda.to_bits(),
+            clip_epsilon_bits: config.ppo.clip_epsilon.to_bits(),
+            value_loss_coef_bits: config.ppo.value_loss_coef.to_bits(),
+            entropy_coef_bits: config.ppo.entropy_coef.to_bits(),
+            learning_rate_bits: config.ppo.learning_rate.to_bits(),
+            hidden_dim: config.hidden_dim,
+            action_std_bits: config.action_std.to_bits(),
+            sync_policy_each_update: config.sync_policy_each_update,
+            environment_count: environment_count.max(1),
+        }
+    }
+}
+
 /// One pendulum simulation instance shown in the UI.
 ///
 /// Each instance owns:
@@ -483,6 +520,7 @@ pub struct InvertedPendulum {
     pub(crate) visual_episode_steps: usize,
     pub(crate) policy_observation: Option<[f32; 4]>,
     pub(crate) active_training_environment: Option<(CartPoleParameters, PendulumEnvConfig)>,
+    pub(crate) active_training_settings: Option<PpoLearnerSettings>,
     pub(crate) policy_environment_stale: bool,
     pub(crate) trainer_config: PpoTrainerConfig,
     pub(crate) trainer_backend: PpoTrainerCoordinator,
@@ -520,6 +558,7 @@ impl Default for InvertedPendulum {
             visual_episode_steps: 0,
             policy_observation: None,
             active_training_environment: None,
+            active_training_settings: None,
             policy_environment_stale: false,
             trainer_config,
             trainer_backend: PpoTrainerCoordinator::default(),
