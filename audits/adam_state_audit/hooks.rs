@@ -2,7 +2,7 @@
 //! No training arithmetic is replaced.
 use super::*;
 use burn::module::ParamId;
-use burn::tensor::{backend::AutodiffBackend as _, Tensor};
+use burn::tensor::Tensor;
 use serde::Serialize;
 use std::{cell::RefCell, fs, path::{Path, PathBuf}};
 
