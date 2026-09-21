@@ -123,7 +123,10 @@ def main():
         latent=np.asarray([float(r["latent"]) for r in group])
         old=np.asarray([float(r["old_log_prob"]) for r in group])
         mu=forward(actor,x)
-        calc=-0.5*((latent-mu)/SIGMA)**2-math.log(SIGMA)-0.5*math.log(2*math.pi)
+        magnitude=np.abs(latent)
+        log_jac=2.0*(math.log(2.0)-magnitude-np.log1p(np.exp(-2.0*magnitude)))
+        calc=(-0.5*((latent-mu)/SIGMA)**2-math.log(SIGMA)
+              -0.5*math.log(2*math.pi)-math.log(20.0)-log_jac)
         max_lp=max(max_lp,float(np.max(np.abs(calc-old))))
         path=np.asarray([(int(r["stream"]),int(r["path"])) for r in group],dtype=int)
         for lam,suffix in [(0.95,"95"),(1.0,"1")]:
