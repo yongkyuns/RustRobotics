@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: d724c517c27b182145d4054a66d3937563381dfd
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
@@ -28,9 +29,9 @@ jobs:
       - name: Retain exact source snapshots
         run: |
           mkdir -p "$RUNNER_TEMP/source-evidence/RustRobotics" "$RUNNER_TEMP/source-evidence/stack-algebra"
-          git archive d724c517c27b182145d4054a66d3937563381dfd | tar -x -C "$RUNNER_TEMP/source-evidence/RustRobotics" --wildcards '*.rs' '*Cargo.toml' '*Cargo.lock' '*.md' '*.py' '*.yml'
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/source-evidence/RustRobotics" --wildcards '*.rs' '*Cargo.toml' '*Cargo.lock' '*.md' '*.py' '*.yml'
           git -C .audit-stack-algebra archive HEAD | tar -x -C "$RUNNER_TEMP/source-evidence/stack-algebra"
-          git rev-parse HEAD > "$RUNNER_TEMP/source-evidence/audit-commit.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/source-evidence/baseline-commit.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: migration-sources
