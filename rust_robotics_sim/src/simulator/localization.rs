@@ -506,7 +506,7 @@ impl Draw for ParticleFilter {
                 self.px
                     .as_slice()
                     .chunks_exact(4)
-                    .map(|state| [*state.get(0).unwrap() as f64, *state.get(1).unwrap() as f64])
+                    .map(|state| [state[0] as f64, state[1] as f64])
                     .collect(),
             ),
         ));
