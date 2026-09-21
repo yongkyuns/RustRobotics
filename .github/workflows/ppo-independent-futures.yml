@@ -5,6 +5,9 @@ on:
     paths:
       - ".github/workflows/ppo-independent-futures.yml"
       - "audits/independent_futures/**"
+concurrency:
+  group: ppo-independent-futures-20260921
+  cancel-in-progress: true
 permissions:
   contents: read
   actions: read
