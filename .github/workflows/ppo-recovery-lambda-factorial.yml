@@ -1,0 +1,177 @@
+name: PPO recovery-data lambda factorial
+
+on:
+  push:
+    branches: ["audit/ppo-recovery-lambda-factorial-20260921"]
+    paths:
+      - ".github/workflows/ppo-recovery-lambda-factorial.yml"
+      - "audits/recovery_lambda/**"
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      HORIZON_BUILD: /tmp/recovery-lambda-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Bind exact fresh recovery recipe and lambda-only child
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python audits/recovery_lambda/prepare.py 2>&1 | tee "$HORIZON_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$HORIZON_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$HORIZON_BUILD/tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$HORIZON_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export exact tested endpoint
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$HORIZON_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil
+          from pathlib import Path
+          root=Path(os.environ["HORIZON_BUILD"])
+          rows=[json.loads(line) for line in (root/"build.jsonl").read_text().splitlines()]
+          bins=[r["executable"] for r in rows if r.get("reason")=="compiler-artifact" and r.get("executable") and r["target"]["name"]=="rust_robotics_train"]
+          assert len(bins)==1,bins
+          shutil.copyfile(bins[0],root/"runner")
+          PY
+          chmod +x "$HORIZON_BUILD/runner"
+          ldd "$HORIZON_BUILD/runner" > "$HORIZON_BUILD/linkage.txt"
+      - name: Preserve every preflight outcome and restore protected source
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_algo rust_robotics_core rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ["HORIZON_BUILD"])
+          (root/"manifest.json").write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file() and p.name!="manifest.json"},sort_keys=True,indent=2)+"\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-lambda-build
+          path: /tmp/recovery-lambda-build/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        seed: [41001, 41002, 41003, 41004, 41005, 41006, 41007, 41008]
+        arm: [recovery1, recovery95]
+    name: Lambda ${{ matrix.arm }} seed ${{ matrix.seed }}
+    env:
+      HORIZON_SEED: ${{ matrix.seed }}
+      LAMBDA_ARM: ${{ matrix.arm }}
+      HORIZON_BUILD: /tmp/recovery-lambda-build
+      HORIZON_OUT: /tmp/recovery-lambda-result
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: recovery-lambda-build
+          path: /tmp/recovery-lambda-build
+      - name: Verify tested binary and build evidence
+        run: |
+          mkdir -p "$HORIZON_OUT"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,shutil
+          build=Path(os.environ["HORIZON_BUILD"]);out=Path(os.environ["HORIZON_OUT"])
+          manifest=json.loads((build/"manifest.json").read_text())
+          for name,digest in manifest.items(): assert hashlib.sha256((build/name).read_bytes()).hexdigest()==digest,name
+          for name in ["manifest.json","commit.txt","baseline.txt","rustc.txt"]: shutil.copyfile(build/name,out/("build-"+name))
+          PY
+          chmod +x "$HORIZON_BUILD/runner"
+      - name: Run fixed lambda comparison from random initialization
+        run: |
+          "$HORIZON_BUILD/runner" trainer::horizon_audit::tail_support::recovery_anchor::recovery_rewards::repeated_recovery::fresh_recovery::recovery_lambda::emit_recovery_lambda_factorial --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$HORIZON_OUT/execution.log"
+          grep -F "RECOVERY LAMBDA COMPLETE $LAMBDA_ARM $HORIZON_SEED" "$HORIZON_OUT/execution.log"
+      - name: Require lambda1 to reproduce immutable fresh-cohort control
+        if: matrix.arm == 'recovery1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import csv,hashlib,json,os,subprocess,zipfile
+          from pathlib import Path
+          seed=int(os.environ["HORIZON_SEED"])
+          table={
+            41001:(10586884648,"1775a8abfb8108c1c8e22d7f648158f4af95760cb2e4a1d5babfc350479696d5"),
+            41002:(10587601850,"290d32e94d51fefc117a9402026bc80a2db4fe4a749eb549ac9c4e3719bd2289"),
+            41003:(10587691847,"db2c927a6987e016e5aa652ff7c0f765afdff768bfdb0d6392f6a7b7a32a1519"),
+            41004:(10587054534,"cf819e0d190824f78292237f60260e9295f46a88eb32bb5cff4aa50c38c449c6"),
+            41005:(10587154734,"8fd8349eee9cf377d40c889d98f5e532463236c198f1e10d6104f8041911238e"),
+            41006:(10587079979,"0691ac00cc7b90ae75b6520c08abd29be5f57e290b19e0dad8759300a042599e"),
+            41007:(10587442596,"c96f278fd3453c52e2bda93e6843ade3eba84502deaff57f7e6b266963d59d68"),
+            41008:(10588490347,"2e3f6a9db8c9365418b1467d6e5debc70b37c07e41cda1d51d5659eca530a393"),
+          }
+          artifact,digest=table[seed]
+          raw=Path("/tmp/fresh-control.zip")
+          with raw.open("wb") as f: subprocess.run(["gh","api",f"repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip"],stdout=f,check=True)
+          assert hashlib.sha256(raw.read_bytes()).hexdigest()==digest
+          out=Path(os.environ["HORIZON_OUT"])
+          with zipfile.ZipFile(raw) as z:
+              manifest=json.loads(z.read("manifest.json"));assert set(z.namelist())==set(manifest)|{"manifest.json"}
+              for name,h in manifest.items(): assert hashlib.sha256(z.read(name)).hexdigest()==h,name
+              for cp in [0,256,1024,4096]:
+                  for net in ["actor","critic"]:
+                      name=f"{net}-{cp}.bin";assert (out/name).read_bytes()==z.read(name),name
+              def rows(data): return list(csv.DictReader(data.decode().splitlines()))
+              old_eval,new_eval=rows(z.read("evaluation.csv")),rows((out/"evaluation.csv").read_bytes())
+              assert len(old_eval)==len(new_eval)==960
+              for old,new in zip(old_eval,new_eval):
+                  new=dict(new);new["arm"]="recovery-union";assert old==new,(old,new)
+              old_updates,new_updates=rows(z.read("updates.csv")),rows((out/"updates.csv").read_bytes())
+              assert len(old_updates)==len(new_updates)==4096
+              for old,new in zip(old_updates,new_updates):
+                  new=dict(new);new["arm"]="recovery-union";assert old==new,(old,new)
+          (out/"historical-control.json").write_text(json.dumps({"artifact_id":artifact,"artifact_sha256":digest,"source_run":35453178361,"source_commit":"123a14ede4ce3a7e33f85e0c36781b353079ba89","checkpoints_exact":[0,256,1024,4096],"evaluation_records_exact":960,"update_records_exact":4096},sort_keys=True,indent=2)+"\n")
+          print("RECOVERY LAMBDA1 HISTORICAL CONTROL EXACT")
+          PY
+      - name: Preserve all outcomes
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_OUT"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ["HORIZON_OUT"])
+          (root/"manifest.json").write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file() and p.name!="manifest.json"},sort_keys=True,indent=2)+"\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-lambda-${{ matrix.arm }}-${{ matrix.seed }}
+          path: /tmp/recovery-lambda-result/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
