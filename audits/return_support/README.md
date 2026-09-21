@@ -1,48 +1,48 @@
 # Gamma0.995 with longer sampled return support
 
-Registered before new outcomes in issue35 comment5753874883. Executable source **0a4445f6c5ab83650133a696faaeb764fd5b6c26**, workflow **35548063439**, branch **audit/ppo-return-support-20260920**. At this status check the native preflight is running; no native completion, training score or controller improvement is claimed. Documentation-only commits do not launch another measurement.
+Registered before new outcomes in issue35 comment5753874883. Executable source **0a4445f6c5ab83650133a696faaeb764fd5b6c26**, workflow **35548063439**, branch **audit/ppo-return-support-20260920**.
 
-## Fixed question
+**Native preflight PASSED on its first attempt; learning jobs have started.** At this progress check thirteen of the sixteen training jobs are executing and three are queued. There is no completed, independently verified learning comparison or controller-quality result yet. Documentation-only commits do not start another measurement.
 
-The preceding gamma-only experiment improved nominal survival but regressed outward recovery. Does more sampled future reward support at the SAME training discount address that weakness? A nonterminal cutoff bootstrap has coefficient0.995^512≈0.07681 at512 steps and0.995^1024≈0.00590 at1024 steps. The latter is close to the preceding gamma0.99/512 coefficient0.00582. These are arithmetic weights, not measurements that the critic caused the regression.
+## Fixed comparison
 
-Two arms only, support512 and support1024. Both use gamma0.995 from random actor/critic initialization. Sixteen total runs pair seeds41001–41008; the seeds are already exposed development histories, not a fresh confirmation cohort. Each performs4096 ordinary-reset recovery-union updates then512 half-outward updates with persistent Adam/environment/episode/random history. No warm-start weights or changed objective halfway through training.
+Hold training gamma0.995 fixed from random actor/critic initialization and compare only sampled support lengths512 and1024. There are sixteen runs, paired seeds41001–41008, all already-exposed development histories. Every run performs4096 ordinary-reset recovery-union updates followed by512 half-outward updates with continuous Adam, environment, unfinished episode and random state. No learned weights are imported.
 
 | Quantity | support512 control | support1024 candidate |
 |---|---:|---:|
-| Primary fitted samples/update |512|512|
+| Primary fitting samples/update |512|512|
 | Supplemental streams |8|8|
-| Fitted samples per supplemental stream |64|64|
-| Collected transitions per supplemental stream |576|1088|
+| Fitting samples per supplemental stream |64|64|
+| Collected steps per supplemental stream |576|1088|
 | Maximum steps per primary-cutoff future |512|1024|
 | Primary-cutoff futures |4|4|
 | Total fitting samples/update |1024|1024|
-| Actor/critic optimizer transactions per update |16 each|16 each|
+| Adam steps per network/update |16|16|
 
-Extra observations/actions after the selected64 supplemental samples only provide return support; they are not added to actor/critic fitting. True terminals stop credit, so no rewards cross a physical failure/reset boundary. The main stream stays512 transitions/update. The existing scoped outward-start mixture,lambda1,global normalization,rewards,noise,nonlinear plant,architecture,exploration,Adam settings,minibatch256 andfour epochs are unchanged. No teacher,imitation,gradient projection,symmetry wrapper or inference fallback is introduced.
+Extra supplemental observations after the selected64 samples provide future rewards but do not enter actor/critic fitting. True terminal masks prevent credit from crossing failure/reset boundaries. Only the test-scoped tail and supplemental lengths change. Plant, noise, reward, global normalization, lambda1, architecture, action distribution, initial-state mixture, Adam settings, minibatch256 and four epochs remain fixed. No teacher, imitation, symmetry wrapper, extra critic passes or safety fallback.
 
-The test-only support scope defaults to512 and restores on exit/unwind. Existing tail and supplemental collector bodies are reused with reversible local length hooks. All old controls still use historical lengths. Seven new native controls cover scope/thread isolation,unchanged short dispatch and following optimizer state,first physical/fitted sample identity,tail-prefix identity,terminal/cutoff math and reproducible long-support updates. Those are required tests, not completed results while preflight runs.
+The unfinished-cutoff value coefficient falls from0.995^512≈0.07681 to0.995^1024≈0.00590. This tests whether more sampled support helps; it does not establish that bootstrap error caused the earlier recovery regression. Longer support also changes realized sampling variance and the later bootstrap state.
 
-## Reproduction and evaluation
+## Controls and outcomes required
 
-The short arm must match BOTH actor and critic from the prior gamma995 run at every saved checkpoint0/1024/4096/4128/4224/4608. Every one of4608 update records (after the arm label) and final costs must match too. Historical artifacts are checked by immutable ZIP/member hashes and used only as comparisons, never to initialize training. Any mismatch stops and is retained. Both arms' initial main paths and first selected supplemental physical samples must pair; future rewards and subsequent training trajectories may differ.
+The512-support control must reproduce BOTH actor and critic from the preceding gamma995 archives at checkpoints0/1024/4096/4128/4224/4608. All4608 update records after their arm label and final cost records must also match. Archives are bound to immutable published digests. Historical values are comparison inputs, never warm starts. Any mismatch stops and is retained. Both new arms must have identical initial networks and first fitted physical data; subsequent training paths may differ.
 
-All checkpoints are retained, only4608 decides advancement. Detailed updates1/4097/4608 export incoming weights,main batches,all return-support rows,targets and16 optimizer transactions. Evaluation uses fixed new offset0x10000000,64 replications per seed/arm/panel,unchanged noisy plant and COMMON score-gamma0.99. Short20.48-second nominal-mean,nominal-stochastic andoutward panels run at every checkpoint; final also runsfive-minute nominal-mean,five-minute nominal-stochastic andsixty-second outward panels. Failure ends the trial immediately. Replication0 full traces at4096/final; others retain outcomes. No outcome enters fitting or selection.
+All checkpoints are retained; only4608 determines advancement. Detailed updates1/4097/4608 retain incoming weights, fitting rows, full sampled support, targets and all16 optimizer transactions. Evaluation uses new fixed offset0x10000000 and common score-gamma0.99 for both arms. Each checkpoint has64 short nominal-mean, nominal-stochastic and outward trials per seed/arm. Final evaluation adds64 five-minute nominal-mean,64 five-minute nominal-stochastic and64 sixty-second outward trials. Failure ends a trial immediately. Rep0 full trajectories at4096/final; other evaluations retain aggregate outcomes. Nothing from evaluation enters fitting.
 
-Development advancement requires a positive lower bound on outward-completion gain from the eight paired history effects using two-sided99% Student intervals adjusted overthree long-completion contrasts. Both candidate nominal pooled counts must be>=control and every candidate nominal history>=61/64. Original absolute screen is separate:each long panel>=507/512 pooled,every history>=61/64,three-panel-family one-sided99% history lower bound>=95%,and>=99% centring among survivors in their final10seconds. Missing/failed histories cannot pass. No threshold relaxation or best-checkpoint substitution. Passing an exposed-history screen would not constitute hardware qualification.
+Development advancement requires a positive lower bound for outward-completion gain using eight paired-history two-sided99% Student intervals adjusted overthree long-completion comparisons, both candidate nominal pooled counts>=control, and every candidate nominal history>=61/64. The separate absolute screen retains507/512 pooled per long panel,61/64 per history,three-panel-family one-sided99% history lower bound>=95%,and99% final-ten-second centring among survivors. Missing histories cannot pass. No best-checkpoint selection, favorable retries, threshold changes or excluded weak seeds. This exposed cohort is not fresh or hardware qualification.
 
-## Work and limitations
+Per arm/history:2359296 main interactions,21233664 versus40108032 supplemental interactions,and up to9437184 versus18874368 cutoff futures. Each network receives73728 Adam steps and18874368 fitting-sample visits in both arms. Evaluation and preflight are additional. This is equal fitting/optimizer work, not equal total simulator work or a sample-efficiency result.
 
-Per history/arm, primary interactions2359296; supplemental21233664(control) or40108032(candidate); cutoff futures at most9437184 or18874368. Each network performs73728 Adam steps and18874368 gradient-sample visits in BOTH arms. Evaluation and generic preflight work are separate. This is matched fitting/optimizer work, not matched total sampling or a sample-efficiency claim.
+## Verification completed
 
-Increasing support changes realized sampling variance and the target's reliance on a later critic value, not just a scalar coefficient. A successful result would not uniquely identify bootstrap error as the cause of prior harm. Conversely, a failed result would reject this recipe change, not prove all longer-horizon estimators ineffective. No alternative horizon or preferred seed is selected after outcomes.
+The native preflight passed **108 unit/audit tests**, **7 ordinary balancing controls**, **9 ordinary learning controls**, strict Clippy, formatting and protected-source restoration. The nine heavy audit endpoints were ignored during the regular unit pass; the new learning endpoint is explicitly invoked by the separate training jobs. Two historical heavy integration endpoints and the production browser/platform matrix were not run.
 
-## Offline verification prepared
+Seven new native tests validate support scope/thread isolation and unwind restoration,unchanged512 dispatch plus subsequent optimizer-history parity,first main/selected supplemental physical-data identity,tail-prefix identity,terminal/cutoff bootstrap handling,and reproducible1024-support updates with unchanged fitting work. These tests passed; they are not sustained-control results.
 
-The standalone verifier passes63 synthetic/property tests:48 adapted identity/numerical/statistical controls plus15 support/scope-preparation checks. It rejects missing/corrupt evidence,wrong windows,nominal regressions,hidden weak histories and credit crossing true terminals. With all17 required archives absent it emits INCOMPLETE/exit2 and no controller scores. These are verifier tests, not new native or learning results.
+Build artifact10617012511, SHA256 **5fa2e313fdc55d9779ff91c0b665cf8e47a17af7ffd8e71f3fb42223651d4e74**, contains the actually compiled source/runner/logs. Its published ZIP digest and all110 payload hashes were independently verified. No local recompilation or alternative simulator was substituted.
 
-The generalized batch reconstruction was also run on the already-archived gamma995 seeds41001 and41004 at512 support. Its complete results matched the inherited verifier exactly, without resimulation. This validates compatibility with old artifacts; it is not a native comparison or evidence about1024-support training. Local source transformations were checked for exact reversibility on the actual archived collectors.
+The prepared offline verifier passes **63 synthetic/property tests**. Empty-input control requires all17 result/build archives and emits INCOMPLETE/exit2 without scores. Generalized512-support numerical reconstruction also matches the inherited verifier exactly on archived gamma995 histories41001/41004. This is compatibility checking on existing data, not a new learning result. Source-length transformations passed exact reversibility checks on the actual archived collectors.
 
-Prepared verification binds all future run/build hashes and historical files; reconstructs both window lengths' GAE,tail sums,cutoff substitution,returns,global normalization,selected optimizer outputs and full exported evaluation paths; and checks first-update sample identity. Unexported Adam states,gradients and remaining trajectories are not independently regenerated. Offline replay uses no native executable,network,simulator or training.
+The verifier is ready to bind all new artifacts and checkpoints, reconstruct both support lengths' GAE/tails/returns/normalization and selected optimizer outputs, and check exported evaluation dynamics/actions/rewards. It has not yet verified new training outcomes. Unexported gradients,Adam states and remaining trajectories are not independently regenerated. Offline replay executes no native code, simulator, training or network.
 
-No production gamma0.99/lambda0.95,reward,global normalization,learned weights,PR38,master or deployed asset changed. No merge or controller adoption. The experiment is submitted with native execution still pending completion; do not treat a green verifier or arithmetic weight reduction as robust control.
+**No production gamma0.99/lambda0.95, reward, normalization, learned policy, PR38, master or deployment changed.** No merge or controller adoption. The study has cleared native preflight and begun training; the question of improved recovery is still unanswered.
