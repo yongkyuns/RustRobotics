@@ -28,6 +28,9 @@ replace('rust_robotics_algo/src/control/vehicle/mod.rs',
         let _: &Mat<NX_LAT, NU_LAT> = &Bd;''')
 replace('rust_robotics_train/src/ppo_seed_tests.rs',
         'Vector4::from_column_slice(&x)', 'Vector4::from_columns([x])')
+replace('rust_robotics_train/tests/ppo_balancing_diagnostics.rs',
+        'let mut maximum_absolute_state = env.state().map(f32::abs);',
+        'let mut maximum_absolute_state: [f32; 4] = std::array::from_fn(|i| env.state()[i].abs());')
 replace('rust_robotics_sim/src/simulator/localization.rs',
         '''self.px
                     .column_iter()''',
