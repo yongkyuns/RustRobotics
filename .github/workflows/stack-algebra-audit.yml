@@ -1,0 +1,45 @@
+name: Stack algebra migration audit
+
+on:
+  push:
+    branches: ["audit/stack-algebra-migration"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stack-algebra-migration-audit
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: yongkyuns/stack-algebra
+          ref: 625d38d6f47c87f58ff0f428b323a69cef60922c
+          path: .audit-stack-algebra
+          persist-credentials: false
+      - name: Retain exact source snapshots
+        run: |
+          mkdir -p "$RUNNER_TEMP/source-evidence/RustRobotics" "$RUNNER_TEMP/source-evidence/stack-algebra"
+          git archive d724c517c27b182145d4054a66d3937563381dfd | tar -x -C "$RUNNER_TEMP/source-evidence/RustRobotics" --wildcards '*.rs' '*Cargo.toml' '*Cargo.lock' '*.md' '*.py' '*.yml'
+          git -C .audit-stack-algebra archive HEAD | tar -x -C "$RUNNER_TEMP/source-evidence/stack-algebra"
+          git rev-parse HEAD > "$RUNNER_TEMP/source-evidence/audit-commit.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: migration-sources
+          path: ${{ runner.temp }}/source-evidence
+          retention-days: 14
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Algorithm baseline
+        run: cargo test --locked -p rust_robotics_algo --lib --tests
