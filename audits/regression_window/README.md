@@ -1,45 +1,33 @@
-# Historical recovery-regression window — preflight passed, both replays running
+# Historical regression-window replay — complete
 
-Registered in issue35 comment5754579087 before new window outcomes. Executed source **a3276e1efa3071d381480bc61f1abe1ebd818a54**, run **35554192268**, branch `audit/ppo-regression-window-20260920`. This is an observation-only diagnostic, not another controller/hyperparameter candidate.
+[Results and limitations](RESULTS.md)
 
-## Current status
+Executed source **a3276e1efa3071d381480bc61f1abe1ebd818a54**, run **35554192268**, branch `audit/ppo-regression-window-20260920`. Registration: issue #35 comment **5754579087**, before new outcomes. All three jobs completed successfully on the first attempt at September 21, 2026, 02:54:38 UTC. This replaces the earlier in-progress status; no duplicate training was launched during verification.
 
-Native preflight passed on its first attempt: **111 unit/audit tests**, **7 ordinary balancing controls**, **9 ordinary learning controls**, strict Clippy, formatting and protected-source restoration. Ten heavy audit endpoints were ignored in the ordinary unit pass; the window endpoint is invoked separately by the two replay jobs. Two historical heavy integration endpoints and the production platform/browser matrix were not rerun.
+## Finding, not a new controller
 
-**Both seed41006 and seed41004 replay jobs are now executing**, after verifying their immutable inputs. Neither completed replay artifact has been independently verified, and no new per-update drop or independent before/after return result is claimed. A passing native harness is not evidence of improved control. Documentation-only commits do not launch duplicate measurements.
+Seed **41006/update 4,140** reduced independent outward-recovery completions from **208/256 to 196/256**. The adjusted 99% paired completion-effect interval is **[−9.1638, −0.2112] percentage points**. Nominal outcome identities were unchanged on those draws; that is not a safety certificate. The same update improved the fitted clipped surrogate by **+0.008415** and reduced critic MSE against its sampled targets.
 
-## Exact historical replay
+The selected **41004/update 4,137** also reduced common-discount return on all three independent panels; its completion differences remain inconclusive. A history that ultimately improves can still contain locally harmful updates.
 
-Reconstruct long-support/gamma0.995 seed41006, where recovery was lost, and seed41004, where final recovery improved. Both are deliberately selected exposed histories, not a fresh cohort. Replay each from the original random actor/critic initialization through update4224 with the same existing recipe:4096 ordinary-reset recovery-union updates, then the existing half-outward-start mixture,1024-step sampled support,lambda1,global normalization and unchanged Adam/plant/reward/noise settings.
+The full 96-update chronology includes rebounds and contrary results. Neither selected transaction explains the entire training trajectory, and no particular critic estimate or advantage component has been isolated as the cause. No correction, rollback, production checkpoint selection, merge or deployment occurred.
 
-The historical archives are comparison inputs, never loaded as warm starts. Every recorded update through4224 must match its original history, and both networks must match checkpoints0/1024/4096/4128/4224. A mismatch stops the measurement and is retained. Adam moments, environment, partial episode and RNG histories remain live during replay. Portable optimizer-resume files are not exported, so saved actor/critic files are not presented as complete training checkpoints.
+## Registered design
 
-## What the missing interval captures
+Reconstruct the actual support1024/gamma0.995 histories of exposed seeds41006 and41004 from their original initialization through4224 with live Adam, environment, unfinished episode and random state. Require every update record and all historical actor/critic checkpoint comparisons to match exactly. Historical files are comparison inputs, not warm starts or portable optimizer-resume files.
 
-At every update4129–4224, retain incoming actor/critic, main rollout, sampled futures, all supplemental support trajectories, raw/normalized advantages and target values, and all16 original optimizer transactions with indices/losses/actor/critic outputs. Save every post-update actor/critic. No fitting sample, controller output, loss, optimizer equation or sampling rule is changed.
+Record every update4129–4224, including all fitting/return-support data and16 optimizer transactions. Evaluate all97 snapshots on the same three historical20.48-second panels with64 cases each. Select the largest consecutive outward-completion decrease per history, earliest tie, only for diagnosis. Then test its frozen before/after actors on256 independent paired cases per panel. Evaluation never enters training or update selection.
 
-Frozen snapshots at4128 and after all96 updates are evaluated on the same three original20.48-second panels,64 cases each: nominal mean-action, nominal stochastic and outward stochastic. All historical episode fields must reproduce at4128/4224. Evaluation uses the old offset0x10000000 and is verified not to mutate the learner. Full traces are fixed replication0 at the two window endpoints; every other case retains aggregate outcomes. The repeated cases localize changes, but cannot justify independent statistical significance for an update selected from them.
+The fixed interval family is12 contrasts:two selected histories,three panels,completion and common-gamma.99 discounted return. These conditional intervals are not training-population or hardware qualification. Training gamma remains.995 within this experimental recipe; the common evaluation return is not an unbiased estimate of the training-discount expected objective.
 
-## Independent confirmation after selection
+## Verification
 
-For EACH seed, select one transaction using the largest consecutive decline in outward completion count, with earliest-update tie-breaking. Retain all96 changes, not only the selected one. If no decline occurs, retain the largest zero/beneficial change rather than force a harmful case. Even the improving history may have a locally harmful update; that is not an error or an excluded result.
+Native preflight:111 unit/audit tests,7 ordinary balancing and9 ordinary learning controls,Clippy,formatting and protected-source restoration. The current endpoint was explicitly run after regular preflight; ignored historical heavy endpoints and the production browser/platform matrix were not rerun.
 
-Evaluate the selected transaction's frozen before/after policies on256 paired cases in each of the three short panels using independent offset0x20000000. Neither those draws nor their outcomes enter training or update selection. Save all outcomes and fixed first-replication traces. The two-sided99% Student intervals use a Bonferroni family of12 contrasts:2 histories x3 panels x completion/discounted return. They estimate conditional effects for these fixed selected policies, not reliability across a population of trained agents. No production checkpoint is selected and no actual training is rolled back.
+The unchanged109-test offline suite passes on actual results. All three current raw ZIP digests and15165 payload hashes,plus two nested historical archives/548 payloads,verify. Both full prefix histories and window endpoints reproduce. All40320 evaluation records,192 detailed updates,3072 optimizer transactions and24 exported full evaluation paths/40327 transitions are checked. Returns and normalization reproduce bit-for-bit. Unexported native gradients,Adam moments,RNG draws and other full evaluation paths are not independently regenerated. Logged nonsmooth finite-difference residuals and all contrary findings are retained in the full report.
 
-A harmful update could thereby be localized and checked on independent cases. This would not yet establish which advantage component, critic estimate or particular action caused the loss. The replay does not contain an unregistered normalization/learning-rate/reward intervention.
+The conversation evidence provides unchanged raw archives,compiled source,all numerical reports,offline code/tests and segmented reproduction instructions. Offline verification does not run the native binary,network,simulator or learning. A green verifier is not a controller-qualification pass.
 
-## Verification already completed locally
+## Disposition
 
-Actual build artifact10619877204, SHA256 `969e49d56acdd71bfefdede8cbac4b8b4a79d6dfb935fea46d90ccb5319dd876`, was downloaded and all119 payload hashes verified. The55 retained protected Rust/Cargo files are byte-identical to the original return-support build. Removing the diagnostic-child declaration recovers the prepared parent collector/optimizer source exactly. The preparer only attaches that child and a localized lint allowance for its explicit diagnostic I/O arguments; no existing collection or optimizer body is replaced.
-
-The prepared offline suite passes **109 tests**, including inherited target/physics/derivative checks and new chronology,selection,tie,missing-data,random-domain,paired-effect and failure-accounting controls. Running the updated batch reconstruction in pieces on the OLD41004/41006 archived updates reproduces the inherited numerical results exactly. These compatibility tests add no simulator or training interactions and do not supply new window measurements.
-
-With only the current build ZIP present, the verifier explicitly reports both replay artifacts missing, exits2 and emits no controller scores. It is not reporting a failed controller or completed experiment. The prepared verifier checks source hashes, historical update/checkpoint/endpoint reproduction, every window target and optimizer transaction, exact selection and independent-pair identities, all exported evaluation physics/rewards and full-batch surrogate/KL/trajectory-source accounting. It does not regenerate unexported Adam moments, gradients or missing trajectories.
-
-The progress package contains the actual current build and the unchanged predecessor build, allowing source-isolation checks without retrieving a separate archive. It includes the prepared analysis/tests and explicit missing-data status, not fabricated window outcomes. Offline commands do not execute native code, contact a network, run the simulator or train.
-
-## Bounds and disposition
-
-Per replayed history:4224 original updates,2,162,688 main interactions,36,765,696 supplemental interactions and at most17,301,504 cutoff-future interactions. Historical-window evaluation has18,624 episodes and selected-update independent evaluation1,536, separately counted. Generic preflight/control interactions are additional. This is reconstruction of two existing histories, not new successful candidate learning, an efficiency result or hardware qualification.
-
-Production gamma0.99/lambda0.95,reward,normalization,weights,PR38,master,deployment and fallback remain unchanged. No merge or controller adoption. The preceding support1024 rejection remains in force. Current progress establishes a working native diagnostic and two executing replays; the damaging transaction has not yet been measured and verified.
+The longer-support recipe remains rejected. Production gamma0.99/lambda0.95,rewards,normalization,learned policies,PR38,master,deployment and fallback behavior remain unchanged. The new result is an identified, independently confirmed harmful update suitable for a focused counterfactual correction test; no such correction has yet been tested.
