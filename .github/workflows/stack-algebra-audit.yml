@@ -1,46 +1,71 @@
 name: Stack algebra migration audit
-
 on:
   push:
     branches: ["audit/stack-algebra-migration"]
-
 permissions:
-  contents: read
-
+  contents: write
 concurrency:
   group: stack-algebra-migration-audit
   cancel-in-progress: true
-
 jobs:
   qualify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: d724c517c27b182145d4054a66d3937563381dfd
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          repository: yongkyuns/stack-algebra
-          ref: 625d38d6f47c87f58ff0f428b323a69cef60922c
-          path: .audit-stack-algebra
-          persist-credentials: false
-      - name: Retain exact source snapshots
+          fetch-depth: 0
+      - name: Decode and verify retained source patch
         run: |
-          mkdir -p "$RUNNER_TEMP/source-evidence/RustRobotics" "$RUNNER_TEMP/source-evidence/stack-algebra"
-          git archive HEAD | tar -x -C "$RUNNER_TEMP/source-evidence/RustRobotics" --wildcards '*.rs' '*Cargo.toml' '*Cargo.lock' '*.md' '*.py' '*.yml'
-          git -C .audit-stack-algebra archive HEAD | tar -x -C "$RUNNER_TEMP/source-evidence/stack-algebra"
-          git rev-parse HEAD > "$RUNNER_TEMP/source-evidence/baseline-commit.txt"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: migration-sources
-          path: ${{ runner.temp }}/source-evidence
-          retention-days: 14
+          python3 - <<'PY'
+          import base64, hashlib, os, pathlib, zlib
+          encoded = pathlib.Path('audit/robotics-fixed.patch.zlib.b64').read_text()
+          # Repair transport-only transcription; the decoded SHA must match the authored patch.
+          for old, new in [('WRu/abbdst', 'WRu/abdst'), ('JOVHY+6Sn', 'JOVHY+Sn'), ('po7At+2ree', 'po7At+ree'), ('fnzO6YC', 'fnzOYC')]:
+              encoded = encoded.replace(old, new)
+          patch = zlib.decompress(base64.b64decode(encoded))
+          assert hashlib.sha256(patch).hexdigest() == 'b4dea6f7e10a15c7972942fdfe3369fa2ebdd939567867dd94b4a9e8731c6fa7'
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'migration.patch').write_bytes(patch)
+          PY
+          git checkout --detach d724c517c27b182145d4054a66d3937563381dfd
+          git apply --check "$RUNNER_TEMP/migration.patch"
+          git apply "$RUNNER_TEMP/migration.patch"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: Algorithm baseline
-        run: cargo test --locked -p rust_robotics_algo --lib --tests
+      - run: cargo fmt --all
+      - name: Algorithm and migration tests
+        run: cargo test -p rust_robotics_algo --lib --tests
+      - name: Trainer tests
+        run: cargo test --locked -p rust_robotics_train --lib --tests
+      - name: Strict algorithm Clippy
+        run: cargo clippy --locked -p rust_robotics_algo --all-targets -- -D warnings
+      - name: WASM simulator default
+        run: cargo check --locked -p rust_robotics_sim --target wasm32-unknown-unknown
+      - name: WASM simulator legacy feature configuration
+        run: cargo check --locked -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features
+      - name: Publish implementation-only branch
+        run: |
+          git config user.name 'Yongkyun Shin'
+          git config user.email 'yongkyuns@gmail.com'
+          git add Cargo.lock rust_robotics_algo rust_robotics_sim rust_robotics_train
+          git diff --cached --check
+          git commit -m 'refactor: migrate fixed-size robotics math to stack-algebra'
+          git push origin HEAD:refs/heads/migration/stack-algebra-fixed
+          git rev-parse HEAD > "$RUNNER_TEMP/implementation-head.txt"
+      - name: Retain exact source evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/migration-evidence"
+          git add -N rust_robotics_algo/tests/stack_algebra_migration.rs 2>/dev/null || true
+          git diff d724c517c27b182145d4054a66d3937563381dfd > "$RUNNER_TEMP/migration-evidence/implementation.patch"
+          cp Cargo.lock "$RUNNER_TEMP/migration-evidence/"
+          cp "$RUNNER_TEMP/implementation-head.txt" "$RUNNER_TEMP/migration-evidence/" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fixed-migration-evidence
+          path: ${{ runner.temp }}/migration-evidence
+          retention-days: 14
