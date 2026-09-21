@@ -1,0 +1,141 @@
+name: PPO gamma995 return-support comparison
+on:
+  push:
+    branches: ["audit/ppo-return-support-20260920"]
+    paths: [".github/workflows/ppo-return-support.yml", "audits/return_support/native.rs", "audits/return_support/prepare.py", "audits/return_support/scope.rs"]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      HORIZON_BUILD: /tmp/return-support-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Require support propagation and unchanged fitting samples
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python audits/return_support/prepare.py 2>&1 | tee "$HORIZON_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$HORIZON_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$HORIZON_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$HORIZON_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export exactly the tested executable
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$HORIZON_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_BUILD'])
+          rows=[json.loads(l) for l in (root/'build.jsonl').read_text().splitlines()]
+          bins=[r['executable'] for r in rows if r.get('reason')=='compiler-artifact' and r.get('executable') and r['target']['name']=='rust_robotics_train']
+          assert len(bins)==1,bins
+          shutil.copyfile(bins[0],root/'runner')
+          PY
+          chmod +x "$HORIZON_BUILD/runner"
+          ldd "$HORIZON_BUILD/runner" > "$HORIZON_BUILD/linkage.txt"
+      - name: Preserve every outcome and restore protected sources
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib
+          root=Path(os.environ['HORIZON_BUILD'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: return-support-build
+          path: /tmp/return-support-build/
+          retention-days: 30
+          include-hidden-files: true
+          if-no-files-found: error
+  train:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [41001, 41002, 41003, 41004, 41005, 41006, 41007, 41008]
+        arm: [support512, support1024]
+    name: Return support ${{ matrix.arm }} seed ${{ matrix.seed }}
+    env:
+      HORIZON_SEED: ${{ matrix.seed }}
+      SUPPORT_ARM: ${{ matrix.arm }}
+      HORIZON_OUT: /tmp/return-support-${{ matrix.arm }}-${{ matrix.seed }}
+      HORIZON_PRIOR: /tmp/return-support-prior
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: return-support-build
+          path: /tmp/return-support-build
+      - name: Verify exact executable and immutable historical comparator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,shutil,subprocess,zipfile
+          root=Path('/tmp/return-support-build');out=Path(os.environ['HORIZON_OUT']);dest=Path(os.environ['HORIZON_PRIOR'])
+          out.mkdir(parents=True,exist_ok=True);dest.mkdir(parents=True,exist_ok=True)
+          for n,h in json.loads((root/'manifest.json').read_text()).items():assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          for n in ['manifest.json','commit.txt','baseline.txt']:shutil.copyfile(root/n,out/('build-'+n))
+          ids={41001: (10606775011, '8ed3a6e64263e5aacb94b2d0cf5d3470135c938d87bdcdf813354e37f9cb7d97'), 41002: (10606099418, '515ef671ec2d8badd69a2f691a5ea297707c7e9b262f872b18945b3a72164c3f'), 41003: (10605054063, 'e173c09d50f53db5bdc141debc1d5364333be00c7c0d0d7600aa83cd29d32b50'), 41004: (10606515401, '83bfd1b92783a445126faf3595ec66f02a734edd6b3de43e0e6000bc3f6e53ba'), 41005: (10606044528, '74e2cdcc6ca954165781132d5efdefec923e6cd9a2d6499193c683f76da249e2'), 41006: (10606480693, 'd8c1a037148355a51a559c3d3d3ba700833866f20418a5563108dd2ecda7dacc'), 41007: (10606366220, 'bfbd6fdef9b0794685e45080a0df8890e2aec74a38f52fe65f78ebb25ce4100a'), 41008: (10606167538, 'f047e88f754f8343e1341ee0e93eedbed341cd53e95af277708e312ab624febe')}
+          artifact,digest=ids[int(os.environ['HORIZON_SEED'])]
+          raw=Path('/tmp/return-support-source.zip')
+          with raw.open('wb') as f:subprocess.run(['gh','api',f'repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip'],stdout=f,check=True)
+          assert hashlib.sha256(raw.read_bytes()).hexdigest()==digest
+          with zipfile.ZipFile(raw) as z:
+              m=json.loads(z.read('manifest.json'));assert set(z.namelist())==set(m)|{'manifest.json'}
+              for n,h in m.items():assert hashlib.sha256(z.read(n)).hexdigest()==h,n
+              (out/'prior-manifest.json').write_bytes(z.read('manifest.json'))
+              names=[f'{k}-{c}.bin' for k in ['actor','critic'] for c in [0,1024,4096,4128,4224,4608]]+['updates.csv','costs.json']
+              for n in names:
+                  for base in [dest,out/'historical']:
+                      d=base/n;d.parent.mkdir(parents=True,exist_ok=True);d.write_bytes(z.read(n))
+          (out/'source.json').write_text(json.dumps({'artifact_id':artifact,'sha256':digest,'original_run':35511524659,'source_commit':'6516572add5509ccb338e4ecb55d572733f99bd2','used_as_warm_start':False},sort_keys=True,indent=2)+'\n')
+          PY
+          chmod +x /tmp/return-support-build/runner
+      - name: Train once from scratch and evaluate every prescribed checkpoint
+        run: |
+          /tmp/return-support-build/runner trainer::horizon_audit::tail_support::recovery_anchor::recovery_rewards::repeated_recovery::outward_mix::discount_learning::return_support::emit_return_support --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$HORIZON_OUT/execution.log"
+          grep -F "RETURN SUPPORT COMPLETE $HORIZON_SEED $SUPPORT_ARM" "$HORIZON_OUT/execution.log"
+      - name: Retain all results including failures
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib
+          root=Path(os.environ['HORIZON_OUT']);root.mkdir(parents=True,exist_ok=True)
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: return-support-${{ matrix.arm }}-${{ matrix.seed }}
+          path: ${{ env.HORIZON_OUT }}/
+          retention-days: 30
+          include-hidden-files: true
+          if-no-files-found: error
