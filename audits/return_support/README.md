@@ -1,48 +1,40 @@
-# Gamma0.995 with longer sampled return support
+# Gamma 0.995 with longer sampled return support — COMPLETE
 
-Registered before new outcomes in issue35 comment5753874883. Executable source **0a4445f6c5ab83650133a696faaeb764fd5b6c26**, workflow **35548063439**, branch **audit/ppo-return-support-20260920**.
+**The experiment completed; do not adopt the 1,024-step candidate.**
 
-**Native preflight PASSED on its first attempt; learning jobs have started.** At this progress check thirteen of the sixteen training jobs are executing and three are queued. There is no completed, independently verified learning comparison or controller-quality result yet. Documentation-only commits do not start another measurement.
+[Verified results at d8bf6183](https://github.com/yongkyuns/RustRobotics/blob/d8bf6183bf958cf5debcb563a7fdca08465a91db/audits/return_support/RESULTS.md).
 
-## Fixed comparison
+The original workflow **35548063439**, executed source **0a4445f6c5ab83650133a696faaeb764fd5b6c26**, completed on its first attempt. All 17 jobs passed: native preflight and sixteen from-scratch training runs. No duplicate training or favorable retry was used in verification. This supersedes the previous in-progress status.
 
-Hold training gamma0.995 fixed from random actor/critic initialization and compare only sampled support lengths512 and1024. There are sixteen runs, paired seeds41001–41008, all already-exposed development histories. Every run performs4096 ordinary-reset recovery-union updates followed by512 half-outward updates with continuous Adam, environment, unfinished episode and random state. No learned weights are imported.
+| Support, both training gamma 0.995 | Five-minute deterministic | Five-minute stochastic | Sixty-second outward |
+|---|---:|---:|---:|
+|512 control|507 / 512|510 / 512|450 / 512|
+|1,024 candidate|494 / 512|500 / 512|455 / 512|
 
-| Quantity | support512 control | support1024 candidate |
-|---|---:|---:|
-| Primary fitting samples/update |512|512|
-| Supplemental streams |8|8|
-| Fitting samples per supplemental stream |64|64|
-| Collected steps per supplemental stream |576|1088|
-| Maximum steps per primary-cutoff future |512|1024|
-| Primary-cutoff futures |4|4|
-| Total fitting samples/update |1024|1024|
-| Adam steps per network/update |16|16|
+The five additional outward successes do not compensate for nominal losses. The registered outward-completion interval includes zero, nominal retention fails, and every candidate absolute long-panel screen fails. Seed 41004 improves outward completion from 51/64 to 63/64, while 41006 falls from 40/64 to 32/64 and loses nominal reliability. All 87 remaining candidate long-panel failures are position-limit failures. All survivors finish centred; failures remain in denominators.
 
-Extra supplemental observations after the selected64 samples provide future rewards but do not enter actor/critic fitting. True terminal masks prevent credit from crossing failure/reset boundaries. Only the test-scoped tail and supplemental lengths change. Plant, noise, reward, global normalization, lambda1, architecture, action distribution, initial-state mixture, Adam settings, minibatch256 and four epochs remain fixed. No teacher, imitation, symmetry wrapper, extra critic passes or safety fallback.
+## Frozen protocol
 
-The unfinished-cutoff value coefficient falls from0.995^512≈0.07681 to0.995^1024≈0.00590. This tests whether more sampled support helps; it does not establish that bootstrap error caused the earlier recovery regression. Longer support also changes realized sampling variance and the later bootstrap state.
+Registration **issue #35 comment 5753874883** precedes all new outcomes. The complete pre-results protocol/status is retained at [90c6569f](https://github.com/yongkyuns/RustRobotics/blob/90c6569fdf2395f1d1497a7b974ab31cc2248d3e/audits/return_support/README.md). No threshold or intervention changed after outcomes.
 
-## Controls and outcomes required
+Both arms train from random actor/critic initialization with gamma 0.995, eight paired already-exposed seeds 41001–41008, and 4,096 ordinary-reset recovery-union updates followed by 512 half-outward supplemental-start updates. Complete Adam/environment/partial-episode/random histories persist. No learned weight initialization.
 
-The512-support control must reproduce BOTH actor and critic from the preceding gamma995 archives at checkpoints0/1024/4096/4128/4224/4608. All4608 update records after their arm label and final cost records must also match. Archives are bound to immutable published digests. Historical values are comparison inputs, never warm starts. Any mismatch stops and is retained. Both new arms must have identical initial networks and first fitted physical data; subsequent training paths may differ.
+Only the sampled support length changes: four cutoff futures of up to 512 or 1,024 steps and eight supplemental streams of 576 or 1,088 transitions. Only the first 64 samples of each supplemental stream enter fitting. The main fitting batch remains 512; the union remains 1,024 rows; both arms use sixteen Adam transactions per network/update. True terminal masks prevent credit crossing resets. Noise, rewards, nonlinear plant, architecture, exploration, global normalization, experimental lambda 1, minibatch 256, four epochs, learning rate 0.0003 and Adam epsilon 1e-5 are unchanged.
 
-All checkpoints are retained; only4608 determines advancement. Detailed updates1/4097/4608 retain incoming weights, fitting rows, full sampled support, targets and all16 optimizer transactions. Evaluation uses new fixed offset0x10000000 and common score-gamma0.99 for both arms. Each checkpoint has64 short nominal-mean, nominal-stochastic and outward trials per seed/arm. Final evaluation adds64 five-minute nominal-mean,64 five-minute nominal-stochastic and64 sixty-second outward trials. Failure ends a trial immediately. Rep0 full trajectories at4096/final; other evaluations retain aggregate outcomes. Nothing from evaluation enters fitting.
+All six short-support actor/critic checkpoint pairs, every update row after the arm label and final costs reproduce the preceding gamma995 archives exactly. Historical inputs are immutable comparison files, never warm starts. Both arms' initial fitting/physical data match; later targets and trajectories may diverge.
 
-Development advancement requires a positive lower bound for outward-completion gain using eight paired-history two-sided99% Student intervals adjusted overthree long-completion comparisons, both candidate nominal pooled counts>=control, and every candidate nominal history>=61/64. The separate absolute screen retains507/512 pooled per long panel,61/64 per history,three-panel-family one-sided99% history lower bound>=95%,and99% final-ten-second centring among survivors. Missing histories cannot pass. No best-checkpoint selection, favorable retries, threshold changes or excluded weak seeds. This exposed cohort is not fresh or hardware qualification.
+Evaluation uses fresh draws in fixed domain 0x10000000 and common score-gamma 0.99 for both arms. Every checkpoint retains 64 short nominal deterministic/stochastic and outward cases per history; final evaluation adds five-minute nominal and sixty-second outward panels. True failure stops each trial. Only update 4,608 determines advancement. Replication-zero full traces are retained at 4,096/final; other trials retain aggregate results. Exposed training seeds are not held-out or hardware qualification.
 
-Per arm/history:2359296 main interactions,21233664 versus40108032 supplemental interactions,and up to9437184 versus18874368 cutoff futures. Each network receives73728 Adam steps and18874368 fitting-sample visits in both arms. Evaluation and preflight are additional. This is equal fitting/optimizer work, not equal total simulator work or a sample-efficiency result.
+Development advancement requires a positive lower bound on outward-completion gain using eight paired-history two-sided 99% Student intervals adjusted over three long completion comparisons, no pooled nominal regression and at least 61/64 nominal completions for each candidate history. The separate absolute screen requires 507/512 pooled, 61/64 per history, three-panel-adjusted one-sided 99% history lower bound at least 95%, and at least 99% centring among survivors. Both screens fail.
 
-## Verification completed
+The 1,024-step bootstrap coefficient falls from approximately 0.07681 to 0.00590, but longer support also changes sampled-target variance and later bootstrap states. This experiment rejects the tested correction; it does not prove all bootstrap or longer-horizon methods ineffective. Actual candidate sampling is approximately 1.835 times the control's, despite equal fitting and optimizer work.
 
-The native preflight passed **108 unit/audit tests**, **7 ordinary balancing controls**, **9 ordinary learning controls**, strict Clippy, formatting and protected-source restoration. The nine heavy audit endpoints were ignored during the regular unit pass; the new learning endpoint is explicitly invoked by the separate training jobs. Two historical heavy integration endpoints and the production browser/platform matrix were not run.
+## Completed verification
 
-Seven new native tests validate support scope/thread isolation and unwind restoration,unchanged512 dispatch plus subsequent optimizer-history parity,first main/selected supplemental physical-data identity,tail-prefix identity,terminal/cutoff bootstrap handling,and reproducible1024-support updates with unchanged fitting work. These tests passed; they are not sustained-control results.
+Native preflight passes 108 unit/audit tests, seven ordinary balancing controls, nine ordinary learning controls, Clippy, formatting and source restoration. Nine heavy audit endpoints are ignored in the normal unit pass; the current endpoint is explicitly invoked by measurement jobs. Two historical heavy integration endpoints and the production platform/browser matrix were not rerun.
 
-Build artifact10617012511, SHA256 **5fa2e313fdc55d9779ff91c0b665cf8e47a17af7ffd8e71f3fb42223651d4e74**, contains the actually compiled source/runner/logs. Its published ZIP digest and all110 payload hashes were independently verified. No local recompilation or alternative simulator was substituted.
+The unchanged offline verifier passes all 63 tests. Checks cover all 17 published ZIP digests and 4,494 payload hashes, 224 bound historical inputs, 21,504 outcomes, 73,728 update rows, 96 regular actor/critic pairs, 319,488 detailed support rows and 768 recorded optimizer transactions. Targets and normalization reconstruct bit-for-bit. All 144 exported trajectories, 1,170,196 transitions, reconstruct actions, physics, rewards, endings and scores. Unexported gradients, Adam records, random draws and other full trajectories are not independently regenerated.
 
-The prepared offline verifier passes **63 synthetic/property tests**. Empty-input control requires all17 result/build archives and emits INCOMPLETE/exit2 without scores. Generalized512-support numerical reconstruction also matches the inherited verifier exactly on archived gamma995 histories41001/41004. This is compatibility checking on existing data, not a new learning result. Source-length transformations passed exact reversibility checks on the actual archived collectors.
+Fresh-unpack verification checks 35 outer payload hashes, reruns 63 tests and regenerates all five numerical reports byte-for-byte, including both failed decisions. Full evidence: `rustrobotics-return-support-evidence.zip`, 204,886,816 bytes, SHA256 `1955a53546f9fff5683c27a43df15ce45c5b0e65e101a1098124317d5c70d0af`. The detached verification receipt and analysis-only package retain final replay logs. Offline commands execute no native binary, simulator, training or network.
 
-The verifier is ready to bind all new artifacts and checkpoints, reconstruct both support lengths' GAE/tails/returns/normalization and selected optimizer outputs, and check exported evaluation dynamics/actions/rewards. It has not yet verified new training outcomes. Unexported gradients,Adam states and remaining trajectories are not independently regenerated. Offline replay executes no native code, simulator, training or network.
-
-**No production gamma0.99/lambda0.95, reward, normalization, learned policy, PR38, master or deployment changed.** No merge or controller adoption. The study has cleared native preflight and begun training; the question of improved recovery is still unanswered.
+**Production gamma 0.99/lambda 0.95, rewards, normalization, learned policies, PR #38, master and deployment remain unchanged. No merge, wrapper or fallback adoption.** The study is complete with a negative adoption decision.
