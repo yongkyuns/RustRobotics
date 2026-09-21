@@ -124,7 +124,7 @@ impl KeyboardInput {
     const BRAKE_RATE: f32 = 0.8;
     /// Steering return rate (spring back to center)
     const STEERING_DECAY: f32 = 0.95;
-    /// Acceleration decay rate
+    /// Acceleration decay
     const ACCEL_DECAY: f32 = 0.9;
 
     /// Update input based on keyboard state
@@ -503,10 +503,8 @@ impl Draw for ParticleFilter {
         plot_ui.points(Points::new(
             "",
             PlotPoints::new(
-                self.px
-                    .as_slice()
-                    .chunks_exact(4)
-                    .map(|state| [state[0] as f64, state[1] as f64])
+                (0..NP)
+                    .map(|i| [self.px[(0, i)] as f64, self.px[(1, i)] as f64])
                     .collect(),
             ),
         ));
