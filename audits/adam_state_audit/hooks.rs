@@ -1,9 +1,7 @@
 //! Test-only raw-gradient and Adam-state capture for the exact harmful update.
 //! No training arithmetic is replaced.
 use super::*;
-use burn::module::ParamId;
 use burn::tensor::Tensor;
-use serde::Serialize;
 use std::{cell::RefCell, fs, path::{Path, PathBuf}};
 
 type Inner = <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend;
@@ -18,26 +16,22 @@ thread_local! {
     static CAPTURE: RefCell<Capture> = RefCell::new(Capture::default());
 }
 
-#[derive(Serialize)]
 struct AdamParam {
     name: &'static str,
     time: usize,
     moment_1: Vec<f32>,
     moment_2: Vec<f32>,
 }
-#[derive(Serialize)]
 struct AdamDump {
     network: &'static str,
     phase: &'static str,
     step: usize,
     params: Vec<AdamParam>,
 }
-#[derive(Serialize)]
 struct GradParam {
     name: &'static str,
     values: Vec<f32>,
 }
-#[derive(Serialize)]
 struct GradDump {
     network: &'static str,
     step: usize,
@@ -47,8 +41,64 @@ struct GradDump {
 fn tensor_vec<const D: usize>(tensor: Tensor<Inner, D>) -> Vec<f32> {
     tensor.to_data().to_vec::<f32>().unwrap()
 }
-fn write_json(path: &Path, value: &impl Serialize) {
-    fs::write(path, serde_json::to_string(value).unwrap() + "\n").unwrap();
+fn floats_json(values: &[f32]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| {
+                assert!(value.is_finite(), "non-finite Adam audit value");
+                value.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+fn write_grad(path: &Path, value: &GradDump) {
+    let params = value
+        .params
+        .iter()
+        .map(|param| {
+            format!(
+                "{{\"name\":\"{}\",\"values\":{}}}",
+                param.name,
+                floats_json(&param.values)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    fs::write(
+        path,
+        format!(
+            "{{\"network\":\"{}\",\"step\":{},\"params\":[{}]}}\n",
+            value.network, value.step, params
+        ),
+    )
+    .unwrap();
+}
+fn write_adam(path: &Path, value: &AdamDump) {
+    let params = value
+        .params
+        .iter()
+        .map(|param| {
+            format!(
+                "{{\"name\":\"{}\",\"time\":{},\"moment_1\":{},\"moment_2\":{}}}",
+                param.name,
+                param.time,
+                floats_json(&param.moment_1),
+                floats_json(&param.moment_2)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    fs::write(
+        path,
+        format!(
+            "{{\"network\":\"{}\",\"phase\":\"{}\",\"step\":{},\"params\":[{}]}}\n",
+            value.network, value.phase, value.step, params
+        ),
+    )
+    .unwrap();
 }
 
 pub(crate) fn start(path: PathBuf) {
@@ -146,27 +196,27 @@ pub(crate) fn actor_before(s:&PpoTrainerSession, grads:&GradientsParams) {
         let mut c=c.borrow_mut();
         let Some(out)=c.out.clone() else{return};
         c.actor_step+=1; let step=c.actor_step;
-        write_json(&out.join(format!("actor-grad-{step}.json")),&actor_grad_dump(s,grads,step));
-        write_json(&out.join(format!("actor-adam-before-{step}.json")),&actor_adam(s,"before",step));
+        write_grad(&out.join(format!("actor-grad-{step}.json")), &actor_grad_dump(s, grads, step));
+        write_adam(&out.join(format!("actor-adam-before-{step}.json")), &actor_adam(s, "before", step));
     });
 }
 pub(crate) fn actor_after(s:&PpoTrainerSession) {
     CAPTURE.with(|c| {
         let c=c.borrow(); let Some(out)=c.out.clone() else{return};
-        write_json(&out.join(format!("actor-adam-after-{}.json",c.actor_step)),&actor_adam(s,"after",c.actor_step));
+        write_adam(&out.join(format!("actor-adam-after-{}.json", c.actor_step)), &actor_adam(s, "after", c.actor_step));
     });
 }
 pub(crate) fn critic_before(s:&PpoTrainerSession, grads:&GradientsParams) {
     CAPTURE.with(|c| {
         let mut c=c.borrow_mut(); let Some(out)=c.out.clone() else{return};
         c.critic_step+=1; let step=c.critic_step;
-        write_json(&out.join(format!("critic-grad-{step}.json")),&critic_grad_dump(s,grads,step));
-        write_json(&out.join(format!("critic-adam-before-{step}.json")),&critic_adam(s,"before",step));
+        write_grad(&out.join(format!("critic-grad-{step}.json")), &critic_grad_dump(s, grads, step));
+        write_adam(&out.join(format!("critic-adam-before-{step}.json")), &critic_adam(s, "before", step));
     });
 }
 pub(crate) fn critic_after(s:&PpoTrainerSession) {
     CAPTURE.with(|c| {
         let c=c.borrow(); let Some(out)=c.out.clone() else{return};
-        write_json(&out.join(format!("critic-adam-after-{}.json",c.critic_step)),&critic_adam(s,"after",c.critic_step));
+        write_adam(&out.join(format!("critic-adam-after-{}.json", c.critic_step)), &critic_adam(s, "after", c.critic_step));
     });
 }
