@@ -239,8 +239,11 @@ def main():
         manifest=json.loads(z.read(manifest_name))
         manifest_errors=[]
         for name,expected in manifest.items():
-            # manifest keys are normally root-relative. Accept an enclosing artifact prefix.
-            candidates=[n for n in names if n==name or n.endswith("/"+name)]
+            # Prefer the manifest's exact root-relative member. Only fall back to
+            # an enclosing artifact prefix when the exact member is absent.
+            # Using suffix matches even when the exact member exists makes names
+            # such as actor-0.bin ambiguous with update-*/actor-0.bin.
+            candidates=[name] if name in names else [n for n in names if n.endswith("/"+name)]
             if len(candidates)!=1:
                 manifest_errors.append([name,"missing-or-ambiguous",len(candidates)])
                 continue
