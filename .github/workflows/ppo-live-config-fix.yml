@@ -1,0 +1,40 @@
+name: PPO live trainer config fix
+
+on:
+  push:
+    branches: ["fix/ppo-live-trainer-config-invalidation"]
+    paths:
+      - "rust_robotics_sim/src/simulator/pendulum/domain.rs"
+      - "rust_robotics_sim/src/simulator/pendulum/training.rs"
+      - ".github/workflows/ppo-live-config-fix.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Strict formatting and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked -p rust_robotics_sim --all-targets -- -D warnings
+      - name: Pendulum and trainer integration tests
+        run: |
+          cargo test --locked --release -p rust_robotics_sim simulator::pendulum -- --test-threads=1
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics
