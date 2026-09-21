@@ -1,0 +1,33 @@
+name: Stack algebra renderer correction
+on:
+  push:
+    branches: ["audit/stack-algebra-migration"]
+permissions:
+  contents: write
+jobs:
+  correct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: migration/stack-algebra-fixed
+      - name: Apply the exact reviewed indexing correction
+        run: |
+          test "$(git rev-parse HEAD)" = eb740509b5e6a2b14d6699b82f50825c158c7ecd
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('rust_robotics_sim/src/simulator/localization.rs')
+          text = path.read_text()
+          old = '.map(|state| [*state.get(0).unwrap() as f64, *state.get(1).unwrap() as f64])'
+          new = '.map(|state| [state[0] as f64, state[1] as f64])'
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff --stat
+          git config user.name 'Yongkyun Shin'
+          git config user.email 'yongkyuns@gmail.com'
+          git add rust_robotics_sim/src/simulator/localization.rs
+          git commit -m 'fix: index fixed-length particle render slices directly'
+          git push origin HEAD:refs/heads/migration/stack-algebra-fixed
