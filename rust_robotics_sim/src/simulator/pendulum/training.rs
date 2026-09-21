@@ -4,7 +4,9 @@
 //! an incompatible learner and require an explicit restart. Policy publication
 //! does not reset a running episode; activation and explicit restart do.
 use super::super::Simulate;
-use super::domain::{ControllerKind, InvertedPendulum, NoiseConfig, PENDULUM_FIXED_DT};
+use super::domain::{
+    ControllerKind, InvertedPendulum, NoiseConfig, PpoLearnerSettings, PENDULUM_FIXED_DT,
+};
 use rust_robotics_algo::cart_pole::CartPoleParameters;
 use rust_robotics_train::PendulumEnvConfig;
 
@@ -13,17 +15,37 @@ impl InvertedPendulum {
     /// different task. The worker is destroyed so late results cannot reappear.
     pub(crate) fn validate_training_environment(&mut self) {
         self.trainer_config.plant = CartPoleParameters::from(self.model);
-        let requested = (self.trainer_config.plant, self.trainer_config.env);
+        let requested_environment = (self.trainer_config.plant, self.trainer_config.env);
         if self
             .active_training_environment
-            .is_some_and(|active| active != requested)
+            .is_some_and(|active| active != requested_environment)
         {
             self.training_active = false;
             self.trainer_backend.destroy();
             self.active_training_environment = None;
+            self.active_training_settings = None;
             self.policy_observation = None;
             self.policy_environment_stale = true;
             self.last_control_error = Some("Plant/noise changed: restart PPO training.".to_owned());
+            return;
+        }
+
+        let requested_settings =
+            PpoLearnerSettings::from_config(&self.trainer_config, self.parallel_trainers);
+        if self
+            .active_training_settings
+            .is_some_and(|active| active != requested_settings)
+        {
+            // Optimizer/collection settings belong to the learner, not the physical
+            // deployment contract. Tear down the stale learner while allowing the
+            // already-published policy to keep driving the unchanged plant.
+            self.training_active = false;
+            self.trainer_backend.destroy();
+            self.active_training_environment = None;
+            self.active_training_settings = None;
+            self.policy_environment_stale = false;
+            self.last_control_error =
+                Some("PPO trainer settings changed: restart PPO training.".to_owned());
         }
     }
 
@@ -88,6 +110,10 @@ impl InvertedPendulum {
         self.trainer_config.plant = CartPoleParameters::from(self.model);
         self.active_training_environment =
             Some((self.trainer_config.plant, self.trainer_config.env));
+        self.active_training_settings = Some(PpoLearnerSettings::from_config(
+            &self.trainer_config,
+            self.parallel_trainers,
+        ));
         self.policy_environment_stale = false;
         self.last_control_error = None;
         self.policy_observation = None;
