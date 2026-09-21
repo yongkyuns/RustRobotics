@@ -17,10 +17,11 @@ jobs:
           fetch-depth: 0
       - name: Decode and verify retained source patch
         run: |
+          cp audit/finalize-fixed.py "$RUNNER_TEMP/finalize-fixed.py"
           python3 - <<'PY'
           import base64, hashlib, os, pathlib, zlib
           encoded = pathlib.Path('audit/robotics-fixed.patch.zlib.b64').read_text()
-          # Repair transport-only transcription; the decoded SHA must match the authored patch.
+          # Repair transport-only transcription; verify the original authored patch.
           for old, new in [('WRu/abbdst', 'WRu/abdst'), ('JOVHY+6Sn', 'JOVHY+Sn'), ('po7At+2ree', 'po7At+ree'), ('fnzO6YC', 'fnzOYC')]:
               encoded = encoded.replace(old, new)
           patch = zlib.decompress(base64.b64decode(encoded))
@@ -30,11 +31,14 @@ jobs:
           git checkout --detach d724c517c27b182145d4054a66d3937563381dfd
           git apply --check "$RUNNER_TEMP/migration.patch"
           git apply "$RUNNER_TEMP/migration.patch"
+          python3 "$RUNNER_TEMP/finalize-fixed.py"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: cargo fmt --all
       - name: Algorithm and migration tests
         run: cargo test -p rust_robotics_algo --lib --tests
@@ -50,7 +54,7 @@ jobs:
         run: |
           git config user.name 'Yongkyun Shin'
           git config user.email 'yongkyuns@gmail.com'
-          git add Cargo.lock rust_robotics_algo rust_robotics_sim rust_robotics_train
+          git add Cargo.lock STACK_ALGEBRA_MIGRATION.md rust_robotics_algo rust_robotics_sim rust_robotics_train
           git diff --cached --check
           git commit -m 'refactor: migrate fixed-size robotics math to stack-algebra'
           git push origin HEAD:refs/heads/migration/stack-algebra-fixed
@@ -59,7 +63,7 @@ jobs:
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/migration-evidence"
-          git add -N rust_robotics_algo/tests/stack_algebra_migration.rs 2>/dev/null || true
+          git add -N rust_robotics_algo/tests/stack_algebra_migration.rs STACK_ALGEBRA_MIGRATION.md 2>/dev/null || true
           git diff d724c517c27b182145d4054a66d3937563381dfd > "$RUNNER_TEMP/migration-evidence/implementation.patch"
           cp Cargo.lock "$RUNNER_TEMP/migration-evidence/"
           cp "$RUNNER_TEMP/implementation-head.txt" "$RUNNER_TEMP/migration-evidence/" 2>/dev/null || true
