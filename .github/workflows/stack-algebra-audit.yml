@@ -40,16 +40,16 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo fmt --all
-      - name: Algorithm and migration tests
-        run: cargo test -p rust_robotics_algo --lib --tests
+      - name: Strict algorithm Clippy and lockfile resolution
+        run: cargo clippy -p rust_robotics_algo --all-targets -- -D warnings
       - name: Trainer tests
         run: cargo test --locked -p rust_robotics_train --lib --tests
-      - name: Strict algorithm Clippy
-        run: cargo clippy --locked -p rust_robotics_algo --all-targets -- -D warnings
       - name: WASM simulator default
         run: cargo check --locked -p rust_robotics_sim --target wasm32-unknown-unknown
       - name: WASM simulator legacy feature configuration
         run: cargo check --locked -p rust_robotics_sim --target wasm32-unknown-unknown --no-default-features
+      - name: Algorithm and migration tests
+        run: cargo test --locked -p rust_robotics_algo --lib --tests
       - name: Publish implementation-only branch
         run: |
           git config user.name 'Yongkyun Shin'
