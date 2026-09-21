@@ -135,8 +135,7 @@ impl InvertedPendulum {
     pub(crate) fn start_training(&mut self) {
         self.validate_training_environment();
         self.controller_selection = ControllerKind::Policy;
-        let initialize =
-            !self.trainer_backend.is_initialized() || self.trainer_settings_stale;
+        let initialize = !self.trainer_backend.is_initialized() || self.trainer_settings_stale;
         if initialize {
             self.reset_trainer();
         }
