@@ -1,0 +1,49 @@
+name: Stack algebra dependency patch
+on:
+  push:
+    branches: ["audit/stack-algebra-security-patch"]
+permissions:
+  contents: write
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: migration/stack-algebra-fixed
+      - name: Verify expected feature head
+        run: |
+          test "$(git rev-parse HEAD)" = 7033316b8157f2180a3ab50a7ccbf1a446ffa652
+          cp Cargo.lock "$RUNNER_TEMP/before.lock"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Apply only the patched rustls release
+        run: |
+          cargo update -p rustls@0.23.44 --precise 0.23.45
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          before = tomllib.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'before.lock').read_text())
+          after = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
+          old = [p for p in before['package'] if p['name'] != 'rustls']
+          new = [p for p in after['package'] if p['name'] != 'rustls']
+          assert old == new, 'Refuse unrelated dependency changes'
+          old_tls = [p for p in before['package'] if p['name'] == 'rustls']
+          new_tls = [p for p in after['package'] if p['name'] == 'rustls']
+          assert len(old_tls) == len(new_tls) == 1
+          assert old_tls[0]['version'] == '0.23.44'
+          assert new_tls[0]['version'] == '0.23.45'
+          assert old_tls[0]['dependencies'] == new_tls[0]['dependencies']
+          PY
+          cargo metadata --locked --format-version 1 > /dev/null
+          cargo audit
+      - name: Commit only the qualified lockfile change
+        run: |
+          git diff --check
+          git diff -- Cargo.lock
+          git config user.name 'Yongkyun Shin'
+          git config user.email 'yongkyuns@gmail.com'
+          git add Cargo.lock
+          git commit -m 'fix(deps): patch rustls for RUSTSEC-2026-0285'
+          git push origin HEAD:refs/heads/migration/stack-algebra-fixed
+          git rev-parse HEAD
