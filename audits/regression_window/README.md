@@ -1,4 +1,4 @@
-# Historical recovery-regression window — native preflight passed, replay pending
+# Historical recovery-regression window — preflight passed, both replays running
 
 Registered in issue35 comment5754579087 before new window outcomes. Executed source **a3276e1efa3071d381480bc61f1abe1ebd818a54**, run **35554192268**, branch `audit/ppo-regression-window-20260920`. This is an observation-only diagnostic, not another controller/hyperparameter candidate.
 
@@ -6,7 +6,7 @@ Registered in issue35 comment5754579087 before new window outcomes. Executed sou
 
 Native preflight passed on its first attempt: **111 unit/audit tests**, **7 ordinary balancing controls**, **9 ordinary learning controls**, strict Clippy, formatting and protected-source restoration. Ten heavy audit endpoints were ignored in the ordinary unit pass; the window endpoint is invoked separately by the two replay jobs. Two historical heavy integration endpoints and the production platform/browser matrix were not rerun.
 
-The most recent child-job check shows seed41006 replay executing and seed41004 queued. Neither completed replay artifact has been independently verified, and no per-update drop or independent before/after return result is claimed. A passing native harness is not evidence of improved control. Documentation-only commits do not launch duplicate measurements.
+**Both seed41006 and seed41004 replay jobs are now executing**, after verifying their immutable inputs. Neither completed replay artifact has been independently verified, and no new per-update drop or independent before/after return result is claimed. A passing native harness is not evidence of improved control. Documentation-only commits do not launch duplicate measurements.
 
 ## Exact historical replay
 
@@ -34,10 +34,12 @@ Actual build artifact10619877204, SHA256 `969e49d56acdd71bfefdede8cbac4b8b4a79d6
 
 The prepared offline suite passes **109 tests**, including inherited target/physics/derivative checks and new chronology,selection,tie,missing-data,random-domain,paired-effect and failure-accounting controls. Running the updated batch reconstruction in pieces on the OLD41004/41006 archived updates reproduces the inherited numerical results exactly. These compatibility tests add no simulator or training interactions and do not supply new window measurements.
 
-With only the build ZIP present, the verifier explicitly reports both replay artifacts missing, exits2 and emits no controller scores. It is not reporting a failed controller or completed experiment. The prepared verifier checks source hashes, historical update/checkpoint/endpoint reproduction, every window target and optimizer transaction, exact selection and independent-pair identities, all exported evaluation physics/rewards and full-batch surrogate/KL/trajectory-source accounting. It does not regenerate unexported Adam moments, gradients or missing trajectories.
+With only the current build ZIP present, the verifier explicitly reports both replay artifacts missing, exits2 and emits no controller scores. It is not reporting a failed controller or completed experiment. The prepared verifier checks source hashes, historical update/checkpoint/endpoint reproduction, every window target and optimizer transaction, exact selection and independent-pair identities, all exported evaluation physics/rewards and full-batch surrogate/KL/trajectory-source accounting. It does not regenerate unexported Adam moments, gradients or missing trajectories.
+
+The progress package contains the actual current build and the unchanged predecessor build, allowing source-isolation checks without retrieving a separate archive. It includes the prepared analysis/tests and explicit missing-data status, not fabricated window outcomes. Offline commands do not execute native code, contact a network, run the simulator or train.
 
 ## Bounds and disposition
 
 Per replayed history:4224 original updates,2,162,688 main interactions,36,765,696 supplemental interactions and at most17,301,504 cutoff-future interactions. Historical-window evaluation has18,624 episodes and selected-update independent evaluation1,536, separately counted. Generic preflight/control interactions are additional. This is reconstruction of two existing histories, not new successful candidate learning, an efficiency result or hardware qualification.
 
-Production gamma0.99/lambda0.95,reward,normalization,weights,PR38,master,deployment and fallback remain unchanged. No merge or controller adoption. The preceding support1024 rejection remains in force. Current progress establishes a working native diagnostic and submitted replay; the damaging transaction has not yet been measured and verified.
+Production gamma0.99/lambda0.95,reward,normalization,weights,PR38,master,deployment and fallback remain unchanged. No merge or controller adoption. The preceding support1024 rejection remains in force. Current progress establishes a working native diagnostic and two executing replays; the damaging transaction has not yet been measured and verified.
