@@ -26,9 +26,11 @@ jobs:
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
 
-      - name: Verify lockfile is current
+      - name: Verify committed lockfile matches the manifests
         run: |
-          cargo generate-lockfile
+          # Regenerating the lockfile upgrades unrelated compatible dependencies.
+          # --locked instead fails if the committed resolution needs an update.
+          cargo metadata --locked --format-version 1 > /dev/null
           git diff --exit-code -- Cargo.lock
 
       - name: Audit Rust dependencies
