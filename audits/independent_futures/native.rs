@@ -70,9 +70,11 @@ fn stop_boundaries(expected_streams: usize) -> Vec<Vec<usize>> {
 
 fn f32_values(bytes: &[u8]) -> Vec<f32> {
     assert_eq!(bytes.len(), 4545 * 4, "unexpected network snapshot size");
-    let values = bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+    let (chunks, remainder) = bytes.as_chunks::<4>();
+    assert!(remainder.is_empty(), "network bytes are not f32-aligned");
+    let values = chunks
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     assert_eq!(values.len(), 4545);
     assert!(values.iter().all(|value| value.is_finite()));
