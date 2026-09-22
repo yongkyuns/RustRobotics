@@ -145,6 +145,7 @@ jobs:
           PY
       - name: Collect fixed-policy independent futures
         run: |
+          chmod +x "$FUTURE_BUILD/runner"
           endpoint=$(cat "$FUTURE_BUILD/endpoint.txt")
           "$FUTURE_BUILD/runner" "$endpoint" --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$FUTURE_OUT/execution.log"
           grep -F "INDEPENDENT FUTURES COMPLETE" "$FUTURE_OUT/execution.log"
