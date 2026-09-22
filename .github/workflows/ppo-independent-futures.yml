@@ -101,7 +101,7 @@ jobs:
           python-version: "3.12"
       - name: Verify immutable incoming policy and paired-credit reference
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$FUTURE_INPUT" "$FUTURE_OUT"
           python - <<'PY'
