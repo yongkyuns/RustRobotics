@@ -1,0 +1,209 @@
+name: PPO critic-baseline causality
+
+on:
+  push:
+    branches: ["audit/ppo-critic-baseline-causality-20260922"]
+    paths:
+      - ".github/workflows/ppo-critic-baseline-causality.yml"
+      - "audits/critic_baseline/**"
+
+concurrency:
+  group: ppo-critic-baseline-causality-20260922
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      CRITIC_BASELINE_BUILD: /tmp/critic-baseline-build
+      HORIZON_BUILD: /tmp/critic-baseline-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Attach baseline-only causal child and run native controls
+        run: |
+          mkdir -p "$CRITIC_BASELINE_BUILD"
+          python audits/critic_baseline/prepare.py 2>&1 | tee "$CRITIC_BASELINE_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$CRITIC_BASELINE_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$CRITIC_BASELINE_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$CRITIC_BASELINE_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export exact tested endpoint
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$CRITIC_BASELINE_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil,subprocess
+          from pathlib import Path
+          out=Path(os.environ["CRITIC_BASELINE_BUILD"])
+          rows=[json.loads(line) for line in (out/"build.jsonl").read_text().splitlines()]
+          bins=[r["executable"] for r in rows if r.get("reason")=="compiler-artifact" and r.get("executable") and r["target"]["name"]=="rust_robotics_train"]
+          assert len(bins)==1,bins
+          shutil.copyfile(bins[0],out/"runner");(out/"runner").chmod(0o755)
+          listed=subprocess.check_output([str(out/"runner"),"--list"]).decode().splitlines()
+          endpoints=[line.removesuffix(": test") for line in listed if line.endswith("::emit_critic_baseline_causality: test")]
+          assert len(endpoints)==1,endpoints
+          (out/"endpoint.txt").write_text(endpoints[0]+"\n")
+          PY
+          ldd "$CRITIC_BASELINE_BUILD/runner" > "$CRITIC_BASELINE_BUILD/linkage.txt"
+      - name: Preserve build evidence and restore protected source
+        if: always()
+        run: |
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ["CRITIC_BASELINE_BUILD"]);root.mkdir(parents=True,exist_ok=True)
+          (root/"manifest.json").write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file() and p.name!="manifest.json"},sort_keys=True,indent=2)+"\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: critic-baseline-build
+          path: /tmp/critic-baseline-build/
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CRITIC_BASELINE_BUILD: /tmp/critic-baseline-build
+      CRITIC_BASELINE_OUT: /tmp/critic-baseline-out
+      CRITIC_BASELINE_PRIOR: /tmp/critic-baseline-prior
+      CRITIC_BASELINE_VALUES: /tmp/critic-baseline-values.txt
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: critic-baseline-build
+          path: /tmp/critic-baseline-build
+      - name: Verify paired-credit source and prepare oracle baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$CRITIC_BASELINE_OUT" "$CRITIC_BASELINE_PRIOR"
+          python - <<'PY'
+          from pathlib import Path
+          import csv,hashlib,io,json,os,subprocess,zipfile,shutil
+
+          build=Path(os.environ["CRITIC_BASELINE_BUILD"])
+          for name,digest in json.loads((build/"manifest.json").read_text()).items():
+              assert hashlib.sha256((build/name).read_bytes()).hexdigest()==digest,name
+
+          raw=Path("/tmp/paired-credit-41006.zip")
+          with raw.open("wb") as f:
+              subprocess.run(["gh","api","repos/yongkyuns/RustRobotics/actions/artifacts/10638379259/zip"],stdout=f,check=True)
+          digest="65e071b04fa23f550a8be4cc306c05ccfe7d76eec0dfc6e7e1bab21cb3698ece"
+          assert hashlib.sha256(raw.read_bytes()).hexdigest()==digest
+
+          prior=Path(os.environ["CRITIC_BASELINE_PRIOR"])
+          out=Path(os.environ["CRITIC_BASELINE_OUT"])
+          with zipfile.ZipFile(raw) as z:
+              manifest=json.loads(z.read("manifest.json"))
+              assert set(z.namelist())==set(manifest)|{"manifest.json"}
+              for name,h in manifest.items():
+                  assert hashlib.sha256(z.read(name)).hexdigest()==h,name
+
+              for name in z.namelist():
+                  if name.startswith("reference/") and not name.endswith("/"):
+                      dest=prior/name.removeprefix("reference/")
+                      dest.parent.mkdir(parents=True,exist_ok=True)
+                      dest.write_bytes(z.read(name))
+
+              rows=list(csv.DictReader(io.StringIO(z.read("paired-credit.csv").decode())))
+              assert len(rows)==8192
+              values=[[None]*8 for _ in range(1024)]
+              for row in rows:
+                  i=int(row["row"]); d=int(row["draw"])
+                  assert 0<=i<1024 and 0<=d<8 and values[i][d] is None
+                  values[i][d]=float(row["v_estimate"])
+              means=[]
+              for row in values:
+                  assert all(v is not None for v in row)
+                  means.append(sum(row)/8.0)
+              Path(os.environ["CRITIC_BASELINE_VALUES"]).write_text("".join(f"{v:.17g}\n" for v in means))
+
+          shutil.copyfile(raw,out/"paired-credit-source.zip")
+          shutil.copyfile(os.environ["CRITIC_BASELINE_VALUES"],out/"oracle-values.txt")
+          (out/"source.json").write_text(json.dumps({
+              "artifact_id":10638379259,
+              "artifact_sha256":digest,
+              "source_run":35599815447,
+              "seed":41006,
+              "target_update":4140,
+              "draws_per_state":8,
+              "oracle_values":1024,
+              "candidate_training_continued":False
+          },sort_keys=True,indent=2)+"\n")
+          PY
+          chmod +x "$CRITIC_BASELINE_BUILD/runner"
+      - name: Replay exact harmful update and test baseline-only candidate
+        run: |
+          endpoint=$(cat "$CRITIC_BASELINE_BUILD/endpoint.txt")
+          "$CRITIC_BASELINE_BUILD/runner" "$endpoint" --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$CRITIC_BASELINE_OUT/execution.log"
+          grep -F "CRITIC BASELINE CAUSALITY COMPLETE 41006 4140" "$CRITIC_BASELINE_OUT/execution.log"
+      - name: Summarize fixed independent evaluation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import csv,json,os,collections
+          out=Path(os.environ["CRITIC_BASELINE_OUT"])
+          rows=list(csv.DictReader((out/"evaluation.csv").open()))
+          assert len(rows)==4608
+          summary={}
+          for arm in ["incoming","original","oracle-baseline"]:
+              arm_rows=[r for r in rows if r["arm"]==arm]
+              assert len(arm_rows)==1536
+              panels={}
+              for panel in ["reset-det","reset-stoch","outward-stoch"]:
+                  p=[r for r in arm_rows if r["panel"]==panel]
+                  assert len(p)==512
+                  endings=collections.Counter(r["ending"] for r in p)
+                  panels[panel]={
+                      "completed":sum(r["ending"]=="timeout" for r in p),
+                      "endings":dict(sorted(endings.items())),
+                      "mean_discounted":sum(float(r["discounted"]) for r in p)/512.0,
+                      "mean_steps":sum(int(r["steps"]) for r in p)/512.0
+                  }
+              summary[arm]=panels
+          (out/"summary.json").write_text(json.dumps(summary,sort_keys=True,indent=2)+"\n")
+          print(json.dumps(summary,sort_keys=True,indent=2))
+          PY
+      - name: Preserve all evidence
+        if: always()
+        run: |
+          mkdir -p "$CRITIC_BASELINE_OUT"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ["CRITIC_BASELINE_OUT"])
+          (root/"manifest.json").write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file() and p.name!="manifest.json"},sort_keys=True,indent=2)+"\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: critic-baseline-causality
+          path: /tmp/critic-baseline-out/
+          retention-days: 30
+          if-no-files-found: error
