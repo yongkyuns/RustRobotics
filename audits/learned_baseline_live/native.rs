@@ -243,7 +243,10 @@ fn emit_learned_baseline_live_step() {
                 "\"sham_exact\":true,\"evaluation_domain\":\"0x61000000\",",
                 "\"evaluation_records\":6144,\"evaluation_steps\":{evaluation_steps},",
                 "\"candidate_training_continued\":false}}\n"
-            )
+            ),
+            SEED = SEED,
+            TARGET = TARGET,
+            evaluation_steps = evaluation_steps,
         ),
     )
     .unwrap();
