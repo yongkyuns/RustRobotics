@@ -88,6 +88,10 @@ jobs:
       FUTURE_INPUT: /tmp/future-input
       FUTURE_OUT: /tmp/future-out
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - uses: actions/download-artifact@v4
         with:
           name: independent-futures-build
