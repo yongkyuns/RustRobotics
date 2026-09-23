@@ -1,0 +1,166 @@
+name: PPO bounded online critic pilot
+
+on:
+  push:
+    branches: ["audit/ppo-online-critic-20260923"]
+    paths:
+      - "audits/online_critic/**"
+      - ".github/workflows/ppo-online-critic.yml"
+
+concurrency:
+  group: ppo-online-critic-20260923
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      ONLINE_BUILD: /tmp/online-build
+      HORIZON_BUILD: /tmp/online-build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Prepare isolated child and qualify native controls
+        run: |
+          mkdir -p "$ONLINE_BUILD"
+          python -W error -m unittest discover -s audits/online_critic -p test_analyze.py -v 2>&1 | tee "$ONLINE_BUILD/python-tests.log"
+          python audits/online_critic/prepare.py 2>&1 | tee "$ONLINE_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$ONLINE_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$ONLINE_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$ONLINE_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export exact tested executable
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$ONLINE_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil,subprocess
+          from pathlib import Path
+          out=Path(os.environ['ONLINE_BUILD'])
+          messages=[json.loads(x) for x in (out/'build.jsonl').read_text().splitlines()]
+          bins=[r['executable'] for r in messages if r.get('reason')=='compiler-artifact' and r.get('executable') and r['target']['name']=='rust_robotics_train']
+          assert len(bins)==1,bins
+          shutil.copyfile(bins[0],out/'runner'); (out/'runner').chmod(0o755)
+          listing=subprocess.check_output([str(out/'runner'),'--list']).decode().splitlines()
+          endpoints=[x.removesuffix(': test') for x in listing if x.endswith('::emit_online_critic: test')]
+          assert len(endpoints)==1,endpoints
+          (out/'endpoint.txt').write_text(endpoints[0]+'\n')
+          PY
+          ldd "$ONLINE_BUILD/runner" > "$ONLINE_BUILD/linkage.txt"
+      - name: Restore protected files and preserve build evidence
+        if: always()
+        run: |
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['ONLINE_BUILD']);root.mkdir(parents=True,exist_ok=True)
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: online-critic-build
+          path: /tmp/online-build/
+          retention-days: 30
+          if-no-files-found: error
+
+  measure:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - seed: 41004
+            artifact: 10638943991
+            digest: d8a533e2c3ccc20f49cc65b536ebd18e00e9a1f6d2aace406f83986bcb983348
+          - seed: 41006
+            artifact: 10638379259
+            digest: 65e071b04fa23f550a8be4cc306c05ccfe7d76eec0dfc6e7e1bab21cb3698ece
+    env:
+      ONLINE_SEED: ${{ matrix.seed }}
+      ONLINE_OUT: /tmp/online-out
+      ONLINE_PRIOR: /tmp/online-prior
+      ONLINE_BUILD: /tmp/online-build
+      PRIOR_ARTIFACT: ${{ matrix.artifact }}
+      PRIOR_DIGEST: ${{ matrix.digest }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: online-critic-build
+          path: /tmp/online-build
+      - name: Verify executable and immutable original history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$ONLINE_OUT" "$ONLINE_PRIOR"
+          python - <<'PY'
+          import hashlib,json,os,subprocess,zipfile,shutil
+          from pathlib import Path
+          build=Path(os.environ['ONLINE_BUILD']);out=Path(os.environ['ONLINE_OUT']);prior=Path(os.environ['ONLINE_PRIOR'])
+          for name,digest in json.loads((build/'manifest.json').read_text()).items():
+              assert hashlib.sha256((build/name).read_bytes()).hexdigest()==digest,name
+          raw=out/'historical-source.zip'
+          with raw.open('wb') as f:
+              subprocess.run(['gh','api',f"repos/yongkyuns/RustRobotics/actions/artifacts/{os.environ['PRIOR_ARTIFACT']}/zip"],stdout=f,check=True)
+          assert hashlib.sha256(raw.read_bytes()).hexdigest()==os.environ['PRIOR_DIGEST']
+          with zipfile.ZipFile(raw) as z:
+              manifest=json.loads(z.read('manifest.json'))
+              assert len(z.namelist())==len(set(z.namelist()))
+              assert set(z.namelist())==set(manifest)|{'manifest.json'}
+              for name,digest in manifest.items():
+                  assert hashlib.sha256(z.read(name)).hexdigest()==digest,name
+                  if name.startswith('reference/'):
+                      dest=prior/name.removeprefix('reference/')
+                      assert '..' not in Path(name).parts
+                      dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(z.read(name))
+          shutil.copyfile(build/'commit.txt',out/'executable-commit.txt')
+          (out/'config.json').write_text(json.dumps({'protocol':5793892853,'seed':int(os.environ['ONLINE_SEED']),'prefix':4096,'end':4224,'arms':['baseline','extra-old-batch','extra-fresh'],'extra_steps':48,'extra_minibatch':256,'training_gamma':.995,'lambda':1,'support':1024,'evaluation_domain':'0x72000000','fresh_id_xor':'0x80000000','holdout_id_xor':'0x40000000','critic_optimizer_reset':False,'new_from_scratch_candidate':False},indent=2,sort_keys=True)+'\n')
+          PY
+          chmod +x "$ONLINE_BUILD/runner"
+      - name: Execute fixed online continuations
+        run: |
+          endpoint=$(cat "$ONLINE_BUILD/endpoint.txt")
+          "$ONLINE_BUILD/runner" "$endpoint" --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$ONLINE_OUT/execution.log"
+          grep -F "ONLINE CRITIC COMPLETE $ONLINE_SEED" "$ONLINE_OUT/execution.log"
+      - name: Verify and summarize all fixed outcomes
+        run: |
+          python "$ONLINE_BUILD/sources/audits/online_critic/analyze.py" "$ONLINE_OUT" 2>&1 | tee "$ONLINE_OUT/analysis.log"
+      - name: Preserve every result including failures
+        if: always()
+        run: |
+          mkdir -p "$ONLINE_OUT"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['ONLINE_OUT'])
+          (root/'manifest.json').write_text(json.dumps({str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'},indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: online-critic-${{ matrix.seed }}
+          path: /tmp/online-out/
+          retention-days: 30
+          if-no-files-found: error
