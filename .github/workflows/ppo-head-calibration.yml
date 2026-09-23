@@ -1,0 +1,88 @@
+name: PPO native output-layer calibration
+on:
+  push:
+    branches: ["audit/ppo-native-head-calibration-20260923"]
+    paths:
+      - "audits/head_calibration/**"
+      - ".github/workflows/ppo-head-calibration.yml"
+concurrency:
+  group: ppo-native-head-calibration-20260923
+  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OUT: /tmp/native-head-proof
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy,rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.5"
+      - name: Qualify dependency-free native kernel
+        run: |
+          mkdir -p "$OUT"
+          cp -r audits/head_calibration /tmp/head-audit-crate
+          cargo fmt --manifest-path /tmp/head-audit-crate/Cargo.toml
+          cargo fmt --manifest-path /tmp/head-audit-crate/Cargo.toml -- --check
+          cargo clippy --manifest-path /tmp/head-audit-crate/Cargo.toml --all-targets -- -D warnings 2>&1 | tee "$OUT/clippy.log"
+          cargo test --manifest-path /tmp/head-audit-crate/Cargo.toml --release 2>&1 | tee "$OUT/native-tests.log"
+          cargo build --manifest-path /tmp/head-audit-crate/Cargo.toml --release 2>&1 | tee "$OUT/build.log"
+          rustc -Vv > "$OUT/rustc.txt"
+          cp /tmp/head-audit-crate/target/release/head-runner "$OUT/runner"
+          mkdir -p "$OUT/source" "$OUT/formatted-source"
+          cp audits/head_calibration/* "$OUT/source/"
+          cp /tmp/head-audit-crate/*.rs /tmp/head-audit-crate/Cargo.* "$OUT/formatted-source/"
+          git rev-parse HEAD > "$OUT/commit.txt"
+          git diff --exit-code
+      - name: Install fixed reference stack
+        run: |
+          python -m pip install --disable-pip-version-check numpy==2.3.5
+          python -m pip install --disable-pip-version-check torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+      - name: Retrieve original frozen-policy evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/head-input
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10698150266/zip > /tmp/head-input/result.zip
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10697715468/zip > /tmp/head-input/build.zip
+          echo "795f94bdfbd7246a0ad99ac0d0c9b9085c364abad948b2532dab3b4c48b09b3d  /tmp/head-input/result.zip" | sha256sum -c -
+          echo "cceee910794ac637cb2e7ce4c01e976fb95635fb045fd383229683444913c1b7  /tmp/head-input/build.zip" | sha256sum -c -
+      - name: Compare both actual systems against independent augmented SVD
+        run: |
+          python -W error audits/head_calibration/verify.py "$OUT/runner" /tmp/head-input/result.zip /tmp/head-input/build.zip "$OUT/results" 2>&1 | tee "$OUT/verification.log"
+      - name: Preserve source and all completed evidence
+        if: always()
+        run: |
+          mkdir -p "$OUT/source"
+          cp audits/head_calibration/* "$OUT/source/"
+          cp .github/workflows/ppo-head-calibration.yml "$OUT/workflow.yml"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['OUT'])
+          manifest={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='manifest.json'}
+          (root/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-head-qualification
+          path: /tmp/native-head-proof/
+          retention-days: 30
+          if-no-files-found: error
