@@ -130,7 +130,9 @@ fn fit_online_value(s: &mut PpoTrainerSession, data: &ValueData, rng: &mut StdRn
     for _ in 0..steps / batches {
         let mut indices = (0..data.targets.len()).collect::<Vec<_>>();
         indices.shuffle(rng);
-        for chunk in indices.chunks_exact(ONLINE_BATCH) {
+        let (minibatches, remainder) = indices.as_chunks::<ONLINE_BATCH>();
+        assert!(remainder.is_empty());
+        for chunk in minibatches {
             let x = gather_observations(&data.observations, chunk);
             let y = gather_scalars(&data.targets, chunk);
             let values = s.critic.forward(obs_tensor::<AutodiffBackend>(&s.device, &x));
@@ -284,7 +286,7 @@ fn emit_online_critic() {
                 eval_steps += evaluate_online(&s, seed, arm, u, &dir, &mut eval);
                 eval.flush().unwrap();
             } else if u == witness { save_state(&s, &dir, u); }
-            if local % 16 == 0 { log.flush().unwrap(); println!("ONLINE CONTINUATION {seed} {arm} {local}"); }
+            if local.is_multiple_of(16) { log.flush().unwrap(); println!("ONLINE CONTINUATION {seed} {arm} {local}"); }
             assert_eq!(s.metrics.total_updates, u);
             assert_eq!(s.metrics.total_env_steps, u * 512);
         }
