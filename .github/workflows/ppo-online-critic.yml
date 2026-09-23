@@ -135,6 +135,42 @@ jobs:
                       dest=prior/name.removeprefix('reference/')
                       assert '..' not in Path(name).parts
                       dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(z.read(name))
+          # The paired-credit archive contains selected-witness checkpoints, not 4224.
+          # Recover the missing final pair from its original upstream support archive.
+          seed = int(os.environ['ONLINE_SEED'])
+          final_sources = {
+              41004: (10617114297, '8b2ab3740a20985b68ec2d4624f394ce17f1e2f13a4006385195762d6a27dc94'),
+              41006: (10617228922, '8e362b04389c36358f8b48177c19a8d8cc02447a090da90de8c8b85b79812d79'),
+          }
+          artifact, digest = final_sources[seed]
+          final_source = out / 'historical-final-source.zip'
+          with final_source.open('wb') as f:
+              subprocess.run(['gh', 'api', f'repos/yongkyuns/RustRobotics/actions/artifacts/{artifact}/zip'], stdout=f, check=True)
+          assert hashlib.sha256(final_source.read_bytes()).hexdigest() == digest
+          with zipfile.ZipFile(final_source) as z:
+              manifest = json.loads(z.read('manifest.json'))
+              assert len(z.namelist()) == len(set(z.namelist()))
+              assert set(z.namelist()) == set(manifest) | {'manifest.json'}
+              for name, expected in manifest.items():
+                  assert hashlib.sha256(z.read(name)).hexdigest() == expected, name
+              history = (prior / 'updates.csv').read_bytes().splitlines()
+              assert len(history) == 4225
+              assert z.read('updates.csv').splitlines()[:len(history)] == history
+              for cp in [0, 1024, 4096, 4128]:
+                  for kind in ['actor', 'critic']:
+                      name = f'{kind}-{cp}.bin'
+                      assert z.read(name) == (prior / name).read_bytes(), name
+              final = {f'{kind}-4224.bin': z.read(f'{kind}-4224.bin') for kind in ['actor', 'critic']}
+              for name, value in final.items():
+                  assert len(value) == 4545 * 4, name
+                  assert not (prior / name).exists() or (prior / name).read_bytes() == value, name
+              for name, value in final.items():
+                  (prior / name).write_bytes(value)
+          (out / 'final-reference-source.json').write_text(json.dumps({'artifact': artifact, 'sha256': digest, 'matched_historical_updates': 4224, 'final_checkpoint_hashes': {n: hashlib.sha256(v).hexdigest() for n, v in final.items()}}, indent=2, sort_keys=True) + '\n')
+          witness = 4137 if seed == 41004 else 4140
+          for cp in [0, 1024, 4096, 4128, witness - 1, witness, 4224]:
+              for kind in ['actor', 'critic']:
+                  assert (prior / f'{kind}-{cp}.bin').stat().st_size == 4545 * 4
           shutil.copyfile(build/'commit.txt',out/'executable-commit.txt')
           (out/'config.json').write_text(json.dumps({'protocol':5793892853,'seed':int(os.environ['ONLINE_SEED']),'prefix':4096,'end':4224,'arms':['baseline','extra-old-batch','extra-fresh'],'extra_steps':48,'extra_minibatch':256,'training_gamma':.995,'lambda':1,'support':1024,'evaluation_domain':'0x72000000','fresh_id_xor':'0x80000000','holdout_id_xor':'0x40000000','critic_optimizer_reset':False,'new_from_scratch_candidate':False},indent=2,sort_keys=True)+'\n')
           PY
