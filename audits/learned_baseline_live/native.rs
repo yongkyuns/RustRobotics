@@ -64,7 +64,7 @@ fn run_candidate(
     );
     writeln!(
         diagnostic,
-        "row,return,current_value,learned_value,current_raw,learned_raw,current_norm,learned_norm"
+        "row,return,current_value,learned_value,return_minus_current_value,learned_raw,current_norm,learned_norm"
     )
     .unwrap();
     for row in 0..1024 {
@@ -164,22 +164,28 @@ fn emit_learned_baseline_live_step() {
     compare_weights(&session, &out, &prior, TARGET);
     let original = clone_session(&session);
 
+    // Bind the actual collection/target/optimizer records, including union.json's
+    // raw and normalized advantages, to the immutable historical transaction.
+    let compared = compare_tree(&original_dir, &prior.join(format!("update-{TARGET}")));
+    assert!(compared > 0, "no historical transaction files compared");
+    fs::write(out.join("historical-files-compared.txt"), format!("{compared}\n")).unwrap();
+    println!("LEARNED BASELINE HISTORICAL FILES IDENTICAL {compared}");
+
     let current_values = batch
         .observations
         .iter()
         .map(|observation| predict_value(&incoming, *observation))
         .collect::<Vec<_>>();
+    // Diagnostic only: R = fl(A + V), so fl(R - V) need not recover A's bits.
+    // Keep the collector's original normalized advantages for the sham and logs.
+    // Each registered candidate still uses normalize(original R - learned V).
     let current_raw = batch
         .returns
         .iter()
         .zip(&current_values)
         .map(|(ret, value)| *ret - *value)
         .collect::<Vec<_>>();
-    let current_norm = normalize(&current_raw);
-    assert_eq!(
-        current_norm, batch.advantages,
-        "recomputed historical advantages differ"
-    );
+    let current_norm = batch.advantages.clone();
 
     let sham = fit_from(&incoming, &original, &batch, &out.join("sham-optimizer"));
     assert_eq!(
@@ -262,4 +268,33 @@ fn fixed_value_parser_rejects_wrong_size() {
     fs::write(&path, [0_u8; 8]).unwrap();
     assert!(std::panic::catch_unwind(|| read_fixed_values(&path)).is_err());
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn rounded_return_is_not_an_exact_advantage_archive() {
+    // Exact row-0 bits from the original update4140 artifact.
+    let advantage = f32::from_bits(0x4010_0f8d);
+    let value = f32::from_bits(0x4343_d10a);
+    let ret = advantage + value;
+    assert_eq!(ret.to_bits(), 0x4346_1148);
+    assert_ne!((ret - value).to_bits(), advantage.to_bits());
+    assert_eq!((ret - value) + value, ret);
+}
+
+#[test]
+fn historical_file_binding_rejects_changed_bytes() {
+    let root = std::env::temp_dir().join(format!(
+        "rustrobotics-learned-historical-binding-{}",
+        std::process::id()
+    ));
+    let actual = root.join("actual");
+    let expected = root.join("expected");
+    fs::create_dir_all(&actual).unwrap();
+    fs::create_dir_all(&expected).unwrap();
+    fs::write(actual.join("union.json"), b"captured normalized advantages").unwrap();
+    fs::write(expected.join("union.json"), b"captured normalized advantages").unwrap();
+    assert_eq!(compare_tree(&actual, &expected), 1);
+    fs::write(actual.join("union.json"), b"recomputed rounded advantages").unwrap();
+    assert!(std::panic::catch_unwind(|| compare_tree(&actual, &expected)).is_err());
+    fs::remove_dir_all(root).unwrap();
 }
