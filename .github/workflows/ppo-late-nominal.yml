@@ -1,0 +1,131 @@
+name: PPO late nominal causal diagnostic
+on:
+  push:
+    branches: ["audit/ppo-late-nominal-20260923"]
+    paths: ["audits/late_nominal/**", ".github/workflows/ppo-late-nominal.yml"]
+concurrency:
+  group: ppo-late-nominal-20260923
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      LATE_BUILD: /tmp/late-build
+      LATE_TRAINER_FIXTURE: /tmp/late-build/trainer-before-late.rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Attach observations and qualify unchanged learner
+        run: |
+          python audits/late_nominal/prepare.py
+          python -W error -m unittest discover -s audits/late_nominal -p test_evidence.py -v 2>&1 | tee "$LATE_BUILD/python-tests.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$LATE_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$LATE_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$LATE_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export the tested executable
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$LATE_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil,subprocess
+          from pathlib import Path
+          out=Path(os.environ['LATE_BUILD'])
+          messages=[json.loads(s) for s in (out/'build.jsonl').read_text().splitlines()]
+          bins=[r['executable'] for r in messages if r.get('reason')=='compiler-artifact' and r.get('executable') and r['target']['name']=='rust_robotics_train']
+          assert len(bins)==1
+          shutil.copyfile(bins[0],out/'runner');(out/'runner').chmod(0o755)
+          names=subprocess.check_output([str(out/'runner'),'--list']).decode().splitlines()
+          endpoints=[v.removesuffix(': test') for v in names if v.endswith('::emit_late_nominal: test')]
+          assert len(endpoints)==1
+          (out/'endpoint.txt').write_text(endpoints[0]+'\n')
+          PY
+      - name: Restore production sources and preserve build evidence
+        if: always()
+        run: |
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          mkdir -p "$LATE_BUILD"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          p=Path(os.environ['LATE_BUILD'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(p.rglob('*')) if f.is_file() and f.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: late-nominal-build
+          path: /tmp/late-build/
+          retention-days: 30
+          if-no-files-found: error
+  measure:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      LATE_OUT: /tmp/late-out
+      LATE_PRIOR: /tmp/late-prior
+      LATE_BUILD: /tmp/late-build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: late-nominal-build
+          path: /tmp/late-build
+      - name: Verify executable and complete historical inputs before replay
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$LATE_OUT" "$LATE_PRIOR"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          p=Path(os.environ['LATE_BUILD'])
+          for n,h in json.loads((p/'manifest.json').read_text()).items():
+              assert hashlib.sha256((p/n).read_bytes()).hexdigest()==h,n
+          PY
+          gh api repos/yongkyuns/RustRobotics/actions/artifacts/10752868007/zip > /tmp/late-source.zip
+          python "$LATE_BUILD/sources/audits/late_nominal/evidence.py" prepare /tmp/late-source.zip "$LATE_PRIOR" | tee "$LATE_OUT/input-receipt.json"
+          cp "$LATE_BUILD/commit.txt" "$LATE_OUT/executable-commit.txt"
+          chmod +x "$LATE_BUILD/runner"
+      - name: Localize and execute the fixed baseline-only test
+        run: |
+          "$LATE_BUILD/runner" "$(cat "$LATE_BUILD/endpoint.txt")" --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$LATE_OUT/execution.log"
+          grep -F 'LATE NOMINAL COMPLETE 41004' "$LATE_OUT/execution.log"
+      - name: Account for all fixed outcomes without reselecting
+        run: |
+          python "$LATE_BUILD/sources/audits/late_nominal/evidence.py" summarize "$LATE_OUT" | tee "$LATE_OUT/analysis.log"
+      - name: Preserve results even on failure
+        if: always()
+        run: |
+          mkdir -p "$LATE_OUT"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          p=Path(os.environ['LATE_OUT'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(p.rglob('*')) if f.is_file() and f.name!='manifest.json'},sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: late-nominal-result
+          path: /tmp/late-out/
+          retention-days: 30
+          if-no-files-found: error
