@@ -23,18 +23,33 @@ fn read_fixed_values(path: &Path) -> Vec<f32> {
     values
 }
 
+/// Identical, borrowed inputs shared by both baseline-only interventions.
+struct CandidateReplay<'a> {
+    incoming: &'a PpoTrainerSession,
+    original: &'a PpoTrainerSession,
+    batch: &'a RolloutBatch,
+    current_values: &'a [f32],
+    current_raw: &'a [f32],
+    current_norm: &'a [f32],
+    original_dir: &'a Path,
+    out: &'a Path,
+}
+
 fn run_candidate(
     label: &str,
     values: &[f32],
-    incoming: &PpoTrainerSession,
-    original: &PpoTrainerSession,
-    batch: &RolloutBatch,
-    current_values: &[f32],
-    current_raw: &[f32],
-    current_norm: &[f32],
-    original_dir: &Path,
-    out: &Path,
+    replay: &CandidateReplay<'_>,
 ) -> PpoTrainerSession {
+    let CandidateReplay {
+        incoming,
+        original,
+        batch,
+        current_values,
+        current_raw,
+        current_norm,
+        original_dir,
+        out,
+    } = *replay;
     assert_eq!(values.len(), 1024);
     let raw = batch
         .returns
@@ -175,30 +190,18 @@ fn emit_learned_baseline_live_step() {
 
     let uniform_values = read_fixed_values(&uniform_path);
     let balanced_values = read_fixed_values(&balanced_path);
-    let uniform = run_candidate(
-        "learned-uniform",
-        &uniform_values,
-        &incoming,
-        &original,
-        &batch,
-        &current_values,
-        &current_raw,
-        &current_norm,
-        &original_dir,
-        &out,
-    );
-    let balanced = run_candidate(
-        "learned-early-balanced",
-        &balanced_values,
-        &incoming,
-        &original,
-        &batch,
-        &current_values,
-        &current_raw,
-        &current_norm,
-        &original_dir,
-        &out,
-    );
+    let replay = CandidateReplay {
+        incoming: &incoming,
+        original: &original,
+        batch: &batch,
+        current_values: &current_values,
+        current_raw: &current_raw,
+        current_norm: &current_norm,
+        original_dir: &original_dir,
+        out: &out,
+    };
+    let uniform = run_candidate("learned-uniform", &uniform_values, &replay);
+    let balanced = run_candidate("learned-early-balanced", &balanced_values, &replay);
     assert_eq!(
         fingerprint(&incoming),
         incoming_fingerprint,
