@@ -1,0 +1,155 @@
+name: PPO reset-transient actor coverage
+'on':
+  push:
+    branches: [audit/ppo-reset-coverage-20260924]
+    paths: ["audits/reset_coverage/**", ".github/workflows/ppo-reset-coverage.yml"]
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: ppo-reset-coverage-20260924
+  cancel-in-progress: false
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      HORIZON_BUILD: /tmp/coverage-build
+      COVERAGE_REPEAT_FIXTURE: /tmp/coverage-build/repeated-before-coverage.rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Qualify original path and scoped augmentation
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          python audits/reset_coverage/prepare.py 2>&1 | tee "$HORIZON_BUILD/preparation.log"
+          python -W error -m unittest discover -s audits/reset_coverage -p test_evidence.py -v 2>&1 | tee "$HORIZON_BUILD/python-tests.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$HORIZON_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$HORIZON_BUILD/native-tests.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$HORIZON_BUILD/integration.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export exact qualified executable
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$HORIZON_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil,subprocess
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_BUILD'])
+          messages=[json.loads(x) for x in (root/'build.jsonl').read_text().splitlines()]
+          bins=[m['executable'] for m in messages if m.get('reason')=='compiler-artifact' and m.get('executable') and m['target']['name']=='rust_robotics_train']
+          assert len(bins)==1,bins
+          shutil.copyfile(bins[0],root/'runner');(root/'runner').chmod(0o755)
+          entries=subprocess.check_output([str(root/'runner'),'--list']).decode().splitlines()
+          endpoints=[x.removesuffix(': test') for x in entries if x.endswith('::emit_reset_coverage: test')]
+          assert len(endpoints)==1,endpoints
+          (root/'endpoint.txt').write_text(endpoints[0]+'\n')
+          PY
+      - name: Restore protected sources and retain evidence
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_BUILD"
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python audits/reset_coverage/evidence.py manifest "$HORIZON_BUILD"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reset-coverage-build
+          path: /tmp/coverage-build/
+          retention-days: 30
+          if-no-files-found: error
+  measure:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        seed: [41001, 41002, 41004, 41006]
+        arm: [extra-ordinary, extra-transient]
+    env:
+      COVERAGE_SEED: ${{ matrix.seed }}
+      COVERAGE_ARM: ${{ matrix.arm }}
+      COVERAGE_OUT: /tmp/coverage-out
+      COVERAGE_BUILD: /tmp/coverage-build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: reset-coverage-build
+          path: /tmp/coverage-build
+      - name: Verify executable and source manifest
+        run: |
+          mkdir -p "$COVERAGE_OUT"
+          python - <<'PY'
+          import hashlib,json,os,shutil
+          from pathlib import Path
+          root=Path(os.environ['COVERAGE_BUILD']);out=Path(os.environ['COVERAGE_OUT'])
+          m=json.loads((root/'manifest.json').read_text())
+          assert set(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())==set(m)|{'manifest.json'}
+          for n,h in m.items():assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,n
+          for n in ['commit.txt','manifest.json','endpoint.txt']:shutil.copyfile(root/n,out/('build-'+n))
+          PY
+          chmod +x "$COVERAGE_BUILD/runner"
+      - name: Execute fixed from-scratch comparison arm
+        run: |
+          "$COVERAGE_BUILD/runner" "$(cat "$COVERAGE_BUILD/endpoint.txt")" --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$COVERAGE_OUT/execution.log"
+          grep -F "RESET COVERAGE COMPLETE $COVERAGE_SEED $COVERAGE_ARM" "$COVERAGE_OUT/execution.log"
+      - name: Account for every outcome and detailed fitting record
+        run: |
+          python "$COVERAGE_BUILD/sources/audits/reset_coverage/evidence.py" single "$COVERAGE_OUT" --output "$COVERAGE_OUT/summary.json" 2>&1 | tee "$COVERAGE_OUT/analysis.log"
+      - name: Preserve partial or completed evidence
+        if: always()
+        run: |
+          mkdir -p "$COVERAGE_OUT"
+          python "$COVERAGE_BUILD/sources/audits/reset_coverage/evidence.py" manifest "$COVERAGE_OUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reset-coverage-run-${{ matrix.seed }}-${{ matrix.arm }}
+          path: /tmp/coverage-out/
+          retention-days: 30
+          if-no-files-found: error
+  compare:
+    needs: [preflight, measure]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: reset-coverage-run-*
+          path: /tmp/cohort
+      - uses: actions/download-artifact@v4
+        with:
+          name: reset-coverage-build
+          path: /tmp/coverage-build
+      - name: Require all four paired training seeds
+        run: |
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          for root in [Path('/tmp/coverage-build'),*Path('/tmp/cohort').glob('reset-coverage-run-*')]:
+              m=json.loads((root/'manifest.json').read_text())
+              for n,h in m.items():assert hashlib.sha256((root/n).read_bytes()).hexdigest()==h,(root,n)
+          PY
+          python /tmp/coverage-build/sources/audits/reset_coverage/evidence.py combine /tmp/cohort/reset-coverage-run-* --output /tmp/cohort-result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reset-coverage-comparison
+          path: /tmp/cohort-result.json
+          retention-days: 30
+          if-no-files-found: error
