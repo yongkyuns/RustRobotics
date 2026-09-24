@@ -1,0 +1,102 @@
+name: PPO reset-coverage failure replay
+'on':
+  push:
+    branches: [audit/ppo-reset-failure-replay-20260924]
+    paths: ['audits/reset_coverage_replay/**', '.github/workflows/ppo-reset-failure-replay.yml']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: ppo-reset-failure-replay-20260924
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      HORIZON_BUILD: /tmp/replay-build
+      REPLAY_INPUT: /tmp/replay-input
+      REPLAY_OUT: /tmp/replay-out
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: reset-coverage-*
+          path: /tmp/replay-input
+          run-id: 36021389833
+          github-token: ${{ github.token }}
+      - name: Verify original artifacts and require loss-exhaustive requests
+        run: |
+          mkdir -p "$REPLAY_OUT" "$HORIZON_BUILD"
+          python audits/reset_coverage_replay/analysis.py prepare "$REPLAY_INPUT" "$REPLAY_OUT" 2>&1 | tee "$REPLAY_OUT/preparation.log"
+          python -W error -m unittest discover -s audits/reset_coverage_replay -p test_analysis.py -v 2>&1 | tee "$REPLAY_OUT/python-tests.log"
+          python "$REPLAY_INPUT/reset-coverage-build/sources/audits/reset_coverage/evidence.py" combine "$REPLAY_INPUT"/reset-coverage-run-* --output "$REPLAY_OUT/original-recomputed.json" > "$REPLAY_OUT/original-analysis.log"
+          cmp "$REPLAY_OUT/original-recomputed.json" "$REPLAY_INPUT/reset-coverage-comparison/cohort-result.json"
+      - name: Qualify read-only snapshot loader and unchanged native controls
+        run: |
+          python audits/reset_coverage_replay/prepare.py 2>&1 | tee "$HORIZON_BUILD/preparation.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$HORIZON_BUILD/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$HORIZON_BUILD/native-tests.log"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Export qualified executable and exact replay endpoint
+        run: |
+          cargo test --locked --release -p rust_robotics_train --lib --no-run --message-format=json > "$HORIZON_BUILD/build.jsonl"
+          python - <<'PY'
+          import json,os,shutil,subprocess
+          from pathlib import Path
+          root=Path(os.environ['HORIZON_BUILD'])
+          records=[json.loads(s) for s in (root/'build.jsonl').read_text().splitlines()]
+          bins=[r['executable'] for r in records if r.get('reason')=='compiler-artifact' and r.get('executable') and r['target']['name']=='rust_robotics_train']
+          assert len(bins)==1,bins
+          shutil.copyfile(bins[0],root/'runner');(root/'runner').chmod(0o755)
+          entries=subprocess.check_output([str(root/'runner'),'--list']).decode().splitlines()
+          endpoints=[s.removesuffix(': test') for s in entries if s.endswith('::emit_reset_failure_replay: test')]
+          assert len(endpoints)==1,endpoints
+          (root/'endpoint.txt').write_text(endpoints[0]+'\n')
+          (root/'replay-commit.txt').write_bytes(subprocess.check_output(['git','rev-parse','HEAD']))
+          PY
+      - name: Replay every requested actor without any training updates
+        run: |
+          "$HORIZON_BUILD/runner" "$(cat "$HORIZON_BUILD/endpoint.txt")" --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$REPLAY_OUT/native.log"
+          grep -F 'RESET FAILURE REPLAY COMPLETE' "$REPLAY_OUT/native.log"
+      - name: Require exact outcomes and byte-identical existing control traces
+        run: |
+          python audits/reset_coverage_replay/analysis.py verify "$REPLAY_INPUT" "$REPLAY_OUT" 2>&1 | tee "$REPLAY_OUT/verification.log"
+      - name: Restore protected sources and retain complete provenance
+        if: always()
+        run: |
+          mkdir -p "$HORIZON_BUILD" "$REPLAY_OUT"
+          git restore -- rust_robotics_train/src/trainer.rs rust_robotics_train/src/ppo_rollout_pool.rs
+          git diff --exit-code 4739f370558b9443708c920ac30614f86e3c07bb -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          cp .github/workflows/ppo-reset-failure-replay.yml "$HORIZON_BUILD/replay-workflow.yml"
+          python audits/reset_coverage/evidence.py manifest "$HORIZON_BUILD"
+          python audits/reset_coverage/evidence.py manifest "$REPLAY_OUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reset-failure-replay-build
+          path: /tmp/replay-build
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reset-failure-replay-results
+          path: /tmp/replay-out
+          retention-days: 30
+          if-no-files-found: error
