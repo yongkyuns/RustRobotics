@@ -12,7 +12,6 @@
 //! - divergence detection and particle reset around observations
 //! - adaptive smoothing of the final estimate during recovery
 use super::*;
-use nalgebra::{ArrayStorage, Matrix, U1, U100, U4};
 
 /// Maximum observation range
 pub const MAX_RANGE: f32 = 60.0;
@@ -21,8 +20,8 @@ pub const MAX_RANGE: f32 = 60.0;
 pub const NP: usize = 100;
 pub const NTh: f32 = NP as f32 / 2.0;
 
-pub type PX = Matrix<f32, U4, U100, ArrayStorage<f32, 4, 100>>;
-pub type PW = Matrix<f32, U1, U100, ArrayStorage<f32, 1, 100>>;
+pub type PX = Mat<4, NP>;
+pub type PW = Mat<1, NP>;
 
 /// Generate random float between [-1.0, 1.0]
 pub fn rand() -> f32 {
@@ -92,13 +91,13 @@ fn observation_with_rng<R: rand::Rng + ?Sized>(
         let d = hypot(dx, dy);
         if d <= max_range {
             let dn = d + rand_with_rng(rng) * sqrt(Q_sim[0]);
-            let zi = Vector3::new(dn, rf_id.x(), rf_id.y());
+            let zi = vector![dn, rf_id.x(), rf_id.y()];
             z.push(zi);
         }
     }
     let ud1 = u.x() + rand_with_rng(rng) * sqrt(R_sim.get_diagonal(0));
     let ud2 = u.y() + rand_with_rng(rng) * sqrt(R_sim.get_diagonal(1));
-    let ud = Vector2::new(ud1, ud2);
+    let ud = vector![ud1, ud2];
 
     *xd = motion_model(*xd, ud, dt);
 
@@ -147,13 +146,13 @@ fn observation_from_state_with_rng<R: rand::Rng + ?Sized>(
         let d = hypot(dx, dy);
         if d <= max_range {
             let dn = d + rand_with_rng(rng) * sqrt(Q_sim[0]);
-            let zi = Vector3::new(dn, rf_id.x(), rf_id.y());
+            let zi = vector![dn, rf_id.x(), rf_id.y()];
             z.push(zi);
         }
     }
     let ud1 = u.x() + rand_with_rng(rng) * sqrt(R_sim.get_diagonal(0));
     let ud2 = u.y() + rand_with_rng(rng) * sqrt(R_sim.get_diagonal(1));
-    let ud = Vector2::new(ud1, ud2);
+    let ud = vector![ud1, ud2];
 
     *xd = motion_model(*xd, ud, dt);
 
@@ -183,9 +182,8 @@ pub fn gauss_likelihood(x: f32, sigma: f32) -> f32 {
 pub fn calc_covariance(x_est: &Vector4, px: &PX, pw: &PW) -> Matrix3 {
     let mut cov = zeros!(3, 3);
     for i in 0..NP {
-        let dx = px.column(i) - x_est;
-        let dx = dx.rows(0, 3);
-        cov += pw[i] * (dx * dx.transpose());
+        let dx = Vector3::from_fn(|row, _| px[(row, i)] - x_est[row]);
+        cov += (dx * dx.transpose()) * pw[i];
     }
     cov *= 1. / (vector![1_f32] - pw * pw.transpose())[0];
     cov
@@ -326,7 +324,7 @@ fn pf_localization_with_rng<R: rand::Rng + ?Sized>(
     }
 
     for ip in 0..NP {
-        let x = px.column(ip).into_owned();
+        let x = Vector4::from_fn(|row, _| px[(row, ip)]);
         let mut w = pw[(0, ip)];
 
         let ud1 = u[0] + rand_with_rng(rng) * sqrt(R[(0, 0)]);
@@ -341,11 +339,11 @@ fn pf_localization_with_rng<R: rand::Rng + ?Sized>(
             let dz = pre_z - zi.d();
             w *= robust_likelihood(dz, sqrt(Q[(0, 0)]));
         }
-        px.set_column(ip, &x);
+        px.as_mut_slice()[ip * 4..(ip + 1) * 4].copy_from_slice(x.as_slice());
         pw[ip] = w;
     }
 
-    let w_sum = pw.sum();
+    let w_sum = pw.iter().sum::<f32>();
 
     // Check for divergence: if weight sum is too small, reset particles
     if w_sum < DIVERGENCE_THRESHOLD && has_observations {
@@ -363,8 +361,8 @@ fn pf_localization_with_rng<R: rand::Rng + ?Sized>(
     let x_new = *px * pw.transpose();
 
     // Compute particle spread (standard deviation of x,y positions)
-    let mean_x = px.row(0).mean();
-    let mean_y = px.row(1).mean();
+    let mean_x = px.row(0).iter().copied().sum::<f32>() / NP as f32;
+    let mean_y = px.row(1).iter().copied().sum::<f32>() / NP as f32;
     let var_x: f32 = px.row(0).iter().map(|x| (x - mean_x).powi(2)).sum::<f32>() / NP as f32;
     let var_y: f32 = px.row(1).iter().map(|y| (y - mean_y).powi(2)).sum::<f32>() / NP as f32;
     let particle_spread = (var_x + var_y).sqrt();
@@ -415,7 +413,7 @@ fn reset_particles_with_rng<R: rand::Rng + ?Sized>(
             x_est[2] + rand_with_rng(rng) * 0.3, // Keep approximate heading with small noise
             x_est[3]                             // Keep velocity
         ];
-        px.set_column(ip, &new_particle);
+        px.as_mut_slice()[ip * 4..(ip + 1) * 4].copy_from_slice(new_particle.as_slice());
     }
     *pw = ones!(1, NP) * (1. / NP as f32);
 }
@@ -446,7 +444,8 @@ fn re_sampling_with_rng<R: rand::Rng + ?Sized>(px: &mut PX, pw: &mut PW, rng: &m
         while *sample > w_cum[ind] && ind < NP - 1 {
             ind += 1;
         }
-        px_new.set_column(ip, &px.column(ind));
+        px_new.as_mut_slice()[ip * 4..(ip + 1) * 4]
+            .copy_from_slice(&px.as_slice()[ind * 4..(ind + 1) * 4]);
     }
     *px = px_new;
     *pw = ones!(1, NP) * (1. / NP as f32);

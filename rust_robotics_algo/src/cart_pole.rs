@@ -2,7 +2,7 @@
 //! The linear `inverted_pendulum::Model` remains a controller prediction model.
 use crate::{
     inverted_pendulum::{g, Model},
-    Vector4,
+    vector, Vector4,
 };
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +63,7 @@ impl CartPoleParameters {
         let acceleration = (force_n
             + self.pole_mass_kg * sin * (g * cos - self.length_m * omega * omega))
             / denominator;
-        Vector4::new(
+        vector!(
             state[1],
             acceleration,
             omega,
@@ -112,11 +112,11 @@ mod tests {
             let mut x = Vector4::zeros();
             x[i] = 1e-4;
             let numeric = (p.derivative(x, 0.0) - p.derivative(-x, 0.0)) / 2e-4;
-            let mut expected = a.column(i).into_owned();
+            let mut expected = Vector4::from_fn(|row, _| a[(row, i)]);
             expected[i] -= 1.0;
             assert!((numeric - expected).norm() < 1e-4);
         }
-        assert!((p.derivative(Vector4::zeros(), 1.0) - b.column(0)).norm() < 1e-6);
+        assert!((p.derivative(Vector4::zeros(), 1.0) - b).norm() < 1e-6);
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod tests {
         };
         // Independent implicit equations from T-U, rather than the explicit implementation.
         for angle in [-1.2_f32, -0.4, 0.0, 0.7, 2.5] {
-            let x = Vector4::new(0.3, -0.6, angle, 1.1);
+            let x = vector!(0.3, -0.6, angle, 1.1);
             let force = 2.3;
             let d = p.derivative(x, force);
             let (m, big_m, l) = (p.pole_mass_kg, p.cart_mass_kg, p.length_m);
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn rk4_refines_toward_independent_small_steps() {
         let p = CartPoleParameters::default();
-        let start = Vector4::new(0.2, -0.1, 0.6, 0.7);
+        let start = vector!(0.2, -0.1, 0.6, 0.7);
         let integrate = |steps: usize| {
             let mut x = start;
             for _ in 0..steps {

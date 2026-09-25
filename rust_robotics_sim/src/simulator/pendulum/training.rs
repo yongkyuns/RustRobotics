@@ -177,7 +177,7 @@ mod tests {
     fn replacing_a_policy_resets_before_the_new_worker_can_publish() {
         let mut sim = InvertedPendulum::default();
         sim.start_training();
-        sim.state = Vector4::new(3.0, 5.0, 0.8, 6.0);
+        sim.state = Vector4::from_columns([[3.0, 5.0, 0.8, 6.0]]);
         sim.visual_episode_steps = 23;
         sim.model.l_bar = 0.7;
         sim.validate_training_environment();

@@ -33,7 +33,7 @@ fn frozen_policy_live_and_training_paths_match_noise_resets_and_custom_physics()
         };
         let policy = PpoTrainerSession::new_seeded(config.clone(), 901 + index as u64).snapshot();
         // Deliberately near a true-terminal boundary, followed by fresh resets.
-        let state = Vector4::new(0.2, -0.1, 0.599, 1.0);
+        let state = Vector4::from_columns([[0.2, -0.1, 0.599, 1.0]]);
         let mut env = PendulumEnv::from_state(plant.model(), config.env, state, 0);
         let mut sim = InvertedPendulum {
             state,
@@ -175,7 +175,7 @@ fn copied_visible_state_discards_previous_noisy_policy_observation() {
 #[test]
 fn activating_policy_resets_but_publishing_new_weights_does_not() {
     let mut sim = InvertedPendulum {
-        state: Vector4::new(3.0, 5.0, 0.8, 6.0),
+        state: Vector4::from_columns([[3.0, 5.0, 0.8, 6.0]]),
         visual_episode_steps: 17,
         ..Default::default()
     };

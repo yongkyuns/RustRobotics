@@ -90,20 +90,10 @@ impl PreparedMpc {
         let R = model.R;
         let QN = model.solve_DARE(Ad, Bd);
 
-        let P_mat = block_diag!(kron!(eye!(N), Q), QN, kron!(eye!(N), R));
+        let (P_mat, A_mat) = horizon_matrices(&Ad, &Bd, &Q, &QN, &R);
 
         // The pendulum MPC reference is the zero state, so q is identically zero.
         let q = vec![0.0; N_VARS];
-
-        let Ax = kron!(eye!(N + 1), -eye!(NX)) + kron!(eye!({ N + 1 }, -1), Ad);
-        let Bu = kron!(vstack!(zeros!(1, N), eye!(N)), Bd);
-        let Aeq = hstack!(Ax, Bu);
-
-        let zeros_xu = zeros!({ N * NU }, { (N + 1) * NX });
-        let eye_u = eye!(N * NU);
-        let Aineq_upper = hstack!(zeros_xu, eye_u);
-        let Aineq_lower = hstack!(zeros_xu, -eye_u);
-        let A_mat = vstack!(Aeq, vstack!(Aineq_upper, Aineq_lower));
 
         let mut p_row_indices = Vec::new();
         let mut p_col_ptrs = vec![0];
@@ -177,6 +167,50 @@ impl PreparedMpc {
     }
 }
 
+/// Assemble the existing state-first, control-last horizon layout explicitly.
+/// Dynamics rows are -x[k] + A*x[k-1] + B*u[k-1] = 0; the first
+/// state row is -x[0] = -x_measured. Clarabel conversion stays unchanged.
+fn horizon_matrices(
+    ad: &AMat,
+    bd: &BMat,
+    q: &QMat,
+    terminal_q: &QMat,
+    r: &RMat,
+) -> (Mat<N_VARS, N_VARS>, Mat<{ N_EQ + N_INEQ }, N_VARS>) {
+    let mut cost = Mat::zeros();
+    let mut constraints = Mat::zeros();
+    let control_start = (N + 1) * NX;
+    for step in 0..=N {
+        let weight = if step == N { terminal_q } else { q };
+        for row in 0..NX {
+            constraints[(step * NX + row, step * NX + row)] = -1.0;
+            for column in 0..NX {
+                cost[(step * NX + row, step * NX + column)] = weight[(row, column)];
+                if step > 0 {
+                    constraints[(step * NX + row, (step - 1) * NX + column)] = ad[(row, column)];
+                }
+            }
+            if step > 0 {
+                for input in 0..NU {
+                    constraints[(step * NX + row, control_start + (step - 1) * NU + input)] =
+                        bd[(row, input)];
+                }
+            }
+        }
+    }
+    for step in 0..N {
+        for input in 0..NU {
+            let column = control_start + step * NU + input;
+            for other in 0..NU {
+                cost[(column, control_start + step * NU + other)] = r[(input, other)];
+            }
+            constraints[(N_EQ + step * NU + input, column)] = 1.0;
+            constraints[(N_EQ + N * NU + step * NU + input, column)] = -1.0;
+        }
+    }
+    (cost, constraints)
+}
+
 /// MPC control using quadratic programming with the Clarabel solver.
 ///
 /// This one-shot API prepares the fixed QP structure and solves it once. Runtime
@@ -197,6 +231,61 @@ pub fn mpc_control(x: Vector4, model: Model, dt: f32) -> f32 {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn explicit_horizon_matches_legacy_kronecker_layout() {
+        use nalgebra::{DMatrix, Matrix4, Vector4 as NaVector4};
+        let ad: AMat =
+            matrix![1.0, 2.0, 0.0, 0.0; 0.0, 1.0, 3.0, 0.0; 0.0, 0.0, 1.0, 4.0; 5.0, 0.0, 0.0, 1.0];
+        let bd: BMat = vector![0.1, 0.2, 0.3, 0.4];
+        let q: QMat = matrix![2.0, 0.5, 0.0, 0.0; 0.5, 3.0, 0.0, 0.0; 0.0, 0.0, 4.0, 0.25; 0.0, 0.0, 0.25, 5.0];
+        let terminal_q = q * 2.0;
+        let r: RMat = diag![0.7];
+        let (cost, constraints) = horizon_matrices(&ad, &bd, &q, &terminal_q, &r);
+        let na_ad = Matrix4::from_column_slice(ad.as_slice());
+        let na_bd = NaVector4::from_column_slice(bd.as_slice());
+        let na_q = Matrix4::from_column_slice(q.as_slice());
+        let mut expected_cost = DMatrix::<f32>::zeros(N_VARS, N_VARS);
+        expected_cost
+            .slice_mut((0, 0), (N * NX, N * NX))
+            .copy_from(&DMatrix::<f32>::identity(N, N).kronecker(&na_q));
+        expected_cost
+            .slice_mut((N * NX, N * NX), (NX, NX))
+            .copy_from(&(na_q * 2.0));
+        expected_cost
+            .slice_mut(((N + 1) * NX, (N + 1) * NX), (N * NU, N * NU))
+            .copy_from(&(DMatrix::<f32>::identity(N * NU, N * NU) * 0.7));
+        let shift =
+            DMatrix::<f32>::from_fn(
+                N + 1,
+                N + 1,
+                |row, column| if row == column + 1 { 1.0 } else { 0.0 },
+            );
+        let ax = DMatrix::<f32>::identity(N + 1, N + 1).kronecker(&(-Matrix4::identity()))
+            + shift.kronecker(&na_ad);
+        let control_shift =
+            DMatrix::<f32>::from_fn(
+                N + 1,
+                N,
+                |row, column| if row == column + 1 { 1.0 } else { 0.0 },
+            );
+        let bu = control_shift.kronecker(&na_bd);
+        let mut expected_constraints = DMatrix::<f32>::zeros(N_EQ + N_INEQ, N_VARS);
+        expected_constraints
+            .slice_mut((0, 0), (N_EQ, (N + 1) * NX))
+            .copy_from(&ax);
+        expected_constraints
+            .slice_mut((0, (N + 1) * NX), (N_EQ, N * NU))
+            .copy_from(&bu);
+        expected_constraints
+            .slice_mut((N_EQ, (N + 1) * NX), (N * NU, N * NU))
+            .copy_from(&DMatrix::<f32>::identity(N * NU, N * NU));
+        expected_constraints
+            .slice_mut((N_EQ + N * NU, (N + 1) * NX), (N * NU, N * NU))
+            .copy_from(&(-DMatrix::<f32>::identity(N * NU, N * NU)));
+        assert_eq!(cost.as_slice(), expected_cost.as_slice());
+        assert_eq!(constraints.as_slice(), expected_constraints.as_slice());
+    }
 
     #[test]
     fn prepared_api_matches_one_shot_api_across_states() {

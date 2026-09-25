@@ -186,7 +186,7 @@ fn environment_draws_match_independent_reference() {
     observe_reference(x, c, &mut reference);
     assert_eq!(
         env.state(),
-        Vector4::from_column_slice(&x),
+        Vector4::from_columns([x]),
         "initial environment RNG"
     );
     let mut disturbances = 0;
@@ -208,7 +208,7 @@ fn environment_draws_match_independent_reference() {
         // Reuse only the deterministic plant, never production noise helpers.
         // Independent physics checks live in cart_pole::tests.
         let next = CartPoleParameters::from(env.model()).step(
-            Vector4::from_column_slice(&x),
+            Vector4::from_columns([x]),
             clipped + action_noise + disturbance,
             c.dt,
         );

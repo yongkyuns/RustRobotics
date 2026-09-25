@@ -38,7 +38,7 @@ fn training_transition_is_shared_nonlinear_rk4_not_linear_euler() {
         disturbance_probability_per_step: 0.0,
         ..Default::default()
     };
-    let state = Vector4::new(0.1, -0.2, 0.5, 0.8);
+    let state = Vector4::from_columns([[0.1, -0.2, 0.5, 0.8]]);
     let mut env = PendulumEnv::from_state(plant.model(), cfg, state, 0);
     env.step_with_rng(1.2, &mut StdRng::seed_from_u64(99));
     assert_eq!(env.state(), plant.step(state, 1.2, cfg.dt));
