@@ -1,0 +1,157 @@
+name: Clean PPO nonlinear reference comparison
+on:
+  push:
+    branches: [audit/ppo-clean-reference-20260925]
+    paths: [.github/workflows/ppo-clean-reference.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: ppo-clean-reference-20260925
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  OPENBLAS_NUM_THREADS: 1
+  OMP_NUM_THREADS: 1
+  PPO_REF_LIBRARY: /tmp/clean-native/library/librust_robotics_train.so
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      CARGO_TERM_COLOR: never
+      PPO_REF_OUT: /tmp/clean-native
+      REFERENCE_ORIGIN: /tmp/reference-origin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/workflows/ppo-clean-reference.yml
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-c3-native
+          path: /tmp/reference-origin
+          run-id: 34362298428
+          github-token: ${{ github.token }}
+      - name: Install the pinned independent implementation
+        run: |
+          mkdir -p "$PPO_REF_OUT"
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu 2>&1 | tee "$PPO_REF_OUT/install-torch.log"
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0 2>&1 | tee "$PPO_REF_OUT/install-reference.log"
+          python -m pip freeze > "$PPO_REF_OUT/python-freeze.txt"
+      - name: Rebuild the checked ABI on the exact ordinary production source
+        run: |
+          python audits/clean_reference/prepare.py 2>&1 | tee "$PPO_REF_OUT/prepare.log"
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee "$PPO_REF_OUT/clippy.log"
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee "$PPO_REF_OUT/rust-controls.log"
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee "$PPO_REF_OUT/integration-controls.log"
+          cargo build --locked --release -p rust_robotics_train --lib 2>&1 | tee "$PPO_REF_OUT/release-build.log"
+          mkdir -p "$PPO_REF_OUT/library"
+          cp target/release/librust_robotics_train.so "$PPO_REF_LIBRARY"
+          ldd "$PPO_REF_LIBRARY" > "$PPO_REF_OUT/native-linkage.txt"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Require real ABI, optimizer-configuration and reference learning controls
+        run: |
+          python audits/clean_reference/reference.py controls --output "$PPO_REF_OUT/python-controls" 2>&1 | tee "$PPO_REF_OUT/python-controls.log"
+          grep -F 'CLEAN PYTHON CONTROLS PASS' "$PPO_REF_OUT/python-controls.log"
+      - name: Restore protected sources and retain exact evidence
+        if: always()
+        run: |
+          mkdir -p "$PPO_REF_OUT"
+          git restore -- rust_robotics_train/Cargo.toml rust_robotics_train/src/lib.rs
+          git diff --exit-code 95c670b9f4618a11dc5439b026caf385a39718c8 -- rust_robotics_train rust_robotics_core rust_robotics_algo rust_robotics_sim Cargo.lock docs
+          python - <<'PY'
+          import os,pathlib,json,hashlib
+          p=pathlib.Path(os.environ['PPO_REF_OUT'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clean-ppo-native
+          path: /tmp/clean-native/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
+  measure:
+    needs: native
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        arm: [rust, matched, sb3-defaults]
+        seed: [201, 202, 203, 204]
+    env:
+      PPO_REF_OUT: /tmp/clean-run
+      CLEAN_ARM: ${{ matrix.arm }}
+      CLEAN_SEED: ${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/workflows/ppo-clean-reference.yml
+      - uses: actions/download-artifact@v4
+        with:
+          name: clean-ppo-native
+          path: /tmp/clean-native
+      - name: Install identical direct reference dependencies
+        run: |
+          mkdir -p "$PPO_REF_OUT"
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu 2>&1 | tee "$PPO_REF_OUT/install-torch.log"
+          python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0 2>&1 | tee "$PPO_REF_OUT/install-reference.log"
+          python -m pip freeze > "$PPO_REF_OUT/python-freeze.txt"
+      - name: Verify and use the qualified native binary and exact driver
+        run: |
+          python - <<'PY'
+          import os,pathlib,json,hashlib,shutil
+          p=pathlib.Path('/tmp/clean-native');out=pathlib.Path(os.environ['PPO_REF_OUT'])
+          manifest=json.loads((p/'manifest.json').read_text())
+          assert set(str(f.relative_to(p)) for f in p.rglob('*') if f.is_file())==set(manifest)|{'manifest.json'}
+          for f,h in manifest.items():assert hashlib.sha256((p/f).read_bytes()).hexdigest()==h,f
+          for n in ['manifest.json','commit.txt','production-base.txt','adam.json']:
+              shutil.copyfile(p/n,out/('native-'+n))
+          shutil.copyfile(p/'sources/audits/clean_reference/reference.py',out/'reference.py')
+          assert (p/'production-base.txt').read_text().strip()=='95c670b9f4618a11dc5439b026caf385a39718c8'
+          PY
+      - name: Execute only the registered from-scratch arm and fixed checkpoints
+        run: |
+          python "$PPO_REF_OUT/reference.py" measure --arm "$CLEAN_ARM" --seed "$CLEAN_SEED" --output "$PPO_REF_OUT" 2>&1 | tee "$PPO_REF_OUT/measurement.log"
+          grep -F "CLEAN MEASUREMENT COMPLETE $CLEAN_ARM $CLEAN_SEED" "$PPO_REF_OUT/measurement.log"
+      - name: Retain every result including failed or partial runs
+        if: always()
+        run: |
+          mkdir -p "$PPO_REF_OUT"
+          python - <<'PY'
+          import os,pathlib,json,hashlib
+          p=pathlib.Path(os.environ['PPO_REF_OUT'])
+          (p/'manifest.json').write_text(json.dumps({str(f.relative_to(p)):hashlib.sha256(f.read_bytes()).hexdigest() for f in p.rglob('*') if f.is_file() and f.name!='manifest.json'},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clean-ppo-${{ matrix.arm }}-${{ matrix.seed }}
+          path: /tmp/clean-run/
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error
