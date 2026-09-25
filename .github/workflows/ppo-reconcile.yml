@@ -1,0 +1,44 @@
+name: PPO integration source reconciliation
+on:
+  push:
+    branches: [audit/ppo-vanilla-reconcile-20260925]
+    paths: [.github/workflows/ppo-reconcile.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export pinned production branches and inspect merge conflicts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ppo-reconcile
+          git branch export-master 8514317e3b5cd57dc37bee2aa4c950af674751e1
+          git branch export-ppo37 d3f59f9bf38d4038ba7c5008e3a3b41c15e99835
+          git branch export-ppo38 4739f370558b9443708c920ac30614f86e3c07bb
+          git bundle create /tmp/ppo-reconcile/source.bundle export-master export-ppo37 export-ppo38
+          git bundle verify /tmp/ppo-reconcile/source.bundle
+          git show-ref | grep 'refs/heads/export-' > /tmp/ppo-reconcile/refs.txt
+          for head in export-ppo37 export-ppo38; do
+            set +e
+            git merge-tree --write-tree export-master "$head" > "/tmp/ppo-reconcile/$head-merge.txt"
+            result=$?
+            set -e
+            test "$result" -le 1
+            printf '%s %s\n' "$head" "$result" >> /tmp/ppo-reconcile/merge-status.txt
+            git diff --stat export-master..."$head" > "/tmp/ppo-reconcile/$head-diff-stat.txt"
+          done
+          sha256sum /tmp/ppo-reconcile/source.bundle > /tmp/ppo-reconcile/SHA256SUMS
+          cat /tmp/ppo-reconcile/merge-status.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppo-reconcile-source
+          path: /tmp/ppo-reconcile/
+          retention-days: 14
+          if-no-files-found: error
