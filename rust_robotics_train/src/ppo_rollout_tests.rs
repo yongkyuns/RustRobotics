@@ -371,8 +371,9 @@ fn multiple_completed_episodes_count_once() {
 fn negative_first_episode_sets_best_return() {
     let mut env = config(100);
     env.max_angle_rad = 0.0;
-    let mut session = session(env, 2);
-    let expected = trace(&session, 2).0;
+    env.reset_angle_range_rad = 0.1;
+    let mut session = session(env, 1);
+    let expected = trace(&session, 1).0;
     assert!(expected.last().unwrap().terminated);
     let total = expected.iter().map(|t| t.reward).sum::<f64>();
     assert!(total < 0.0);

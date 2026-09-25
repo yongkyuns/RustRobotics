@@ -72,6 +72,10 @@ impl Simulator {
     /// Enables or disables pendulum noise in the active simulator.
     pub fn set_pendulum_noise_enabled(&mut self, enabled: bool) {
         self.pendulum_noise_enabled = enabled;
+        let noise = self.pendulum_noise_config();
+        for pendulum in &mut self.simulations.pendulums {
+            pendulum.configure_training_noise(noise);
+        }
     }
 
     /// Returns the current pendulum noise scale.
@@ -82,6 +86,10 @@ impl Simulator {
     /// Sets the pendulum noise scale.
     pub fn set_pendulum_noise_scale(&mut self, scale: f32) {
         self.pendulum_noise_scale = scale.clamp(0.0, 3.0);
+        let noise = self.pendulum_noise_config();
+        for pendulum in &mut self.simulations.pendulums {
+            pendulum.configure_training_noise(noise);
+        }
     }
 
     /// Returns the number of active pendulum instances.
@@ -106,12 +114,14 @@ impl Simulator {
         pendulum_id: usize,
         kind: ControllerKind,
     ) {
+        let noise = self.pendulum_noise_config();
         if let Some(pendulum) = self
             .simulations
             .pendulums
             .iter_mut()
             .find(|pendulum| pendulum.id() == pendulum_id)
         {
+            pendulum.configure_training_noise(noise);
             pendulum.select_controller_kind(kind);
         }
     }
@@ -130,12 +140,14 @@ impl Simulator {
     /// Applies a partial configuration patch to one pendulum instance.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn patch_pendulum(&mut self, pendulum_id: usize, patch: PendulumPatch) {
+        let noise = self.pendulum_noise_config();
         if let Some(pendulum) = self
             .simulations
             .pendulums
             .iter_mut()
             .find(|pendulum| pendulum.id() == pendulum_id)
         {
+            pendulum.configure_training_noise(noise);
             pendulum.apply_patch(patch);
         }
     }
@@ -455,10 +467,10 @@ impl Simulator {
             match self.mode {
                 SimMode::InvertedPendulum => {
                     let noise = self.pendulum_noise_config();
-                    self.simulations
-                        .pendulums
-                        .iter_mut()
-                        .for_each(InvertedPendulum::tick_training);
+                    self.simulations.pendulums.iter_mut().for_each(|pendulum| {
+                        pendulum.configure_training_noise(noise);
+                        pendulum.tick_training();
+                    });
                     self.step_fixed_dt(elapsed, dt, |sim, dt| {
                         sim.simulations
                             .pendulums
@@ -499,10 +511,11 @@ impl Simulator {
             }
         }
         if self.mode == SimMode::InvertedPendulum && self.paused {
-            self.simulations
-                .pendulums
-                .iter_mut()
-                .for_each(InvertedPendulum::tick_training);
+            let noise = self.pendulum_noise_config();
+            self.simulations.pendulums.iter_mut().for_each(|pendulum| {
+                pendulum.configure_training_noise(noise);
+                pendulum.tick_training();
+            });
         }
     }
 

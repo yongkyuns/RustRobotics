@@ -152,6 +152,7 @@ fn nonlinear_plant_falls_farther_from_upright_without_control() {
         ..Default::default()
     };
 
+    sim.trainer_config.env.max_angle_rad = 4.0;
     let initial_angle = sim.state[2];
     sim.step(PENDULUM_FIXED_DT);
 

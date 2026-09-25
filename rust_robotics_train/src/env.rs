@@ -1,12 +1,12 @@
 use rand::Rng;
 use rust_robotics_algo::{
-    control::StateSpace,
+    cart_pole::CartPoleParameters,
     inverted_pendulum::Model,
     prelude::{vector, Vector4},
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PendulumEnvConfig {
     pub dt: f32,
     pub max_force: f32,
@@ -84,6 +84,7 @@ pub struct PendulumEnv {
     config: PendulumEnvConfig,
     state: Vector4,
     steps: usize,
+    last_applied_force: f32,
 }
 
 impl PendulumEnv {
@@ -98,14 +99,41 @@ impl PendulumEnv {
         config: PendulumEnvConfig,
         rng: &mut R,
     ) -> Self {
-        let mut env = Self {
-            model,
-            config,
-            state: vector![0.0, 0.0, 0.0, 0.0],
-            steps: 0,
-        };
+        let mut env = Self::from_state(model, config, Vector4::zeros(), 0);
         env.reset_with_rng(rng);
         env
+    }
+
+    /// Build an environment around a known physical state without drawing noise
+    /// or resetting. Used by the live viewer to share the exact transition path.
+    /// This is state transfer, not an optimizer/RNG resume checkpoint.
+    pub fn from_state(
+        model: Model,
+        config: PendulumEnvConfig,
+        state: Vector4,
+        steps: usize,
+    ) -> Self {
+        CartPoleParameters::from(model).validate();
+        assert!(
+            config.dt.is_finite() && config.dt > 0.0,
+            "invalid pendulum dt"
+        );
+        assert!(
+            config.max_force.is_finite() && config.max_force > 0.0,
+            "invalid force limit"
+        );
+        Self {
+            model,
+            config,
+            state,
+            steps,
+            last_applied_force: 0.0,
+        }
+    }
+
+    /// Actual force after action clipping, actuation noise and disturbances.
+    pub fn last_applied_force(&self) -> f32 {
+        self.last_applied_force
     }
 
     pub fn model(&self) -> Model {
@@ -149,6 +177,7 @@ impl PendulumEnv {
             sample_symmetric(rng, self.config.reset_angular_velocity_range_radps)
         ];
         self.steps = 0;
+        self.last_applied_force = 0.0;
         self.observation_with_rng(rng)
     }
 
@@ -168,8 +197,9 @@ impl PendulumEnv {
                 0.0
             };
         let applied_force = clipped_action + action_noise + disturbance;
-        let (a, b) = self.model.model(self.config.dt);
-        self.state = a * self.state + b * applied_force;
+        self.last_applied_force = applied_force;
+        self.state =
+            CartPoleParameters::from(self.model).step(self.state, applied_force, self.config.dt);
         self.steps += 1;
 
         let terminated = self.state[2].abs() > self.config.max_angle_rad

@@ -17,6 +17,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
 
+pub mod cart_pole;
 pub mod control;
 pub mod localization;
 pub mod path_planning;
