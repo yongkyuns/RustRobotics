@@ -3,7 +3,7 @@
 //! This module is the glue between:
 //!
 //! - the user-facing controller selection in the pendulum UI
-//! - the `PpoTrainerCoordinator`, which may run one or more training replicas
+//! - the `PpoTrainerCoordinator`, which owns one learner and one or more environments
 //! - the live controller instance embedded in `InvertedPendulum`
 //!
 //! The key rule is that selecting `PPO Policy` in the UI should immediately
@@ -16,13 +16,16 @@ impl InvertedPendulum {
     /// Advances the embedded PPO coordinator if training is active and applies
     /// any newly available policy snapshot to the live controller.
     pub fn tick_training(&mut self) {
-        if !self.training_active {
-            return;
+        if self.training_active {
+            self.trainer_config.env.dt = PENDULUM_FIXED_DT;
+            let updates = self.training_updates_per_tick.max(1);
+            self.trainer_backend.tick(updates);
+        } else {
+            // A previously requested browser update may finish after Stop.
+            // Poll it even when the focused UI does not draw an egui panel.
+            // This publishes its final snapshot/status, but schedules no work.
+            self.trainer_backend.refresh();
         }
-
-        self.trainer_config.env.dt = PENDULUM_FIXED_DT;
-        let updates = self.training_updates_per_tick.max(1);
-        self.trainer_backend.tick(updates);
         if let Some(snapshot) = self.trainer_backend.snapshot().cloned() {
             if self.controller_selection == ControllerKind::Policy
                 && self.controller.kind() == ControllerKind::Policy
@@ -35,7 +38,7 @@ impl InvertedPendulum {
         }
     }
 
-    /// Rebuilds trainer replicas from the current configuration.
+    /// Rebuilds the learner and its environment streams from the current configuration.
     pub(crate) fn reset_trainer(&mut self) {
         self.trainer_config.env.dt = PENDULUM_FIXED_DT;
         self.trainer_backend
