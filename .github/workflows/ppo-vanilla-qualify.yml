@@ -1,0 +1,125 @@
+name: PPO vanilla integration qualification
+on:
+  push:
+    branches: [audit/ppo-vanilla-reconcile-20260925]
+    paths: [.github/workflows/ppo-vanilla-qualify.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4739f370558b9443708c920ac30614f86e3c07bb
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconcile only the pinned existing production fixes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ppo-candidate
+          git config user.name 'Yongkyun Shin'
+          git config user.email 'yongkyuns@gmail.com'
+          set +e
+          git merge --no-commit --no-ff 3de2e27663cf2d4630c61a8b6cddd17709140e12
+          status=$?
+          set -e
+          test "$status" = 1
+          python - <<'PY'
+          import base64,json,os,re,subprocess,urllib.request
+          from pathlib import Path
+          def run(*args): return subprocess.check_output(args,text=True).strip()
+          assert run('git','diff','--name-only','--diff-filter=U')=='rust_robotics_train/src/ppo_seed_tests.rs'
+          p=Path('rust_robotics_train/src/ppo_seed_tests.rs');s=p.read_text()
+          s,n=re.subn(r'<<<<<<< HEAD\n(.*?)\n=======\n.*?\n>>>>>>> [^\n]+',lambda m:m[1],s,flags=re.S)
+          assert n==1
+          p.write_text(s)
+          def replace(path,old,new,count):
+              p=Path(path);s=p.read_text();assert s.count(old)==count,(path,old,s.count(old));p.write_text(s.replace(old,new))
+          replace(str(p),'Vector4::from_column_slice(&x)','Vector4::from_columns([x])',1)
+          p='rust_robotics_algo/src/cart_pole.rs'
+          replace(p,'    Vector4,','    vector, Vector4,',1)
+          replace(p,'Vector4::new(','vector!(',3)
+          replace(p,'a.column(i).into_owned()','Vector4::from_fn(|row, _| a[(row, i)])',1)
+          replace(p,' - b.column(0)',' - b',1)
+          replace('rust_robotics_train/src/plant_tests.rs','Vector4::new(0.1, -0.2, 0.5, 0.8)','Vector4::from_columns([[0.1, -0.2, 0.5, 0.8]])',1)
+          replace('rust_robotics_sim/src/simulator/pendulum/contract_tests.rs','Vector4::new(0.2, -0.1, 0.599, 1.0)','Vector4::from_columns([[0.2, -0.1, 0.599, 1.0]])',1)
+          for p in ['rust_robotics_sim/src/simulator/pendulum/contract_tests.rs','rust_robotics_sim/src/simulator/pendulum/training.rs']:
+              replace(p,'Vector4::new(3.0, 5.0, 0.8, 6.0)','Vector4::from_columns([[3.0, 5.0, 0.8, 6.0]])',1)
+          subprocess.run(['git','add','-u'],check=True)
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          tree=run('git','write-tree')
+          assert tree=='4a8e24061690e9d34fb1cd496e4b81cedea987fc',tree
+          # Upload immutable objects only, never update a branch or merge a PR.
+          api='https://api.github.com/repos/yongkyuns/RustRobotics/git/'
+          def post(endpoint,payload):
+              req=urllib.request.Request(api+endpoint,json.dumps(payload).encode(),method='POST',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'})
+              with urllib.request.urlopen(req) as f:return json.load(f)
+          entries=[]
+          for line in run('git','diff','--cached','--raw','--no-abbrev').splitlines():
+              meta,path=line.split('\t',1);fields=meta.split();sha=fields[3]
+              data=Path(path).read_bytes()
+              obj=post('blobs',{'content':base64.b64encode(data).decode(),'encoding':'base64'})
+              assert obj['sha']==sha,(path,obj['sha'],sha)
+              entries.append({'path':path,'mode':fields[1],'type':'blob','sha':sha})
+          base=run('git','rev-parse','HEAD^{tree}')
+          uploaded=post('trees',{'base_tree':base,'tree':entries})
+          assert uploaded['sha']==tree
+          out=Path('/tmp/ppo-candidate')
+          (out/'source.json').write_text(json.dumps({'tree':tree,'parents':['4739f370558b9443708c920ac30614f86e3c07bb','3de2e27663cf2d4630c61a8b6cddd17709140e12'],'entries':entries},indent=2)+'\n')
+          (out/'reconciliation.patch').write_bytes(subprocess.check_output(['git','diff','--cached']))
+          print('PINNED CANDIDATE TREE',tree,'UPLOADED; NO REF CHANGED')
+          PY
+          git commit -m 'Reconcile shared nonlinear PPO plant with current shared-policy and algebra code'
+          git branch export-candidate HEAD
+          git bundle create /tmp/ppo-candidate/candidate.bundle export-candidate
+          sha256sum /tmp/ppo-candidate/* > /tmp/ppo-candidate/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppo-vanilla-candidate-source
+          path: /tmp/ppo-candidate/
+          retention-days: 14
+          if-no-files-found: error
+  native:
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppo-vanilla-candidate-source
+          path: /tmp/ppo-candidate
+      - name: Check out exact candidate
+        run: |
+          git clone -b export-candidate /tmp/ppo-candidate/candidate.bundle .
+          test "$(git rev-parse HEAD^{tree})" = 4a8e24061690e9d34fb1cd496e4b81cedea987fc
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ppo-learning-release-v1
+      - name: Format, algorithm and learner controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/ppo-tests
+          cargo fmt --all -- --check 2>&1 | tee /tmp/ppo-tests/format.log
+          cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee /tmp/ppo-tests/clippy.log
+          cargo test --locked --release -p rust_robotics_algo --lib 2>&1 | tee /tmp/ppo-tests/algorithm.log
+          cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee /tmp/ppo-tests/trainer.log
+          cargo test --locked --release -p rust_robotics_train --test ppo_learning --test ppo_balancing_diagnostics 2>&1 | tee /tmp/ppo-tests/integration.log
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-vanilla-native-controls
+          path: /tmp/ppo-tests/
+          retention-days: 14
+          if-no-files-found: error
