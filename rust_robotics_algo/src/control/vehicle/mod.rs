@@ -583,11 +583,9 @@ mod tests {
         let dt = 0.01;
         let (Ad, Bd) = model.discrete_model(dt);
 
-        // Check dimensions
-        assert_eq!(Ad.nrows(), NX_LAT);
-        assert_eq!(Ad.ncols(), NX_LAT);
-        assert_eq!(Bd.nrows(), NX_LAT);
-        assert_eq!(Bd.ncols(), NU_LAT);
+        // Shape is checked at compile time by the fixed-size backend.
+        let _: &Mat<NX_LAT, NX_LAT> = &Ad;
+        let _: &Mat<NX_LAT, NU_LAT> = &Bd;
 
         println!("Ad = {:?}", Ad);
         println!("Bd = {:?}", Bd);

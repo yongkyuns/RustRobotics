@@ -186,7 +186,7 @@ fn environment_draws_match_independent_reference() {
     observe_reference(x, c, &mut reference);
     assert_eq!(
         env.state(),
-        Vector4::from_column_slice(&x),
+        Vector4::from_columns([x]),
         "initial environment RNG"
     );
     let mut disturbances = 0;
@@ -207,7 +207,7 @@ fn environment_draws_match_independent_reference() {
         };
         // Reuse only the unchanged plant matrix, not production noise helpers.
         let (a, b) = env.model().model(c.dt);
-        let next = a * Vector4::from_column_slice(&x) + b * (clipped + action_noise + disturbance);
+        let next = a * Vector4::from_columns([x]) + b * (clipped + action_noise + disturbance);
         x = [next[0], next[1], next[2], next[3]];
         let expected_observation = observe_reference(x, c, &mut reference);
         let step = env.step_with_rng(action, &mut rng);

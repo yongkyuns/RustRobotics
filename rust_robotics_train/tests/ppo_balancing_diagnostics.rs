@@ -63,8 +63,8 @@ fn ending(state: [f32; 4], c: PendulumEnvConfig, steps: usize) -> Option<Ending>
 // clipped execution is a diagnostic reference, not the optimal PPO policy.
 fn lqr_reference(c: PendulumEnvConfig) -> ([f32; 4], Matrix, usize) {
     let (a, b) = Model::default().model(c.dt);
-    let a = a.cast::<f64>();
-    let b = b.cast::<f64>();
+    let a = Matrix::from_column_slice(a.cast::<f64>().as_slice());
+    let b = Vector::from_column_slice(b.cast::<f64>().as_slice());
     let q = Matrix::from_diagonal(&Vector::new(
         c.reward_position_weight.into(),
         c.reward_velocity_weight.into(),
@@ -174,7 +174,7 @@ fn episode(
     let mut discount = 1.0;
     let mut absolute_force_sum = 0.0;
     let mut near_limit_steps = 0;
-    let mut maximum_absolute_state = env.state().map(f32::abs);
+    let mut maximum_absolute_state: [f32; 4] = std::array::from_fn(|i| env.state()[i].abs());
     for steps in 1..=c.max_steps {
         assert!(observation.iter().all(|x| x.is_finite()));
         let action = policy(observation);
@@ -439,8 +439,8 @@ fn lqr_matches_independent_schur_reference_and_stable_closed_loop() {
         );
     }
     let (a, b) = Model::default().model(c.dt);
-    let a = a.cast::<f64>();
-    let b = b.cast::<f64>();
+    let a = Matrix::from_column_slice(a.cast::<f64>().as_slice());
+    let b = Vector::from_column_slice(b.cast::<f64>().as_slice());
     let k = SMatrix::<f64, 1, 4>::from_row_slice(&gain.map(f64::from));
     let closed = a - b * k;
     assert!(closed.complex_eigenvalues().iter().all(|x| x.norm() < 1.0));

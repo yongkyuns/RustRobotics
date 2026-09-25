@@ -2,7 +2,6 @@ use rand::Rng;
 use rust_robotics_algo::{
     control::StateSpace,
     inverted_pendulum::Model,
-    nalgebra,
     prelude::{vector, Vector4},
 };
 use serde::{Deserialize, Serialize};

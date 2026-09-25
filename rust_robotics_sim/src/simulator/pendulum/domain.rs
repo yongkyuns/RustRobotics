@@ -329,7 +329,7 @@ impl Controller {
     /// - PPO runs deterministic actor inference from the exported snapshot
     pub fn control(&mut self, x: State, dt: f32) -> f32 {
         match self {
-            Self::LQR(model) => *model.control(x, dt).index(0),
+            Self::LQR(model) => model.control(x, dt)[0],
             Self::PID(pid) => pid.control(0.0 - x[2], dt),
             Self::MPC(model) => {
                 #[cfg(target_arch = "wasm32")]

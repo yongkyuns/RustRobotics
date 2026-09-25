@@ -2,7 +2,6 @@ use super::domain::ControllerKind;
 use super::*;
 use crate::simulator::Simulate;
 use rust_robotics_algo::inverted_pendulum::Model;
-use rust_robotics_algo::nalgebra;
 use rust_robotics_algo::vector;
 use rust_robotics_core::LinearSnapshot;
 use rust_robotics_core::PolicySnapshot;

@@ -27,8 +27,6 @@
 use crate::control::StateSpace;
 use crate::prelude::*;
 
-use nalgebra::{allocator::Allocator, Const, DefaultAllocator, DimMin, DimSub, ToTypenum};
-
 /// Prepared infinite-horizon LQR feedback for a fixed model and sample period.
 ///
 /// Computing the Riccati solution is configuration work, not control-loop work.
@@ -66,27 +64,14 @@ impl<const N: usize, const M: usize> PreparedLqr<N, M> {
 ///
 /// This keeps the trait generic enough to work for any small fixed-size linear
 /// system in the workspace, not just the inverted pendulum.
-pub trait LQR<const N: usize, const M: usize, S = f32>: StateSpace<N, M>
-where
-    Const<N>: DimSub<Const<1_usize>>,
-    Const<N>: ToTypenum,
-    DefaultAllocator: Allocator<f32, Const<N>, <Const<N> as DimSub<Const<1_usize>>>::Output>,
-    DefaultAllocator: Allocator<f32, <Const<N> as DimSub<Const<1_usize>>>::Output>,
-    Const<M>: DimMin<Const<M>>,
-    Const<M>: ToTypenum,
-    <Const<M> as DimMin<Const<M>>>::Output: DimSub<Const<1_usize>>,
-    DefaultAllocator:
-        Allocator<f32, <<Const<M> as DimMin<Const<M>>>::Output as DimSub<Const<1_usize>>>::Output>,
-    DefaultAllocator: Allocator<f32, <Const<M> as DimMin<Const<M>>>::Output, Const<M>>,
-    DefaultAllocator: Allocator<f32, Const<M>, <Const<M> as DimMin<Const<M>>>::Output>,
-    DefaultAllocator: Allocator<f32, <Const<M> as DimMin<Const<M>>>::Output>,
-{
+pub trait LQR<const N: usize, const M: usize, S = f32>: StateSpace<N, M> {
     /// Returns the state cost matrix in the quadratic objective.
     fn Q(&self) -> Mat<N, N>;
     /// Returns the control cost matrix in the quadratic objective.
     fn R(&self) -> Mat<M, M>;
-    /// Returns the numerical tolerance used for pseudo-inverses and
-    /// Riccati-iteration convergence.
+    /// Returns the absolute singular-value cutoff for pseudo-inverses and
+    /// the maximum-coefficient tolerance for Riccati-iteration convergence.
+    /// This is not a relative rank threshold.
     fn epsilon(&self) -> f32;
     /// Returns the maximum number of Riccati iterations.
     fn max_iter(&self) -> u32;
@@ -124,13 +109,10 @@ where
 
         let BT = B.transpose();
         let inv = (BT * P * B + R)
-            .pseudo_inverse(self.epsilon())
-            .expect("Matrix inverse failed for DARE");
-        let K = inv * (BT * P * A);
-
-        let _eigen_vals = (A - B * K).eigenvalues();
-
-        K
+            .try_svd()
+            .expect("Matrix SVD failed for DARE")
+            .pseudo_inverse_with_absolute_threshold(self.epsilon());
+        inv * (BT * P * A)
     }
 
     /// Solves the discrete algebraic Riccati equation by fixed-point iteration.
@@ -157,11 +139,12 @@ where
 
         for _ in 0..max_iter {
             let inv = (R + BT * P * B)
-                .pseudo_inverse(eps)
-                .expect("Matrix inverse failed for DARE");
+                .try_svd()
+                .expect("Matrix SVD failed for DARE")
+                .pseudo_inverse_with_absolute_threshold(eps);
 
             let Pn = (AT * P * A) - (AT * P * B) * inv * (BT * P * A) + Q;
-            if (Pn - P).abs().amax() < eps {
+            if max_abs(&(Pn - P)) < eps {
                 return Pn;
             }
 
@@ -175,7 +158,6 @@ where
 mod tests {
     use super::*;
     use crate::control::inverted_pendulum::Model;
-    use nalgebra::vector;
 
     #[test]
     fn prepared_control_matches_compatibility_path() {
@@ -187,7 +169,7 @@ mod tests {
         let prepared_u = prepared.control(state);
         let direct_u = model.control(state, dt);
 
-        assert!((prepared_u - direct_u).abs().amax() < 1e-6);
+        assert!(max_abs(&(prepared_u - direct_u)) < 1e-6);
     }
 
     #[test]

@@ -7,6 +7,9 @@ use super::*;
 use egui::{Color32, DragValue, Ui};
 use egui_plot::{Line, LineStyle, PlotPoints, PlotUi, Points, Polygon};
 use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
+
+// Dynamic SLAM has not migrated its public matrix/state API yet.
+type SlamPose = Vector3<f32>;
 use rb::control::vehicle::VehicleParams;
 use rb::prelude::*;
 use rb::slam::{
@@ -126,7 +129,7 @@ impl KeyboardInput {
 struct EkfSlamInstance {
     enabled: bool,
     state: EkfSlamState,
-    h_est: Vec<rb::Vector3>,
+    h_est: Vec<SlamPose>,
     /// History of update times in microseconds
     h_update_us: Vec<f64>,
     /// Last update time in microseconds
@@ -140,7 +143,7 @@ impl EkfSlamInstance {
         Self {
             enabled: true,
             state: EkfSlamState::new(),
-            h_est: vec![rb::Vector3::zeros()],
+            h_est: vec![SlamPose::zeros()],
             h_update_us: Vec::new(),
             last_update_us: 0.0,
             avg_update_us: 0.0,
@@ -148,10 +151,10 @@ impl EkfSlamInstance {
     }
 
     fn reset(&mut self) {
-        self.reset_with_pose(rb::Vector3::zeros());
+        self.reset_with_pose(SlamPose::zeros());
     }
 
-    fn reset_with_pose(&mut self, initial_pose: rb::Vector3) {
+    fn reset_with_pose(&mut self, initial_pose: SlamPose) {
         self.state = EkfSlamState::with_pose(initial_pose[0], initial_pose[1], initial_pose[2]);
         self.h_est = vec![initial_pose];
         self.h_update_us.clear();
@@ -191,7 +194,7 @@ impl EkfSlamInstance {
         }
     }
 
-    fn get_pose(&self) -> rb::Vector3 {
+    fn get_pose(&self) -> SlamPose {
         self.state.robot_pose()
     }
 }
@@ -205,7 +208,7 @@ struct GraphSlamInstance {
     accumulated_motion: (f32, f32, f32),
     keyframe_trans_threshold: f32,
     keyframe_rot_threshold: f32,
-    h_est: Vec<rb::Vector3>,
+    h_est: Vec<SlamPose>,
     /// History of update times in microseconds
     h_update_us: Vec<f64>,
     /// Last update time in microseconds (only when keyframe added)
@@ -239,7 +242,7 @@ impl GraphSlamInstance {
             accumulated_motion: (0.0, 0.0, 0.0),
             keyframe_trans_threshold: 1.0,
             keyframe_rot_threshold: 0.3,
-            h_est: vec![rb::Vector3::zeros()],
+            h_est: vec![SlamPose::zeros()],
             h_update_us: Vec::new(),
             last_update_us: 0.0,
             avg_update_us: 0.0,
@@ -250,10 +253,10 @@ impl GraphSlamInstance {
     }
 
     fn reset(&mut self, n_landmarks: usize) {
-        self.reset_with_pose(n_landmarks, rb::Vector3::zeros());
+        self.reset_with_pose(n_landmarks, SlamPose::zeros());
     }
 
-    fn reset_with_pose(&mut self, n_landmarks: usize, initial_pose: rb::Vector3) {
+    fn reset_with_pose(&mut self, n_landmarks: usize, initial_pose: SlamPose) {
         // Preserve config settings
         let config = self.graph.config.clone();
         self.graph = GraphSlam::new();
@@ -296,7 +299,7 @@ impl GraphSlamInstance {
         self.accumulated_motion = (new_acc_x, new_acc_y, new_acc_theta);
 
         // Update history with interpolated pose
-        let current_pose = rb::Vector3::new(
+        let current_pose = SlamPose::new(
             prev_kf.x + new_acc_x,
             prev_kf.y + new_acc_y,
             prev_kf_theta + new_acc_theta,
@@ -412,10 +415,10 @@ impl GraphSlamInstance {
         }
     }
 
-    fn get_pose(&self) -> rb::Vector3 {
+    fn get_pose(&self) -> SlamPose {
         let prev_kf = &self.graph.poses[self.prev_keyframe_idx];
         let (acc_x, acc_y, acc_theta) = self.accumulated_motion;
-        rb::Vector3::new(
+        SlamPose::new(
             prev_kf.x + acc_x,
             prev_kf.y + acc_y,
             prev_kf.theta + acc_theta,
@@ -428,15 +431,15 @@ pub struct SlamDemo {
     /// Unique simulation id
     id: usize,
     /// True robot state [x, y, θ]
-    x_true: rb::Vector3,
+    x_true: SlamPose,
     /// True landmark positions
     landmarks_true: Vec<Vector2<f32>>,
     /// Dead reckoning state (for comparison)
-    x_dr: rb::Vector3,
+    x_dr: SlamPose,
     /// History of true robot poses
-    h_true: Vec<rb::Vector3>,
+    h_true: Vec<SlamPose>,
     /// History of dead reckoning poses
-    h_dr: Vec<rb::Vector3>,
+    h_dr: Vec<SlamPose>,
     /// Current observations (landmark_idx, observation)
     current_observations: Vec<(usize, Observation)>,
 
@@ -477,11 +480,11 @@ impl SlamDemo {
 
         Self {
             id,
-            x_true: rb::Vector3::zeros(),
+            x_true: SlamPose::zeros(),
             landmarks_true,
-            x_dr: rb::Vector3::zeros(),
-            h_true: vec![rb::Vector3::zeros()],
-            h_dr: vec![rb::Vector3::zeros()],
+            x_dr: SlamPose::zeros(),
+            h_true: vec![SlamPose::zeros()],
+            h_dr: vec![SlamPose::zeros()],
             current_observations: Vec::new(),
             ekf: EkfSlamInstance::new(),
             graph: GraphSlamInstance::new(n_landmarks),
@@ -505,10 +508,10 @@ impl SlamDemo {
     }
 
     fn reset_algorithm_state(&mut self) {
-        self.x_true = rb::Vector3::zeros();
-        self.x_dr = rb::Vector3::zeros();
-        self.h_true = vec![rb::Vector3::zeros()];
-        self.h_dr = vec![rb::Vector3::zeros()];
+        self.x_true = SlamPose::zeros();
+        self.x_dr = SlamPose::zeros();
+        self.h_true = vec![SlamPose::zeros()];
+        self.h_dr = vec![SlamPose::zeros()];
         self.current_observations.clear();
         self.step_count = 0;
         self.ekf.reset();
@@ -630,10 +633,10 @@ impl SlamDemo {
     /// Regenerate landmarks and reset simulation state
     pub fn regenerate_landmarks(&mut self) {
         // Reset vehicle state
-        self.x_true = rb::Vector3::zeros();
-        self.x_dr = rb::Vector3::zeros();
-        self.h_true = vec![rb::Vector3::zeros()];
-        self.h_dr = vec![rb::Vector3::zeros()];
+        self.x_true = SlamPose::zeros();
+        self.x_dr = SlamPose::zeros();
+        self.h_true = vec![SlamPose::zeros()];
+        self.h_dr = vec![SlamPose::zeros()];
         self.current_observations.clear();
         self.step_count = 0;
 
@@ -942,7 +945,7 @@ impl Simulate for SlamDemo {
     }
 
     fn match_state_with(&mut self, other: &dyn Simulate) {
-        if let Some(data) = other.get_state().downcast_ref::<rb::Vector3>() {
+        if let Some(data) = other.get_state().downcast_ref::<SlamPose>() {
             self.x_true = *data;
         }
     }
@@ -988,10 +991,10 @@ impl Simulate for SlamDemo {
     }
 
     fn reset_state(&mut self) {
-        self.x_true = rb::Vector3::zeros();
-        self.x_dr = rb::Vector3::zeros();
-        self.h_true = vec![rb::Vector3::zeros()];
-        self.h_dr = vec![rb::Vector3::zeros()];
+        self.x_true = SlamPose::zeros();
+        self.x_dr = SlamPose::zeros();
+        self.h_true = vec![SlamPose::zeros()];
+        self.h_dr = vec![SlamPose::zeros()];
         self.current_observations.clear();
         self.step_count = 0;
 

@@ -3,9 +3,8 @@
 use egui::Color32;
 use egui_plot::{Line, LineStyle, PlotPoint, PlotPoints, PlotUi, Polygon, Text};
 use rust_robotics_algo::control::vehicle::VehicleParams;
-use rust_robotics_algo::nalgebra::Vector4 as NaVector4;
-use rust_robotics_algo::nalgebra::{Matrix2, SymmetricEigen};
-use rust_robotics_algo::Vector4;
+use rust_robotics_algo::nalgebra::{Matrix2, SymmetricEigen, Vector3 as SlamVector3};
+use rust_robotics_algo::{vector, Vector4};
 
 use crate::item::draw_vehicle;
 
@@ -26,7 +25,7 @@ impl HasPosition for rust_robotics_algo::Vector4 {
 }
 
 /// Implement HasPosition for Vector3 (pose: [x, y, theta])
-impl HasPosition for rust_robotics_algo::Vector3 {
+impl HasPosition for SlamVector3<f32> {
     fn x(&self) -> f32 {
         self[0]
     }
@@ -75,7 +74,7 @@ pub fn draw_trajectory<'a, T: HasPosition + 'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn draw_labeled_vehicle(
     plot_ui: &mut PlotUi<'_>,
-    pose: &rust_robotics_algo::Vector3,
+    pose: &SlamVector3<f32>,
     velocity: f32,
     label: &str,
     label_offset: f32,
@@ -84,7 +83,7 @@ pub fn draw_labeled_vehicle(
     vehicle_name: &str,
 ) {
     // Convert Vector3 (x, y, theta) to Vector4 (x, y, phi, v) for draw_vehicle
-    let state: Vector4 = NaVector4::new(pose[0], pose[1], pose[2], velocity);
+    let state: Vector4 = vector![pose[0], pose[1], pose[2], velocity];
 
     draw_vehicle(plot_ui, state, vehicle_name, steering, params);
 
