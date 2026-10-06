@@ -32,6 +32,7 @@ jobs:
           git rev-parse HEAD > /tmp/ppo-checkpoint-replay/executed-commit.txt
           cp audits/clean_reference/replay_checkpoints_20261006.py /tmp/ppo-checkpoint-replay/
           cp audits/clean_reference/replay_original_setup_20261006.py /tmp/ppo-checkpoint-replay/
+          cp audits/clean_reference/replay_ledger_20261006.py /tmp/ppo-checkpoint-replay/
           cp .github/workflows/ppo-checkpoint-replay.yml /tmp/ppo-checkpoint-replay/
           lscpu > /tmp/ppo-checkpoint-replay/cpu.txt
       - name: Install original numeric and reference versions
@@ -47,10 +48,10 @@ jobs:
             read -r id name <<< "$item"
             curl --fail --silent --show-error --location -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" -o "/tmp/ppo-checkpoint-replay/raw/${name}.zip"
           done
-      - name: Require exact original and instrumented outcomes before interpreting traces
+      - name: Retain every panel and enforce the unchanged historical exact gate
         run: |
-          python audits/clean_reference/replay_original_setup_20261006.py --raw /tmp/ppo-checkpoint-replay/raw --output /tmp/ppo-checkpoint-replay 2>&1 | tee /tmp/ppo-checkpoint-replay/replay.log
-          grep -F 'COMPLETE EXACT REPLAY' /tmp/ppo-checkpoint-replay/replay.log
+          python audits/clean_reference/replay_ledger_20261006.py --raw /tmp/ppo-checkpoint-replay/raw --output /tmp/ppo-checkpoint-replay 2>&1 | tee /tmp/ppo-checkpoint-replay/replay.log
+          grep -F 'COMPLETE REPLAY LEDGER; all_exact= True' /tmp/ppo-checkpoint-replay/replay.log
       - name: Record all evidence including any failures
         if: always()
         run: |
