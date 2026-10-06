@@ -1,0 +1,32 @@
+name: PPO vanilla time-limit coverage
+on:
+  push:
+    branches: [audit/ppo-clean-reference-20260925]
+    paths: [.github/workflows/ppo-time-limit-coverage.yml]
+jobs:
+  pair:
+    strategy:
+      fail-fast: false
+      matrix: {seed: [201, 202, 203, 204]}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install numpy==2.2.6 torch==2.8.0 stable-baselines3==2.9.0 gymnasium==1.3.0
+      - name: Retrieve original native artifact
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          gh api repos/${{ github.repository }}/actions/artifacts/10860907319/zip > native-artifact.zip
+          unzip -q native-artifact.zip -d native-artifact
+          find native-artifact -name '*.zip' -print -quit | xargs -I{} cp {} native.zip
+          test -s native.zip
+      - name: Run paired fixed-budget comparison
+        run: python audits/clean_reference/time_limit_compare.py --raw native.zip --out result --seed ${{ matrix.seed }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppo-time-limit-${{ matrix.seed }}-${{ github.run_id }}
+          path: result
+          if-no-files-found: error
