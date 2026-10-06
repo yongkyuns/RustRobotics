@@ -1,0 +1,30 @@
+name: PPO update133 conditional credit
+on:
+  push:
+    branches: [audit/ppo-clean-reference-20260925]
+    paths: [.github/workflows/ppo-update133-credit.yml]
+jobs:
+  credit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned dependencies
+        run: pip install numpy==2.2.6 torch==2.8.0 stable-baselines3==2.9.0 gymnasium==1.3.0 scipy
+      - name: Retrieve exact update133 evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/actions/artifacts/11441435840/zip > pair201.zip
+          unzip -q pair201.zip -d pair201
+          python audits/clean_reference/update133_credit.py --input pair201 --output update133-credit
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-update133-credit-${{ github.run_id }}
+          path: update133-credit
+          if-no-files-found: error
