@@ -2,7 +2,7 @@ name: PPO vanilla time-limit coverage
 on:
   push:
     branches: [audit/ppo-clean-reference-20260925]
-    paths: [.github/workflows/ppo-time-limit-coverage.yml]
+    paths: [.github/workflows/ppo-time-limit-coverage.yml, audits/clean_reference/time_limit_compare.py]
 jobs:
   pair:
     strategy:
