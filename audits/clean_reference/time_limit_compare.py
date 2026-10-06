@@ -19,6 +19,7 @@ def install_limit(ref,limit):
     ref.RustEnv._create=_create
 
 def run_arm(ref,seed,limit,out):
+    out.mkdir(parents=True,exist_ok=True)
     install_limit(ref,limit)
     m,e=pool.build(ref,1,seed)
     init=pool.weights(m); rec=pool.observe(m,e,out/"coverage.jsonl")
