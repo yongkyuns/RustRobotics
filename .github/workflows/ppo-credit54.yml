@@ -19,12 +19,18 @@ env:
   PPO_REF_OUT: /tmp/credit54/branch-controls
 jobs:
   credit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Require compatible CPU family before numerical replay
+        run: |
+          mkdir -p /tmp/credit54/branch-controls
+          git rev-parse HEAD > /tmp/credit54/executed-commit.txt
+          lscpu > /tmp/credit54/lscpu.txt
+          grep -F 'GenuineIntel' /tmp/credit54/lscpu.txt
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -36,10 +42,7 @@ jobs:
           shared-key: ppo-learning-release-v1
       - name: Preserve source and install pinned dependencies
         run: |
-          mkdir -p /tmp/credit54/branch-controls
-          git rev-parse HEAD > /tmp/credit54/executed-commit.txt
-          cp audits/clean_reference/{credit54_20261006.py,credit54_bridge.rs,update_audit_20261006.py,local_linearization.py} .github/workflows/ppo-credit54.yml /tmp/credit54/
-          lscpu > /tmp/credit54/lscpu.txt
+          cp audits/clean_reference/{credit54_20261006.py,credit54_equal_batches.py,credit54_bridge.rs,update_audit_20261006.py,local_linearization.py} .github/workflows/ppo-credit54.yml /tmp/credit54/
           python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu 2>&1 | tee /tmp/credit54/install-torch.log
           python -m pip install numpy==2.2.6 gymnasium==1.3.0 stable-baselines3==2.9.0 2>&1 | tee /tmp/credit54/install-reference.log
           python -m pip freeze > /tmp/credit54/python-freeze.txt
@@ -48,8 +51,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           curl --fail --silent --show-error --location -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/11431717887/zip" -o /tmp/credit54/original-update.zip
-          python -m py_compile audits/clean_reference/credit54_20261006.py
-          python audits/clean_reference/credit54_20261006.py prepare --root /tmp/credit54 2>&1 | tee /tmp/credit54/prepare.log
+          python -m py_compile audits/clean_reference/credit54_20261006.py audits/clean_reference/credit54_equal_batches.py
+          python audits/clean_reference/credit54_equal_batches.py prepare --root /tmp/credit54 2>&1 | tee /tmp/credit54/prepare.log
           cargo clippy --locked -p rust_robotics_train --all-targets -- -D warnings 2>&1 | tee /tmp/credit54/clippy.log
           cargo test --locked --release -p rust_robotics_train --lib -- --test-threads=1 2>&1 | tee /tmp/credit54/native-tests.log
           cargo build --locked --release -p rust_robotics_train --lib 2>&1 | tee /tmp/credit54/build.log
@@ -59,7 +62,7 @@ jobs:
           git diff --exit-code
       - name: Execute exact state capture and fixed conditional Monte Carlo panel
         run: |
-          python audits/clean_reference/credit54_20261006.py measure --root /tmp/credit54 2>&1 | tee /tmp/credit54/measurement.log
+          python audits/clean_reference/credit54_equal_batches.py measure --root /tmp/credit54 2>&1 | tee /tmp/credit54/measurement.log
           grep -F 'COMPLETE CONDITIONAL CREDIT AUDIT' /tmp/credit54/measurement.log
       - name: Retain evidence and any failed gate
         if: always()
