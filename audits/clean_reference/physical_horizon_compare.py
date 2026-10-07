@@ -47,6 +47,18 @@ def build(ref,seed,arm,limit=256,n_steps=2048,capture=False):
     need(m.learning_rate==3e-4 and m.policy.optimizer.defaults['eps']==1e-5 and m.clip_range(1.)==.2 and m.target_kl is None and m.clip_range_vf is None,'unchanged optimizer/clipping')
     return m,e
 
+def snapshot(m,e):
+    # Checkpoint zero precedes SB3's first reset; preserve None instead of initializing it.
+    return dict(policy=pool.weights(m),adam=copy.deepcopy(m.policy.optimizer.state_dict()),rng=pool.rng(),
+        observation=copy.deepcopy(m._last_obs),starts=copy.deepcopy(m._last_episode_starts),
+        episodes=[copy.deepcopy(x.episodes) for x in e.envs],counts=[x.count for x in e.envs])
+
+def evaluate_checkpoint(ref,m,e,seed,cp):
+    before=snapshot(m,e)
+    rows=ref.evaluate(m,2,seed,cp)
+    need(pool.eq(before,snapshot(m,e)),'evaluation state isolated, including uninitialized checkpoint zero')
+    return rows
+
 def collect(m,n):
     _,cb=m._setup_learn(n,reset_num_timesteps=False)
     need(m.collect_rollouts(m.env,cb,m.rollout_buffer,n),'complete stock collection')
@@ -84,10 +96,15 @@ def preflight(ref,out):
     need(pool.eq(initials[0],initials[1]) and pool.eq(records[0],records[1]) and pool.eq(rngs[0],rngs[1]),'exact initial physical trajectories and RNG pairing')
     passed.append('same_initial_tensors_and_first2048_physical_transitions')
     for arm in ARMS:
-        a,e=build(ref,774,arm);a.learn(4096,reset_num_timesteps=False,log_interval=None);expected=pool.state(a,e);e.close();cost+=4096
+        a,e=build(ref,774,arm)
+        need(a._last_obs is None and a._last_episode_starts is None,'actual uninitialized checkpoint zero')
+        zero=evaluate_checkpoint(ref,a,e,950774,0)
+        need(len(zero)==96 and a.num_timesteps==0 and e.envs[0].count==0,'checkpoint zero has no training transitions')
+        passed.append(arm+'_uninitialized_checkpoint_zero_identity')
+        a.learn(4096,reset_num_timesteps=False,log_interval=None);expected=snapshot(a,e);e.close();cost+=4096
         b,e=build(ref,774,arm);rec=pool.observe(b,e);b.learn(4096,reset_num_timesteps=False,log_interval=None);cost+=4096
-        need(pool.eq(expected,pool.state(b,e)) and len(rec.rows)==2,'observer does not change policy/Adam/RNG/episodes')
-        before=pool.state(b,e);first=ref.evaluate(b,2,950774,4096);need(pool.eq(before,pool.state(b,e)),'evaluation state isolation')
+        need(pool.eq(expected,snapshot(b,e)) and len(rec.rows)==2,'observer does not change policy/Adam/RNG/episodes')
+        before=snapshot(b,e);first=ref.evaluate(b,2,950774,4096);need(pool.eq(before,snapshot(b,e)),'evaluation state isolation')
         second=ref.evaluate(b,2,950774,4096);need(first==second,'same saved reference exact evaluation replay')
         e.close();passed.append(arm+'_observer_and_evaluation_identity')
     result=dict(passed=passed,training_environment_steps=cost,production_changed=False,parameters=ARMS,reference_strategy='new same-host paired reference; no historical cross-runtime identity claim')
@@ -107,11 +124,11 @@ def measure(ref,seed,out):
                 need(m.num_timesteps==cp,'exact checkpoint budget')
                 w=pool.weights(m);need(all(torch.isfinite(v).all().item() for v in w.values()),'finite weights')
                 np.savez(folder/f'policy-{cp}.npz',**{k:v.numpy() for k,v in w.items()})
-                before=pool.state(m,e);evals+=ref.evaluate(m,2,950000+seed,cp);need(pool.eq(before,pool.state(m,e)),'evaluation state isolated')
+                evals+=evaluate_checkpoint(ref,m,e,950000+seed,cp)
                 checkpoints.append(dict(checkpoint=cp,policy_sha256=pool.model_digest(w)))
                 write(folder/'episodes.json',evals);write(folder/'checkpoints.json',checkpoints);write(folder/'training-episodes.json',[x.episodes for x in e.envs])
                 print('CHECKPOINT',seed,arm,cp,flush=True)
-            snap=pool.state(m,e);torch.save(snap,folder/'final-state.pt')
+            snap=snapshot(m,e);torch.save(snap,folder/'final-state.pt')
             need(len(recorder.rows)==512 and all(r['episode_starts'][0]>=8 for r in recorder.rows),'512 covered updates')
             need(all(int(v['step'])==163840 for v in snap['adam']['state'].values()),'equal optimizer budget')
             receipt=dict(seed=seed,arm=arm,gamma=m.gamma,gae_lambda=m.gae_lambda,max_steps=256,training_steps=m.num_timesteps,rollout_updates=len(recorder.rows),optimizer_steps=163840,initial_sha256=pool.model_digest(initials[-1]),final_sha256=pool.model_digest(w),evaluation_records=len(evals),evaluation_domain=950000+seed)
