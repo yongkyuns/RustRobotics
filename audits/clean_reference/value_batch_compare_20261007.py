@@ -48,10 +48,56 @@ def build(ref, seed:int, n_steps:int, capture=False):
 
 def policy_digest(m): return pool.model_digest(pool.weights(m))
 
+def stopped_score(rewards, gamma):
+    """Sequential float64 accounting of recorded native float32 rewards."""
+    total=0.0
+    for tick,reward in enumerate(rewards):
+        total += gamma**tick*float(reward)
+    return total
+
+class EvaluationTraceLibrary:
+    """Read-only recorder around the original ABI; never changes actions or packets."""
+    def __init__(self,lib):
+        self.lib=lib; self.handles={}; self.traces={}
+    def __getattr__(self,name): return getattr(self.lib,name)
+    def rr_env_create(self,key,horizon,training):
+        h=self.lib.rr_env_create(key,horizon,training)
+        if h:
+            need(key not in self.traces,'duplicate evaluation key')
+            self.handles[h]=key; self.traces[key]=[]
+        return h
+    def rr_env_step(self,h,action,transform):
+        packet=self.lib.rr_env_step(h,action,transform)
+        if packet.status==0:
+            rewards=self.traces[self.handles[h]]
+            need(packet.steps==len(rewards)+1,'evaluation step identity')
+            rewards.append(float(packet.reward))
+        return packet
+    def rr_env_free(self,h):
+        status=self.lib.rr_env_free(h)
+        if status==0: self.handles.pop(h,None)
+        return status
+
 def evaluate(ref,m,e,seed,cp,domain_base=16970000):
-    before=snapshot(m,e)
-    rows=ref.evaluate(m,2,domain_base+seed,cp)
+    before=snapshot(m,e); original=ref.LIB
+    recorder=EvaluationTraceLibrary(original)
+    ref.LIB=recorder
+    try:
+        rows=ref.evaluate(m,2,domain_base+seed,cp)
+    finally:
+        ref.LIB=original
     need(pool.eq(before,snapshot(m,e)),'evaluation isolation')
+    need(not recorder.handles,'evaluation handles freed')
+    need(len(rows)==len(recorder.traces)==96,'complete evaluation panel')
+    for row in rows:
+        rewards=recorder.traces[row['seed']]
+        need(len(rewards)==row['steps'],'reward trace length')
+        need(stopped_score(rewards,1.)==row['return_value'],'raw return trace replay')
+        need(stopped_score(rewards,float(np.float32(.99)))==row['discounted'],'legacy score trace replay')
+        # Use the protocol's Python-float gamma, the same constant supplied to PPO.
+        row['discounted_gamma999']=stopped_score(rewards,GAMMA)
+        row['evaluation_gamma']=GAMMA
+        row['reward_trace']=rewards
     return rows
 
 def diag_before_train(m,e):
@@ -86,8 +132,7 @@ class Recorder:
         need(len(counts)==13 and set(counts)=={row['update']*tx_per_update},'Adam tx count')
         row.update(adam_steps=counts[0],epochs=int(self.m._n_updates),learned_std_after=float(self.m.policy.log_std.detach().exp().item()))
         self.rows.append(row)
-        with self.path.open('a') as f:f.write(json.dumps(row,sort_keys=True,allow_nan=False)+'
-')
+        with self.path.open('a') as f:f.write(json.dumps(row,sort_keys=True,allow_nan=False)+'\n')
 
 def observe(m,e,path):
     r=Recorder(m,e,path); m.train=types.MethodType(lambda self:r.train(),m); return r
@@ -123,7 +168,7 @@ def preflight(ref,out):
     write(out/'PREFLIGHT.json',dict(scale=SCALE,initial_digest=pool.model_digest(a['initial']),first2048_exact=True,
         candidate_collected=8192,optimizer_before_collection=0,control_first_update_transactions=320,candidate_first_update_transactions=1280,
         control_diag=a['diag'],candidate_diag=b['diag'],production_changed=False,
-        failed_source_sha256='cf70fb5b9ba050808e47126f4c3582c0ad1ea39122aeb52a837cc113e70161dd'))
+        superseded_script_blob='81370a0f1a60d76d7e4f6282168e08975fa0cb95'))
     print('PREFLIGHT PASS',flush=True)
 
 def summarize(rows):
@@ -132,6 +177,8 @@ def summarize(rows):
         rr=[r for r in rows if r['mode']==mode]
         out[mode]=dict(completions=sum(r['ending']=='timeout' for r in rr),count=len(rr),
                        mean_discounted=float(np.mean([r['discounted'] for r in rr])),
+                       mean_discounted_gamma999=(float(np.mean([r['discounted_gamma999'] for r in rr]))
+                                                   if all('discounted_gamma999' in r for r in rr) else None),
                        mean_steps=float(np.mean([r['steps'] for r in rr])),
                        endings={k:sum(r['ending']==k for r in rr) for k in ('timeout','angle','position','angle_position')})
     return out
@@ -158,7 +205,8 @@ def measure(ref,seed,arm,out):
         need(len(rec.rows)==expected_updates and tx==163840,'matched total optimizer budget')
         receipt=dict(seed=seed,arm=arm,n_steps=n_steps,scale=SCALE,training_steps=m.num_timesteps,rollout_updates=len(rec.rows),
                      optimizer_steps=tx,sample_presentations=10485760,initial_sha256=initial,final_sha256=policy_digest(m),
-                     wall_seconds=time.monotonic()-wall,evaluation_records=len(evals),evaluation_seed_base=16970000+seed)
+                     wall_seconds=time.monotonic()-wall,evaluation_records=len(evals),evaluation_seed_base=16970000+seed,
+                     evaluation_gamma=GAMMA,legacy_evaluation_gamma=float(np.float32(.99)),reward_traces_retained=True)
         write(out/'receipt.json',receipt)
         print('COMPLETE',seed,arm,flush=True)
     finally:e.close()
@@ -166,18 +214,19 @@ def measure(ref,seed,arm,out):
 def historical_gate(ref,out):
     out.mkdir(parents=True,exist_ok=False)
     m,e=build(ref,202,2048)
+    expected={131072:(32,62),262144:(32,63),524288:(30,59)}
     try:
         vals=[]
         for cp in (131072,262144,524288):
             m.learn(cp-m.num_timesteps,reset_num_timesteps=False,log_interval=None)
             rows=ref.evaluate(m,2,12970000+202,cp)
             vals.append(dict(checkpoint=cp,**summarize(rows)))
-            print('HISTGATE',cp,vals[-1]['deterministic']['completions'],vals[-1]['stochastic']['completions'],flush=True)
-        expected={131072:(32,62),262144:(32,63),524288:(30,59)}
-        for row in vals:
+            write(out/'historical-gate.json',vals)
+            write(out/f'episodes-{cp}.json',rows)
+            row=vals[-1]
             got=(row['deterministic']['completions'],row['stochastic']['completions'])
-            need(got==expected[row['checkpoint']],f"historical gate mismatch at {row['checkpoint']}: {got} != {expected[row['checkpoint']]}")
-        write(out/'historical-gate.json',vals)
+            print('HISTGATE',cp,*got,flush=True)
+            need(got==expected[cp],f"historical gate mismatch at {cp}: {got} != {expected[cp]}")
         print('HISTORICAL GATE PASS',flush=True)
     finally:e.close()
 

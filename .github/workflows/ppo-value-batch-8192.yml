@@ -7,6 +7,7 @@ on:
       - .github/workflows/ppo-value-batch-8192.yml
       - audits/clean_reference/value_batch_compare_20261007.py
       - audits/clean_reference/paired_pool_20261006.py
+      - audits/clean_reference/test_value_batch_compare_20261007.py
 
 permissions:
   contents: read
@@ -18,6 +19,14 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Compile and retain exact experiment sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/provenance
+          cp audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/paired_pool_20261006.py audits/clean_reference/test_value_batch_compare_20261007.py .github/workflows/ppo-value-batch-8192.yml evidence/provenance/
+          git rev-parse HEAD > evidence/provenance/commit.txt
+          python3 -m py_compile audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/paired_pool_20261006.py audits/clean_reference/test_value_batch_compare_20261007.py
       - name: Recover pinned runtime and native input
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,6 +53,11 @@ jobs:
           unzip -p pair201.zip native.zip > evidence/inputs/native.zip
           echo '58af5206058b24a8cd39c2665d9bc187200a4e8acaf3841a367d27731e09cdc0  evidence/inputs/native.zip' | sha256sum -c -
           sha256sum audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/paired_pool_20261006.py runtime.zip evidence/inputs/native.zip > evidence/provenance/input-sha256.txt
+      - name: Test recorder noninterference and both evaluation discounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/test_value_batch_compare_20261007.py --raw evidence/inputs/native.zip --out evidence/harness-tests 2>&1 | tee evidence/harness-tests.log
       - name: Preflight exact collection and matched optimizer budgets
         shell: bash
         run: |
@@ -84,6 +98,14 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Compile and retain exact experiment sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/provenance
+          cp audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/paired_pool_20261006.py audits/clean_reference/test_value_batch_compare_20261007.py .github/workflows/ppo-value-batch-8192.yml evidence/provenance/
+          git rev-parse HEAD > evidence/provenance/commit.txt
+          python3 -m py_compile audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/paired_pool_20261006.py audits/clean_reference/test_value_batch_compare_20261007.py
       - name: Recover pinned runtime and native input
         env:
           GH_TOKEN: ${{ github.token }}
@@ -108,6 +130,11 @@ jobs:
           echo '22ea3b48e60b8199131fd5379e859017cc7b5212d58bbb5c06cb5b52166ce86c  pair201.zip' | sha256sum -c -
           unzip -p pair201.zip native.zip > evidence/inputs/native.zip
           echo '58af5206058b24a8cd39c2665d9bc187200a4e8acaf3841a367d27731e09cdc0  evidence/inputs/native.zip' | sha256sum -c -
+      - name: Test recorder noninterference and both evaluation discounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/test_value_batch_compare_20261007.py --raw evidence/inputs/native.zip --out evidence/harness-tests 2>&1 | tee evidence/harness-tests.log
       - name: Per-runner preflight
         shell: bash
         run: |
