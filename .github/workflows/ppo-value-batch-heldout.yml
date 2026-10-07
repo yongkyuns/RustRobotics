@@ -1,0 +1,186 @@
+name: PPO 8192 batch independent held-out seed replication
+
+on:
+  push:
+    branches: [audit/value-batch-8192-heldout-20261007]
+    paths:
+      - .github/workflows/ppo-value-batch-heldout.yml
+      - audits/clean_reference/value_batch_holdout_20261007.py
+      - audits/clean_reference/paired_pool_20261006.py
+      - audits/clean_reference/test_value_batch_compare_20261007.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  historical-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Compile and retain exact experiment sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/provenance
+          cp audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/value_batch_holdout_20261007.py audits/clean_reference/paired_pool_20261006.py audits/clean_reference/test_value_batch_compare_20261007.py .github/workflows/ppo-value-batch-heldout.yml evidence/provenance/
+          git rev-parse HEAD > evidence/provenance/commit.txt
+          python3 -m py_compile audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/value_batch_holdout_20261007.py audits/clean_reference/paired_pool_20261006.py audits/clean_reference/test_value_batch_compare_20261007.py
+          test "$(git rev-parse HEAD:audits/clean_reference/value_batch_compare_20261007.py)" = 505e87f38794aae47545927f8f47906e93a9f7aa
+      - name: Recover pinned runtime and native input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p pinned runtime evidence/inputs evidence/provenance
+          lscpu | tee evidence/provenance/current-lscpu.txt
+          gh api repos/${{ github.repository }}/actions/artifacts/11441687522/zip > runtime.zip
+          echo '7418edd50c11ae67ef761610a15c4a0c6ee70f2d3fa032609d6394eb745b5dd1  runtime.zip' | sha256sum -c -
+          unzip -q runtime.zip -d pinned
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('pinned')
+          manifest=json.loads((root/'manifest.json').read_text())
+          for name,digest in manifest.items():
+              assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest,name
+          print('Verified runtime payloads:',len(manifest))
+          PY
+          tar -xzf pinned/python311.tar.gz -C runtime
+          runtime/python/bin/python3.11 -m pip install --no-index --find-links pinned/wheels 'numpy==2.2.6' 'torch==2.8.0+cpu' 'stable-baselines3==2.9.0' 'gymnasium==1.3.0'
+          gh api repos/${{ github.repository }}/actions/artifacts/11441435840/zip > pair201.zip
+          echo '22ea3b48e60b8199131fd5379e859017cc7b5212d58bbb5c06cb5b52166ce86c  pair201.zip' | sha256sum -c -
+          unzip -p pair201.zip native.zip > evidence/inputs/native.zip
+          echo '58af5206058b24a8cd39c2665d9bc187200a4e8acaf3841a367d27731e09cdc0  evidence/inputs/native.zip' | sha256sum -c -
+          sha256sum audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/paired_pool_20261006.py runtime.zip evidence/inputs/native.zip > evidence/provenance/input-sha256.txt
+      - name: Test recorder noninterference and both evaluation discounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/test_value_batch_compare_20261007.py --raw evidence/inputs/native.zip --out evidence/harness-tests 2>&1 | tee evidence/harness-tests.log
+      - name: Preflight exact collection and matched optimizer budgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_compare_20261007.py preflight --raw evidence/inputs/native.zip --out evidence/preflight 2>&1 | tee evidence/preflight.log
+      - name: Reproduce published scaled seed202 checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_compare_20261007.py historical-gate --raw evidence/inputs/native.zip --out evidence/historical-gate 2>&1 | tee evidence/historical-gate.log
+      - name: Manifest
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('evidence')
+          root.mkdir(exist_ok=True)
+          manifest={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p!=root/'MANIFEST.json'}
+          (root/'MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ppo-value-batch-heldout-historical-gate-${{ github.run_id }}
+          path: evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  pair:
+    needs: historical-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [830101, 830102, 830103, 830104, 830105, 830106, 830107, 830108]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Compile and retain exact experiment sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/provenance
+          cp audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/value_batch_holdout_20261007.py audits/clean_reference/paired_pool_20261006.py audits/clean_reference/test_value_batch_compare_20261007.py .github/workflows/ppo-value-batch-heldout.yml evidence/provenance/
+          git rev-parse HEAD > evidence/provenance/commit.txt
+          python3 -m py_compile audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/value_batch_holdout_20261007.py audits/clean_reference/paired_pool_20261006.py audits/clean_reference/test_value_batch_compare_20261007.py
+          test "$(git rev-parse HEAD:audits/clean_reference/value_batch_compare_20261007.py)" = 505e87f38794aae47545927f8f47906e93a9f7aa
+      - name: Recover pinned runtime and native input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p pinned runtime evidence/inputs evidence/provenance
+          lscpu | tee evidence/provenance/current-lscpu.txt
+          gh api repos/${{ github.repository }}/actions/artifacts/11441687522/zip > runtime.zip
+          echo '7418edd50c11ae67ef761610a15c4a0c6ee70f2d3fa032609d6394eb745b5dd1  runtime.zip' | sha256sum -c -
+          unzip -q runtime.zip -d pinned
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('pinned')
+          manifest=json.loads((root/'manifest.json').read_text())
+          for name,digest in manifest.items():
+              assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest,name
+          PY
+          tar -xzf pinned/python311.tar.gz -C runtime
+          runtime/python/bin/python3.11 -m pip install --no-index --find-links pinned/wheels 'numpy==2.2.6' 'torch==2.8.0+cpu' 'stable-baselines3==2.9.0' 'gymnasium==1.3.0'
+          gh api repos/${{ github.repository }}/actions/artifacts/11441435840/zip > pair201.zip
+          echo '22ea3b48e60b8199131fd5379e859017cc7b5212d58bbb5c06cb5b52166ce86c  pair201.zip' | sha256sum -c -
+          unzip -p pair201.zip native.zip > evidence/inputs/native.zip
+          echo '58af5206058b24a8cd39c2665d9bc187200a4e8acaf3841a367d27731e09cdc0  evidence/inputs/native.zip' | sha256sum -c -
+      - name: Test recorder noninterference and both evaluation discounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/test_value_batch_compare_20261007.py --raw evidence/inputs/native.zip --out evidence/harness-tests 2>&1 | tee evidence/harness-tests.log
+      - name: Per-runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_compare_20261007.py preflight --raw evidence/inputs/native.zip --out evidence/preflight 2>&1 | tee evidence/preflight.log
+      - name: Train scaled-2048 control
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_holdout_20261007.py measure --raw evidence/inputs/native.zip --out evidence/control --seed ${{ matrix.seed }} --arm scaled-2048 2>&1 | tee evidence/control.log
+      - name: Train scaled-8192 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_holdout_20261007.py measure --raw evidence/inputs/native.zip --out evidence/candidate --seed ${{ matrix.seed }} --arm scaled-8192 2>&1 | tee evidence/candidate.log
+      - name: Verify paired budgets and initial identity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          c=json.loads(pathlib.Path('evidence/control/receipt.json').read_text())
+          n=json.loads(pathlib.Path('evidence/candidate/receipt.json').read_text())
+          assert c['initial_sha256']==n['initial_sha256']
+          assert c['training_steps']==n['training_steps']==1048576
+          assert c['optimizer_steps']==n['optimizer_steps']==163840
+          assert c['sample_presentations']==n['sample_presentations']==10485760
+          print('PAIRED BUDGET/INIT PASS')
+          PY
+      - name: Manifest
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('evidence')
+          root.mkdir(exist_ok=True)
+          manifest={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p!=root/'MANIFEST.json'}
+          (root/'MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ppo-value-batch-heldout-${{ matrix.seed }}-${{ github.run_id }}
+          path: evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
