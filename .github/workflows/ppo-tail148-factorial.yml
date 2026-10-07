@@ -1,0 +1,77 @@
+name: PPO update148 tail factorial
+on:
+  push:
+    branches: [audit/ppo-clean-reference-20260925]
+    paths: [.github/workflows/ppo-tail148-factorial.yml, audits/clean_reference/tail148_factorial.py]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnostic:
+    strategy:
+      fail-fast: false
+      matrix: {worker: [0, 1]}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Retain CPU identity and exclude incompatible vendor
+        shell: bash
+        run: |
+          mkdir -p evidence
+          lscpu | tee evidence/lscpu.txt
+          echo '${{ matrix.worker }}' > evidence/worker.txt
+          git rev-parse HEAD > evidence/commit.txt
+          cp audits/clean_reference/tail148_factorial.py evidence/executed-driver.py
+          grep -q GenuineIntel evidence/lscpu.txt
+      - name: Restore immutable runtime and original paired seed204 evidence
+        env: {GH_TOKEN: '${{ github.token }}'}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/${{ github.repository }}/actions/artifacts/11441687522/zip > runtime.zip
+          echo '7418edd50c11ae67ef761610a15c4a0c6ee70f2d3fa032609d6394eb745b5dd1  runtime.zip' | sha256sum -c -
+          unzip -q runtime.zip -d pinned
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          r=pathlib.Path('pinned')
+          for n,h in json.loads((r/'manifest.json').read_text()).items():
+              assert hashlib.sha256((r/n).read_bytes()).hexdigest()==h,n
+          PY
+          mkdir runtime
+          tar -xzf pinned/python311.tar.gz -C runtime
+          runtime/python/bin/python3.11 -m pip install --no-index --find-links pinned/wheels numpy==2.2.6 torch==2.8.0+cpu stable-baselines3==2.9.0 gymnasium==1.3.0 2>&1 | tee evidence/install.log
+          gh api repos/${{ github.repository }}/actions/artifacts/11453038137/zip > evidence/original204.zip
+          echo '6be901c8cdc5e5f831ec6d5065da2304064c9b38e59b39e8d76bf942da46c726  evidence/original204.zip' | sha256sum -c -
+          unzip -q evidence/original204.zip -d original204
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          r=pathlib.Path('original204')
+          for n,h in json.loads((r/'MANIFEST.json').read_text()).items():
+              assert hashlib.sha256((r/n).read_bytes()).hexdigest()==h,n
+          PY
+          cp pinned/manifest.json evidence/runtime-input-manifest.json
+          cp .github/workflows/ppo-tail148-factorial.yml evidence/workflow.yml
+          cp audits/clean_reference/{physical_horizon_compare,paired_pool_20261006,residual_replay}.py evidence/
+      - name: Exact historical-prefix gate then fixed causal interventions
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 runtime/python/bin/python3.11 audits/clean_reference/tail148_factorial.py --input original204 --out evidence/result 2>&1 | tee evidence/execution.log
+      - name: Hash all success and failure payloads
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          r=pathlib.Path('evidence');r.mkdir(exist_ok=True)
+          d={str(p.relative_to(r)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(r.rglob('*')) if p.is_file() and p!=r/'MANIFEST.json'}
+          (r/'MANIFEST.json').write_text(json.dumps(d,sort_keys=True,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ppo-tail148-${{ matrix.worker }}-${{ github.run_id }}
+          path: evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
