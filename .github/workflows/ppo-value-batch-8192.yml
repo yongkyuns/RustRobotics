@@ -1,0 +1,195 @@
+name: PPO scaled 2048 vs 8192 unique batch
+
+on:
+  push:
+    branches: [audit/value-batch-8192-20261007]
+    paths:
+      - .github/workflows/ppo-value-batch-8192.yml
+      - audits/clean_reference/value_batch_compare_20261007.py
+      - audits/clean_reference/paired_pool_20261006.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  historical-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Recover pinned runtime and native input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p pinned runtime evidence/inputs evidence/provenance
+          lscpu | tee evidence/provenance/current-lscpu.txt
+          gh api repos/${{ github.repository }}/actions/artifacts/11441687522/zip > runtime.zip
+          echo '7418edd50c11ae67ef761610a15c4a0c6ee70f2d3fa032609d6394eb745b5dd1  runtime.zip' | sha256sum -c -
+          unzip -q runtime.zip -d pinned
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('pinned')
+          manifest=json.loads((root/'manifest.json').read_text())
+          for name,digest in manifest.items():
+              assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest,name
+          print('Verified runtime payloads:',len(manifest))
+          PY
+          tar -xzf pinned/python311.tar.gz -C runtime
+          runtime/python/bin/python3.11 -m pip install --no-index --find-links pinned/wheels 'numpy==2.2.6' 'torch==2.8.0+cpu' 'stable-baselines3==2.9.0' 'gymnasium==1.3.0'
+          gh api repos/${{ github.repository }}/actions/artifacts/11441435840/zip > pair201.zip
+          echo '22ea3b48e60b8199131fd5379e859017cc7b5212d58bbb5c06cb5b52166ce86c  pair201.zip' | sha256sum -c -
+          unzip -p pair201.zip native.zip > evidence/inputs/native.zip
+          echo '58af5206058b24a8cd39c2665d9bc187200a4e8acaf3841a367d27731e09cdc0  evidence/inputs/native.zip' | sha256sum -c -
+          sha256sum audits/clean_reference/value_batch_compare_20261007.py audits/clean_reference/paired_pool_20261006.py runtime.zip evidence/inputs/native.zip > evidence/provenance/input-sha256.txt
+      - name: Preflight exact collection and matched optimizer budgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_compare_20261007.py preflight --raw evidence/inputs/native.zip --out evidence/preflight 2>&1 | tee evidence/preflight.log
+      - name: Reproduce published scaled seed202 checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_compare_20261007.py historical-gate --raw evidence/inputs/native.zip --out evidence/historical-gate 2>&1 | tee evidence/historical-gate.log
+      - name: Manifest
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('evidence')
+          root.mkdir(exist_ok=True)
+          manifest={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p!=root/'MANIFEST.json'}
+          (root/'MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ppo-value-batch-historical-gate-${{ github.run_id }}
+          path: evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  pair:
+    needs: historical-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [201, 202, 203, 204]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Recover pinned runtime and native input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p pinned runtime evidence/inputs evidence/provenance
+          lscpu | tee evidence/provenance/current-lscpu.txt
+          gh api repos/${{ github.repository }}/actions/artifacts/11441687522/zip > runtime.zip
+          echo '7418edd50c11ae67ef761610a15c4a0c6ee70f2d3fa032609d6394eb745b5dd1  runtime.zip' | sha256sum -c -
+          unzip -q runtime.zip -d pinned
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('pinned')
+          manifest=json.loads((root/'manifest.json').read_text())
+          for name,digest in manifest.items():
+              assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest,name
+          PY
+          tar -xzf pinned/python311.tar.gz -C runtime
+          runtime/python/bin/python3.11 -m pip install --no-index --find-links pinned/wheels 'numpy==2.2.6' 'torch==2.8.0+cpu' 'stable-baselines3==2.9.0' 'gymnasium==1.3.0'
+          gh api repos/${{ github.repository }}/actions/artifacts/11441435840/zip > pair201.zip
+          echo '22ea3b48e60b8199131fd5379e859017cc7b5212d58bbb5c06cb5b52166ce86c  pair201.zip' | sha256sum -c -
+          unzip -p pair201.zip native.zip > evidence/inputs/native.zip
+          echo '58af5206058b24a8cd39c2665d9bc187200a4e8acaf3841a367d27731e09cdc0  evidence/inputs/native.zip' | sha256sum -c -
+      - name: Per-runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_compare_20261007.py preflight --raw evidence/inputs/native.zip --out evidence/preflight 2>&1 | tee evidence/preflight.log
+      - name: Train scaled-2048 control
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_compare_20261007.py measure --raw evidence/inputs/native.zip --out evidence/control --seed ${{ matrix.seed }} --arm scaled-2048 2>&1 | tee evidence/control.log
+      - name: Check control against published value-scale completion counts
+        env:
+          SEED: ${{ matrix.seed }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 - <<'PY' 2>&1 | tee evidence/historical-control-check.log
+          import importlib.util, json, os, pathlib, numpy as np, torch
+          root=pathlib.Path('.').resolve()
+          path=root/'audits/clean_reference/value_batch_compare_20261007.py'
+          spec=importlib.util.spec_from_file_location('vb',path); vb=importlib.util.module_from_spec(spec); spec.loader.exec_module(vb)
+          torch.set_num_threads(1); torch.set_num_interop_threads(1); torch.use_deterministic_algorithms(True)
+          ref,_=vb.pool.load(pathlib.Path('evidence/inputs/native.zip'),pathlib.Path('evidence/historical-check-native'))
+          seed=int(os.environ['SEED'])
+          expected={
+            201:{131072:(32,63),262144:(32,62),524288:(32,63),786432:(32,63),1048576:(32,62)},
+            202:{131072:(32,62),262144:(32,63),524288:(30,59),786432:(32,63),1048576:(32,63)},
+            203:{131072:(32,61),262144:(32,61),524288:(32,64),786432:(32,64),1048576:(32,64)},
+            204:{131072:(31,62),262144:(32,64),524288:(32,64),786432:(32,64),1048576:(32,64)},
+          }[seed]
+          results=[]
+          for cp,want in expected.items():
+              m,e=vb.build(ref,seed,2048)
+              try:
+                  z=np.load(pathlib.Path('evidence/control')/f'policy-{cp}.npz')
+                  state={k:torch.from_numpy(z[k]) for k in z.files}
+                  m.policy.load_state_dict(state,strict=True)
+                  rows=ref.evaluate(m,2,12970000+seed,cp)
+                  s=vb.summarize(rows)
+                  got=(s['deterministic']['completions'],s['stochastic']['completions'])
+                  print(seed,cp,got,'expected',want,flush=True)
+                  vb.need(got==want,f'published control mismatch seed{seed} cp{cp}: {got} != {want}')
+                  results.append(dict(checkpoint=cp,deterministic=got[0],stochastic=got[1]))
+              finally:
+                  e.close()
+          pathlib.Path('evidence/historical-control-check.json').write_text(json.dumps(results,indent=2)+'\n')
+          print('HISTORICAL CONTROL CHECK PASS',seed,flush=True)
+          PY
+      - name: Train scaled-8192 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime/python/bin/python3.11 audits/clean_reference/value_batch_compare_20261007.py measure --raw evidence/inputs/native.zip --out evidence/candidate --seed ${{ matrix.seed }} --arm scaled-8192 2>&1 | tee evidence/candidate.log
+      - name: Verify paired budgets and initial identity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          c=json.loads(pathlib.Path('evidence/control/receipt.json').read_text())
+          n=json.loads(pathlib.Path('evidence/candidate/receipt.json').read_text())
+          assert c['initial_sha256']==n['initial_sha256']
+          assert c['training_steps']==n['training_steps']==1048576
+          assert c['optimizer_steps']==n['optimizer_steps']==163840
+          assert c['sample_presentations']==n['sample_presentations']==10485760
+          print('PAIRED BUDGET/INIT PASS')
+          PY
+      - name: Manifest
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('evidence')
+          root.mkdir(exist_ok=True)
+          manifest={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob('*')) if p.is_file() and p!=root/'MANIFEST.json'}
+          (root/'MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ppo-value-batch-${{ matrix.seed }}-${{ github.run_id }}
+          path: evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
