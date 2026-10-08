@@ -12,6 +12,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import value_batch_compare_20261007 as vb
 p = vb.pool
+from ledger import assert_episode_ledger
 SEL = json.loads((HERE / 'SELECTION.json').read_text())
 PAIRS = SEL['pairs']
 SELECTED_UPDATES = {v[side+'_update'] for v in PAIRS for side in ('failure','timeout')}
@@ -127,6 +128,8 @@ def check_preflight(ref,out):
         model.learn(4096,reset_num_timesteps=False,log_interval=None)
         assert p.eq(reference,vb.snapshot(model,env)),'recorder changes PPO, Adam or RNG'
         assert tap.total==4096
+        assert_episode_ledger([v.episodes for v in env.envs], json.loads(json.dumps(reference['episodes'])))
+        assert not cap.selected_packets, 'generic preflight must not capture selected seed201 states'
         write(out/'PREFLIGHT.json',{'noninterference':True,'steps_each':4096,'optimizer_transactions_each':640})
         print('RECORDER PREFLIGHT PASS',flush=True)
     finally: tap.close();env.close()
@@ -149,7 +152,9 @@ def exact_replay(ref,out,control):
         assert len(cap.rows)==512 and tap.total==1048576
         digest=cap.full_sha.hexdigest()
         assert digest==SEL['original_archived_packet_digest'],('all 512 batch contents differ',digest)
-        assert [v.episodes for v in env.envs]==json.loads((control/'training-episodes.json').read_text()),'episode ledger'
+        live_ledger = [v.episodes for v in env.envs]
+        write(out/'training-episodes.json', live_ledger)
+        assert_episode_ledger(live_ledger, json.loads((control/'training-episodes.json').read_text()))
         assert len(cap.selected_packets)==32
         selected_digest=hashlib.sha256()
         linked=[]

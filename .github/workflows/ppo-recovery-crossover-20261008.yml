@@ -7,6 +7,8 @@ on:
       - .github/workflows/ppo-recovery-crossover-20261008.yml
       - audits/clean_reference/crossover_20261008/SELECTION.json
       - audits/clean_reference/crossover_20261008/replay.py
+      - audits/clean_reference/crossover_20261008/ledger.py
+      - audits/clean_reference/crossover_20261008/test_ledger.py
 
 permissions:
   contents: read
@@ -27,11 +29,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence/provenance
-          python3 -m py_compile audits/clean_reference/crossover_20261008/replay.py
+          python3 -m py_compile audits/clean_reference/crossover_20261008/replay.py audits/clean_reference/crossover_20261008/ledger.py audits/clean_reference/crossover_20261008/test_ledger.py
           git rev-parse HEAD > evidence/provenance/commit.txt
           lscpu > evidence/provenance/lscpu.txt
-          cp audits/clean_reference/crossover_20261008/SELECTION.json evidence/provenance/SELECTION.json
-          sha256sum audits/clean_reference/crossover_20261008/replay.py audits/clean_reference/crossover_20261008/SELECTION.json audits/clean_reference/value_batch_compare_20261007.py > evidence/provenance/source-sha256.txt
+          cp audits/clean_reference/crossover_20261008/*.py audits/clean_reference/crossover_20261008/SELECTION.json evidence/provenance/
+          sha256sum audits/clean_reference/crossover_20261008/*.py audits/clean_reference/crossover_20261008/SELECTION.json audits/clean_reference/value_batch_compare_20261007.py > evidence/provenance/source-sha256.txt
+      - name: Test exact episode-ledger comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s audits/clean_reference/crossover_20261008 -p test_ledger.py -v 2>&1 | tee evidence/ledger-tests.log
       - name: Recover pinned runtime and source data
         env:
           GH_TOKEN: ${{ github.token }}
