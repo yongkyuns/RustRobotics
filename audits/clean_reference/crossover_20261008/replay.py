@@ -72,7 +72,7 @@ class Capture(vb.Recorder):
             arr=np.asarray(arr)
             self.full_sha.update(f'{u:04d}:{field}:{arr.dtype}:{arr.shape}\n'.encode())
             self.full_sha.update(arr.tobytes(order='C'))
-        for pair in PAIRS:
+        for pair in (PAIRS if self.history is not None else []):
             for side in ('failure','timeout'):
                 st=pair[side+'_start']
                 if st//2048+1==u:
