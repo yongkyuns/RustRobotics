@@ -1,0 +1,185 @@
+{
+  "source_protocol_issue_comment": 6061891252,
+  "source_seed": 201,
+  "source_input_evidence_sha256": "ff570b87dee8f0b7f502a57c62fa6fe48db60e7584c92a96e651c455cda5d412",
+  "original_archived_packet_digest": "76e003ff39029b70faabe40c9f85aafba8880fb2c86500576637a2b0e063d0f9",
+  "selected_packet_digest": "d73d4a3f5142183f51352469eb220093c86abcca4c5eb948da99f487a8da5af1",
+  "pairs": [
+    {
+      "pair_index": 0,
+      "quarter": 1,
+      "failure_start": 4035,
+      "timeout_start": 113003,
+      "normalized_distance": 0.20907092094421387,
+      "failure_update": 2,
+      "timeout_update": 56,
+      "rank_in_quarter": 4,
+      "matching_cohort_count": 37
+    },
+    {
+      "pair_index": 1,
+      "quarter": 1,
+      "failure_start": 14318,
+      "timeout_start": 219130,
+      "normalized_distance": 0.18851947784423828,
+      "failure_update": 7,
+      "timeout_update": 107,
+      "rank_in_quarter": 13,
+      "matching_cohort_count": 37
+    },
+    {
+      "pair_index": 2,
+      "quarter": 1,
+      "failure_start": 36497,
+      "timeout_start": 185784,
+      "normalized_distance": 0.1403067260980606,
+      "failure_update": 18,
+      "timeout_update": 91,
+      "rank_in_quarter": 23,
+      "matching_cohort_count": 37
+    },
+    {
+      "pair_index": 3,
+      "quarter": 1,
+      "failure_start": 70538,
+      "timeout_start": 210682,
+      "normalized_distance": 0.1378486305475235,
+      "failure_update": 35,
+      "timeout_update": 103,
+      "rank_in_quarter": 32,
+      "matching_cohort_count": 37
+    },
+    {
+      "pair_index": 4,
+      "quarter": 2,
+      "failure_start": 280379,
+      "timeout_start": 427533,
+      "normalized_distance": 0.21644806861877441,
+      "failure_update": 137,
+      "timeout_update": 209,
+      "rank_in_quarter": 0,
+      "matching_cohort_count": 5
+    },
+    {
+      "pair_index": 5,
+      "quarter": 2,
+      "failure_start": 408862,
+      "timeout_start": 517397,
+      "normalized_distance": 0.16742847859859467,
+      "failure_update": 200,
+      "timeout_update": 253,
+      "rank_in_quarter": 1,
+      "matching_cohort_count": 5
+    },
+    {
+      "pair_index": 6,
+      "quarter": 2,
+      "failure_start": 512944,
+      "timeout_start": 506728,
+      "normalized_distance": 0.2227766513824463,
+      "failure_update": 251,
+      "timeout_update": 248,
+      "rank_in_quarter": 3,
+      "matching_cohort_count": 5
+    },
+    {
+      "pair_index": 7,
+      "quarter": 2,
+      "failure_start": 519189,
+      "timeout_start": 263556,
+      "normalized_distance": 0.21619248390197754,
+      "failure_update": 254,
+      "timeout_update": 129,
+      "rank_in_quarter": 4,
+      "matching_cohort_count": 5
+    },
+    {
+      "pair_index": 8,
+      "quarter": 3,
+      "failure_start": 556562,
+      "timeout_start": 560494,
+      "normalized_distance": 0.1795520782470703,
+      "failure_update": 272,
+      "timeout_update": 274,
+      "rank_in_quarter": 1,
+      "matching_cohort_count": 15
+    },
+    {
+      "pair_index": 9,
+      "quarter": 3,
+      "failure_start": 582003,
+      "timeout_start": 586449,
+      "normalized_distance": 0.13788604736328125,
+      "failure_update": 285,
+      "timeout_update": 287,
+      "rank_in_quarter": 5,
+      "matching_cohort_count": 15
+    },
+    {
+      "pair_index": 10,
+      "quarter": 3,
+      "failure_start": 638452,
+      "timeout_start": 704407,
+      "normalized_distance": 0.17136168479919434,
+      "failure_update": 312,
+      "timeout_update": 344,
+      "rank_in_quarter": 9,
+      "matching_cohort_count": 15
+    },
+    {
+      "pair_index": 11,
+      "quarter": 3,
+      "failure_start": 751519,
+      "timeout_start": 776322,
+      "normalized_distance": 0.10180257260799408,
+      "failure_update": 367,
+      "timeout_update": 380,
+      "rank_in_quarter": 13,
+      "matching_cohort_count": 15
+    },
+    {
+      "pair_index": 12,
+      "quarter": 4,
+      "failure_start": 848119,
+      "timeout_start": 958529,
+      "normalized_distance": 0.22323936223983765,
+      "failure_update": 415,
+      "timeout_update": 469,
+      "rank_in_quarter": 2,
+      "matching_cohort_count": 20
+    },
+    {
+      "pair_index": 13,
+      "quarter": 4,
+      "failure_start": 950028,
+      "timeout_start": 831121,
+      "normalized_distance": 0.12288853526115417,
+      "failure_update": 464,
+      "timeout_update": 406,
+      "rank_in_quarter": 7,
+      "matching_cohort_count": 20
+    },
+    {
+      "pair_index": 14,
+      "quarter": 4,
+      "failure_start": 1008079,
+      "timeout_start": 880825,
+      "normalized_distance": 0.18202900886535645,
+      "failure_update": 493,
+      "timeout_update": 431,
+      "rank_in_quarter": 12,
+      "matching_cohort_count": 20
+    },
+    {
+      "pair_index": 15,
+      "quarter": 4,
+      "failure_start": 1026671,
+      "timeout_start": 961345,
+      "normalized_distance": 0.12453172355890274,
+      "failure_update": 502,
+      "timeout_update": 470,
+      "rank_in_quarter": 17,
+      "matching_cohort_count": 20
+    }
+  ]
+}
