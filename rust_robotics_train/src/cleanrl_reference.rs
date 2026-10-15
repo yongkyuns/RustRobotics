@@ -19,7 +19,7 @@ use burn::{
     module::{AutodiffModule, Module, Param},
     nn::Linear,
     optim::{AdamConfig, GradientsParams, Optimizer, adaptor::OptimizerAdaptor},
-    tensor::{Tensor, TensorData, activation, backend::{AutodiffBackend as _, Backend}},
+    tensor::{Tensor, TensorData, activation, backend::Backend},
 };
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use rust_robotics_algo::cart_pole::CartPoleParameters;
@@ -50,8 +50,10 @@ pub struct CleanRlReferenceConfig {
 
 impl Default for CleanRlReferenceConfig {
     fn default() -> Self {
-        let mut environment = PendulumEnvConfig::default();
-        environment.max_steps = 256; // An external collection cutoff, not failure.
+        let environment = PendulumEnvConfig {
+            max_steps: 256, // An external collection cutoff, not failure.
+            ..PendulumEnvConfig::default()
+        };
         Self {
             plant: CartPoleParameters::default(),
             environment,
@@ -190,20 +192,29 @@ fn normal<R: Rng + ?Sized>(rng: &mut R) -> f64 {
     (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()
 }
 
-/// Numerically stable categorical probabilities. A 0.5/0.5 float32 tie
-/// deterministically chooses the LEFT category, as in torch.argmax.
-pub fn left_probability(logits: [f32; 2]) -> f32 {
+/// Stable probabilities for both categories. Do not reconstruct the rare
+/// category as `1 - p`: cancellation changes recorded action likelihoods.
+fn categorical_probabilities(logits: [f32; 2]) -> [f32; 2] {
     assert!(logits.iter().all(|x| x.is_finite()));
     let high = logits[0].max(logits[1]);
-    let left = (logits[0] - high).exp();
-    left / (left + (logits[1] - high).exp())
+    let exps = [(logits[0] - high).exp(), (logits[1] - high).exp()];
+    let sum = exps[0] + exps[1];
+    [exps[0] / sum, exps[1] / sum]
 }
 
-fn choose_action<R: Rng + ?Sized>(logits: [f32; 2], rng: &mut R) -> (usize, f32) {
-    let prob = left_probability(logits);
-    let action = if rng.gen::<f32>() < prob { 0 } else { 1 };
-    let probability = if action == 0 { prob } else { 1.0 - prob };
-    (action, probability.max(f32::MIN_POSITIVE).ln())
+/// Numerically stable probability of the left category.
+pub fn left_probability(logits: [f32; 2]) -> f32 {
+    categorical_probabilities(logits)[0]
+}
+
+fn deterministic_action(logits: [f32; 2]) -> usize {
+    let probabilities = categorical_probabilities(logits);
+    usize::from(probabilities[1] > probabilities[0])
+}
+
+fn choose_action<R: Rng + ?Sized>(logits: [f32; 2], rng: &mut R) -> usize {
+    let probability = left_probability(logits);
+    usize::from(rng.gen::<f32>() >= probability)
 }
 
 pub fn force_for_action(action: usize, max_force: f32) -> f32 {
@@ -287,8 +298,22 @@ fn mini_batch_advantages(src: &[f32]) -> Vec<f32> {
     src.iter().map(|x| (x - mean) / (variance.sqrt() + 1e-8)).collect()
 }
 
+/// Elementwise maximum with PyTorch's half-gradient on exact ties.
+/// Burn 0.20.1 max_pair uses a strict comparison and routes ties to self.
+/// At a clipped-value boundary those have equal values but different gradients.
+fn torch_maximum<B: Backend, const D: usize>(
+    left: Tensor<B, D>,
+    right: Tensor<B, D>,
+) -> Tensor<B, D> {
+    let weight = left.clone().greater(right.clone()).float()
+        + left.clone().equal(right.clone()).float().mul_scalar(0.5);
+    let other_weight = weight.clone().neg().add_scalar(1.0);
+    left * weight + right * other_weight
+}
+
 /// Same clipped categorical surrogate, critic clip and entropy calculation
 /// as the pinned CleanRL PPO update, extracted for independent Torch fixtures.
+#[allow(clippy::too_many_arguments)] // Explicit operand contract shared with the numerical fixture.
 fn ppo_objective_terms<B: Backend>(
     logits: Tensor<B, 2>,
     values: Tensor<B, 2>,
@@ -304,7 +329,8 @@ fn ppo_objective_terms<B: Backend>(
     let new_log_prob = (log_probs.clone() * masks(device, actions)).sum_dim(1);
     let ratio = (new_log_prob - tensor_scalars(device, old_log_probs)).exp();
     let neg_advantages = tensor_scalars(device, normalized_advantages).mul_scalar(-1.0);
-    let policy_loss = (ratio.clone() * neg_advantages.clone()).max_pair(
+    let policy_loss = torch_maximum(
+        ratio.clone() * neg_advantages.clone(),
         ratio.clamp(1.0 - clip_epsilon, 1.0 + clip_epsilon) * neg_advantages,
     ).mean();
 
@@ -314,7 +340,7 @@ fn ppo_objective_terms<B: Backend>(
     let clipped_predictions = previous_values.clone() +
         (values - previous_values).clamp(-clip_epsilon, clip_epsilon);
     let clipped = (clipped_predictions - return_targets).square();
-    let value_loss = unclipped.max_pair(clipped).mean().mul_scalar(0.5);
+    let value_loss = torch_maximum(unclipped, clipped).mean().mul_scalar(0.5);
 
     let entropy = (log_probs.clone().exp() * log_probs)
         .sum_dim(1).mean().mul_scalar(-1.0);
@@ -361,6 +387,7 @@ fn clip_global_gradients(
         gradients.register::<TrainBackend, 2>(weight_id, weight.mul_scalar(coefficient));
         let bias = gradients.remove::<TrainBackend, 1>(bias_id)
             .expect("missing PPO bias gradient");
+        gradients.register::<TrainBackend, 1>(bias_id, bias.mul_scalar(coefficient));
         gradients.register::<TrainBackend, 1>(bias_id, bias.mul_scalar(coefficient));
     }
     gradients
@@ -453,7 +480,7 @@ impl CleanRlReferenceTrainer {
             &self.device, &[observation],
         );
         let logits = valid.actor.forward(input).to_data().to_vec::<f32>().unwrap();
-        force_for_action(if logits[0] >= logits[1] { 0 } else { 1 }, self.config.environment.max_force)
+        force_for_action(deterministic_action([logits[0], logits[1]]), self.config.environment.max_force)
     }
 
     /// Evaluate a frozen checkpoint on a caller-owned panel of reset keys.
@@ -526,10 +553,10 @@ impl CleanRlReferenceTrainer {
                 let pair = [logits[i * ACTIONS], logits[i * ACTIONS + 1]];
                 let action = match mode {
                     ReferenceEvaluationMode::Deterministic => {
-                        usize::from(pair[1] > pair[0])
+                        deterministic_action(pair)
                     }
                     ReferenceEvaluationMode::Stochastic => {
-                        choose_action(pair, &mut lane.action_rng).0
+                        choose_action(pair, &mut lane.action_rng)
                     }
                 };
                 if let Some(previous) = lane.previous_action {
@@ -595,11 +622,17 @@ impl CleanRlReferenceTrainer {
             let inputs = obs_tensor::<<AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend>(
                 &self.device, &observations,
             );
-            let logits = valid.actor.forward(inputs.clone()).to_data().to_vec::<f32>().unwrap();
+            let policy_logits = valid.actor.forward(inputs.clone());
+            // Record the same log-softmax used by PPO replay. Logging ln(1-p)
+            // can produce a non-unit ratio even when the actor is unchanged.
+            let log_probs = activation::log_softmax(policy_logits.clone(), 1)
+                .to_data().to_vec::<f32>().unwrap();
+            let logits = policy_logits.to_data().to_vec::<f32>().unwrap();
             let values = valid.critic.forward(inputs).to_data().to_vec::<f32>().unwrap();
             for (i, lane) in self.lanes.iter_mut().enumerate() {
                 let distribution = [logits[2 * i], logits[2 * i + 1]];
-                let (action, log_prob) = choose_action(distribution, &mut lane.action_rng);
+                let action = choose_action(distribution, &mut lane.action_rng);
+                let log_prob = log_probs[2 * i + action];
                 let step = lane.env.step_with_rng(
                     force_for_action(action, self.config.environment.max_force),
                     &mut lane.environment_rng,
@@ -711,7 +744,7 @@ mod tests {
         // Terminal path gets gamma*V(final)=.9*8, never V(reset)=1000.
         let rows = [
             example(2.0, 1.0, true, true, 8.0),
-            example(2.0, 2.0, true, false, 999.0),
+            example(2.0, 2.0, 2.0, false, 999.0),
         ];
         let (ret, adv) = gae_targets(&rows, &[1000.0], 1, 2, 0.9, 0.95);
         assert!((ret[0] - 8.2).abs() < 1e-5);
@@ -898,3 +931,7 @@ mod tests {
         assert!(trainer.metrics().last_value_loss.is_finite());
     }
 }
+
+#[cfg(test)]
+#[path = "cleanrl_reference_parity_tests.rs"]
+mod parity_tests;
