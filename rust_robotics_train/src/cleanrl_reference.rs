@@ -388,7 +388,6 @@ fn clip_global_gradients(
         let bias = gradients.remove::<TrainBackend, 1>(bias_id)
             .expect("missing PPO bias gradient");
         gradients.register::<TrainBackend, 1>(bias_id, bias.mul_scalar(coefficient));
-        gradients.register::<TrainBackend, 1>(bias_id, bias.mul_scalar(coefficient));
     }
     gradients
 }
@@ -744,7 +743,7 @@ mod tests {
         // Terminal path gets gamma*V(final)=.9*8, never V(reset)=1000.
         let rows = [
             example(2.0, 1.0, true, true, 8.0),
-            example(2.0, 2.0, 2.0, false, 999.0),
+            example(2.0, 2.0, true, false, 999.0),
         ];
         let (ret, adv) = gae_targets(&rows, &[1000.0], 1, 2, 0.9, 0.95);
         assert!((ret[0] - 8.2).abs() < 1e-5);
