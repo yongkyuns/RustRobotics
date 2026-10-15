@@ -29,7 +29,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Compile cleanly with strict warnings
-        run: cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests -- -D warnings
+        run: cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
       - name: Verify categorical math, timeout GAE and live native smoke
         run: cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference::tests -- --nocapture
       - name: Check formatting
