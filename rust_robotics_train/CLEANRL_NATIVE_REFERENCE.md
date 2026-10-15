@@ -46,8 +46,11 @@ against the older linear-Euler PPO training dynamics on master.
 This is **not** claimed to be identical to CleanRL:
 1. Orthogonal weight generation differs from Torch's QR numerical and RNG
    identity, so identical seeds do not imply identical initial matrices.
-2. The pinned CleanRL source uses a global PyTorch gradient norm; Burn's norm
-   clipping configuration must be independently checked for the same scope.
+2. **Known parity mismatch:** the pinned CleanRL source clips the single
+   GLOBAL L2 gradient norm across all actor/critic parameters. Burn 0.20's
+   `GradientClippingConfig::Norm` clips each parameter tensor independently.
+   This code currently uses Burn's built-in clipping. Its scope must be fixed
+   and compared numerically before calling this a recipe-matched Rust port.
 3. The Rust rollout stream seeding and minibatch permutation order are
    independent of Torch, and no exact trajectory-equality is expected.
 4. Gym vectorized evaluation and native model export/snapshot and UI
