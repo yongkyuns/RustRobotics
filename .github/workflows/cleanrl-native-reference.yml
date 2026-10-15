@@ -1,0 +1,48 @@
+name: Experimental CleanRL native PPO
+
+on:
+  push:
+    branches: ["experiment/ppo-cleanrl-native-reference"]
+  pull_request:
+    branches: ["master"]
+    paths:
+      - "rust_robotics_train/src/cleanrl_reference.rs"
+      - "rust_robotics_train/src/lib.rs"
+      - "rust_robotics_train/Cargo.toml"
+      - ".github/workflows/cleanrl-native-reference.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-reference:
+    name: Compile and test native categorical PPO reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile cleanly with strict warnings
+        run: cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests -- -D warnings
+      - name: Verify categorical math, timeout GAE and live native smoke
+        run: cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference::tests -- --nocapture
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Save formatting patch on failure
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff -- rust_robotics_train/src/cleanrl_reference.rs > "$RUNNER_TEMP/cleanrl-format.patch"
+      - name: Upload formatting correction if needed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanrl-native-format
+          path: ${{ runner.temp }}/cleanrl-format.patch
+          if-no-files-found: ignore
