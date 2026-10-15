@@ -366,6 +366,28 @@ fn clip_global_gradients(
     gradients
 }
 
+/// Read-only evaluation modes. Evaluation RNG streams do not affect training.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceEvaluationMode {
+    Deterministic,
+    Stochastic,
+}
+
+/// A single native Rust trajectory on a fixed, externally supplied key.
+/// Results at different policy checkpoints must use the same keys and mode.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceEvaluationEpisode {
+    pub key: u64,
+    pub initial_state: [f32; INPUTS],
+    pub initial_value: f32,
+    pub steps: usize,
+    pub completed: bool,
+    pub terminated: bool,
+    pub raw_return: f64,
+    pub min_cart_clearance_m: f32,
+    pub force_switches: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CleanRlReferenceMetrics {
     pub updates: usize,
@@ -432,6 +454,117 @@ impl CleanRlReferenceTrainer {
         );
         let logits = valid.actor.forward(input).to_data().to_vec::<f32>().unwrap();
         force_for_action(if logits[0] >= logits[1] { 0 } else { 1 }, self.config.environment.max_force)
+    }
+
+    /// Evaluate a frozen checkpoint on a caller-owned panel of reset keys.
+    ///
+    /// Uses the real noisy nonlinear native environment. Every frame evaluates
+    /// ALL lanes in one batch, including completed ones, avoiding changes to
+    /// the inference shape as episodes finish. Completed lanes are never
+    /// physically stepped again. No training RNG, optimizer or live environment
+    /// state is touched.
+    pub fn evaluate_seeded(
+        &self,
+        keys: &[u64],
+        horizon: usize,
+        mode: ReferenceEvaluationMode,
+    ) -> Vec<ReferenceEvaluationEpisode> {
+        assert!(!keys.is_empty() && horizon > 0);
+        struct EvalLane {
+            key: u64,
+            env: PendulumEnv,
+            observation: [f32; INPUTS],
+            environment_rng: StdRng,
+            action_rng: StdRng,
+            initial_state: [f32; INPUTS],
+            initial_value: f32,
+            steps: usize,
+            done: bool,
+            completed: bool,
+            terminated: bool,
+            raw_return: f64,
+            min_cart_clearance_m: f32,
+            force_switches: usize,
+            previous_action: Option<usize>,
+        }
+
+        let mut env_config = self.config.environment;
+        env_config.max_steps = horizon; // Same physical boundaries; new evaluation cap.
+        let mut lanes = Vec::with_capacity(keys.len());
+        for &key in keys {
+            let mut root = StdRng::seed_from_u64(key);
+            let mut environment_rng = StdRng::seed_from_u64(root.gen());
+            let action_rng = StdRng::seed_from_u64(root.gen());
+            let env = PendulumEnv::new_with_rng(
+                self.config.plant.model(), env_config, &mut environment_rng,
+            );
+            let observation = env.observation_with_rng(&mut environment_rng);
+            let state = env.state();
+            lanes.push(EvalLane {
+                key, env, observation, environment_rng, action_rng,
+                initial_state: [state[0], state[1], state[2], state[3]],
+                initial_value: self.value(observation),
+                steps: 0, done: false, completed: false, terminated: false,
+                raw_return: 0.0,
+                min_cart_clearance_m: env_config.max_position_m - state[0].abs(),
+                force_switches: 0,
+                previous_action: None,
+            });
+        }
+
+        let actor = self.model.valid().actor;
+        for _ in 0..horizon {
+            let observations = lanes.iter().map(|lane| lane.observation).collect::<Vec<_>>();
+            let tensor = obs_tensor::<
+                <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
+            >(&self.device, &observations);
+            let logits = actor.forward(tensor).to_data().to_vec::<f32>().unwrap();
+            for (i, lane) in lanes.iter_mut().enumerate() {
+                if lane.done {
+                    continue;
+                }
+                let pair = [logits[i * ACTIONS], logits[i * ACTIONS + 1]];
+                let action = match mode {
+                    ReferenceEvaluationMode::Deterministic => {
+                        usize::from(pair[1] > pair[0])
+                    }
+                    ReferenceEvaluationMode::Stochastic => {
+                        choose_action(pair, &mut lane.action_rng).0
+                    }
+                };
+                if let Some(previous) = lane.previous_action {
+                    lane.force_switches += usize::from(previous != action);
+                }
+                lane.previous_action = Some(action);
+                let force = force_for_action(action, env_config.max_force);
+                let step = lane.env.step_with_rng(force, &mut lane.environment_rng);
+                lane.steps += 1;
+                lane.raw_return += f64::from(step.reward);
+                lane.observation = step.observation;
+                lane.min_cart_clearance_m = lane.min_cart_clearance_m.min(
+                    env_config.max_position_m - lane.env.state()[0].abs()
+                );
+                if step.done {
+                    lane.done = true;
+                    lane.completed = step.truncated;
+                    lane.terminated = step.terminated();
+                }
+            }
+            if lanes.iter().all(|lane| lane.done) {
+                break;
+            }
+        }
+        lanes.into_iter().map(|lane| ReferenceEvaluationEpisode {
+            key: lane.key,
+            initial_state: lane.initial_state,
+            initial_value: lane.initial_value,
+            steps: lane.steps,
+            completed: lane.completed,
+            terminated: lane.terminated,
+            raw_return: lane.raw_return,
+            min_cart_clearance_m: lane.min_cart_clearance_m,
+            force_switches: lane.force_switches,
+        }).collect()
     }
 
     fn value(&self, observation: [f32; INPUTS]) -> f32 {
@@ -718,6 +851,32 @@ mod tests {
         assert!((ret[0] - (-10.0)).abs() < 1e-6);
         assert!((ret[1] - 3.7).abs() < 1e-5);
         assert!((ret[2] - 5.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn native_evaluation_is_reproducible_and_does_not_mutate_training() {
+        let config = CleanRlReferenceConfig::default();
+        let trainer = CleanRlReferenceTrainer::new(config);
+        let before_action = trainer.act_deterministic([0.0; INPUTS]);
+        let keys = [55_000_001_u64, 55_000_002, 55_000_003];
+        for mode in [ReferenceEvaluationMode::Deterministic, ReferenceEvaluationMode::Stochastic] {
+            let original = trainer.evaluate_seeded(&keys, 24, mode);
+            let repeat = trainer.evaluate_seeded(&keys, 24, mode);
+            assert_eq!(original, repeat, "evaluation changed training or RNG");
+            assert_eq!(original.len(), keys.len());
+            for (row, &key) in original.iter().zip(&keys) {
+                assert_eq!(row.key, key);
+                assert!(row.steps > 0 && row.steps <= 24);
+                assert_eq!(row.completed, !row.terminated);
+                assert!(row.raw_return.is_finite());
+                assert!(row.initial_value.is_finite());
+                assert!(row.min_cart_clearance_m.is_finite());
+                assert!(row.force_switches < row.steps);
+            }
+        }
+        assert_eq!(trainer.metrics().environment_steps, 0);
+        assert_eq!(trainer.metrics().updates, 0);
+        assert_eq!(trainer.act_deterministic([0.0; INPUTS]), before_action);
     }
 
     #[test]
