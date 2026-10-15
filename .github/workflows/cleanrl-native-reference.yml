@@ -44,7 +44,8 @@ jobs:
       - name: Compile native reference and cohort runner
         run: cargo check --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples
       - name: Verify categorical gradients, timeout GAE and live native smoke
-        run: cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
+        run: |
+          cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
       - name: Enforce strict warnings
         run: cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
       - name: Check formatting
