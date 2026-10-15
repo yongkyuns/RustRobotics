@@ -16,7 +16,6 @@ use crate::{
     model::obs_tensor,
 };
 use burn::{
-    grad_clipping::GradientClippingConfig,
     module::{AutodiffModule, Module, Param},
     nn::Linear,
     optim::{AdamConfig, GradientsParams, Optimizer, adaptor::OptimizerAdaptor},
@@ -288,6 +287,51 @@ fn mini_batch_advantages(src: &[f32]) -> Vec<f32> {
     src.iter().map(|x| (x - mean) / (variance.sqrt() + 1e-8)).collect()
 }
 
+/// Clip one global L2 norm across ALL actor+critic weights and biases.
+/// Burn's built-in GradientClippingConfig::Norm clips individual parameter
+/// tensors, which is not equivalent to CleanRL/PyTorch's clip_grad_norm_.
+fn clip_global_gradients(
+    model: &ActorCritic<AutodiffBackend>,
+    mut gradients: GradientsParams,
+    maximum_norm: f32,
+) -> GradientsParams {
+    use crate::backend::TrainBackend;
+
+    let layers = [
+        &model.actor.input, &model.actor.hidden, &model.actor.output,
+        &model.critic.input, &model.critic.hidden, &model.critic.output,
+    ];
+    let mut squared_norm = 0.0_f64;
+    for linear in layers {
+        let weight = gradients
+            .get::<TrainBackend, 2>(linear.weight.id)
+            .expect("missing PPO weight gradient")
+            .to_data().to_vec::<f32>().unwrap();
+        let bias = gradients
+            .get::<TrainBackend, 1>(linear.bias.as_ref().unwrap().id)
+            .expect("missing PPO bias gradient")
+            .to_data().to_vec::<f32>().unwrap();
+        squared_norm += weight.into_iter().chain(bias).map(|v| {
+            let v = f64::from(v);
+            v * v
+        }).sum::<f64>();
+    }
+    assert!(squared_norm.is_finite(), "nonfinite PPO global gradient");
+    let coefficient = (f64::from(maximum_norm) / (squared_norm.sqrt() + 1e-6))
+        .min(1.0) as f32;
+    for linear in layers {
+        let weight_id = linear.weight.id;
+        let bias_id = linear.bias.as_ref().unwrap().id;
+        let weight = gradients.remove::<TrainBackend, 2>(weight_id)
+            .expect("missing PPO weight gradient");
+        gradients.register::<TrainBackend, 2>(weight_id, weight.mul_scalar(coefficient));
+        let bias = gradients.remove::<TrainBackend, 1>(bias_id)
+            .expect("missing PPO bias gradient");
+        gradients.register::<TrainBackend, 1>(bias_id, bias.mul_scalar(coefficient));
+    }
+    gradients
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CleanRlReferenceMetrics {
     pub updates: usize,
@@ -329,10 +373,9 @@ impl CleanRlReferenceTrainer {
             lanes.push(Lane { env, observation, environment_rng, action_rng });
         }
         let optimizer_rng = StdRng::seed_from_u64(root.gen());
-        let optimizer = AdamConfig::new()
-            .with_epsilon(1e-5)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(config.maximum_gradient_norm)))
-            .init();
+        // Apply an explicit joint global norm to the full actor+critic gradient
+        // before Adam. Burn's built-in Norm clips EACH tensor independently.
+        let optimizer = AdamConfig::new().with_epsilon(1e-5).init();
         Self {
             config, device, model, optimizer, lanes, optimizer_rng,
             metrics: CleanRlReferenceMetrics::default(),
@@ -471,6 +514,7 @@ impl CleanRlReferenceTrainer {
                 let loss = policy_loss + value_loss.mul_scalar(self.config.value_coefficient)
                     - entropy.mul_scalar(self.config.entropy_coefficient);
                 let grads = GradientsParams::from_grads(loss.backward(), &self.model);
+                let grads = clip_global_gradients(&self.model, grads, self.config.maximum_gradient_norm);
                 self.model = self.optimizer.step(learning_rate, self.model.clone(), grads);
             }
         }
