@@ -287,6 +287,40 @@ fn mini_batch_advantages(src: &[f32]) -> Vec<f32> {
     src.iter().map(|x| (x - mean) / (variance.sqrt() + 1e-8)).collect()
 }
 
+/// Same clipped categorical surrogate, critic clip and entropy calculation
+/// as the pinned CleanRL PPO update, extracted for independent Torch fixtures.
+fn ppo_objective_terms<B: Backend>(
+    logits: Tensor<B, 2>,
+    values: Tensor<B, 2>,
+    device: &B::Device,
+    actions: &[usize],
+    old_log_probs: &[f32],
+    old_values: &[f32],
+    targets: &[f32],
+    normalized_advantages: &[f32],
+    clip_epsilon: f32,
+) -> (Tensor<B, 1>, Tensor<B, 1>, Tensor<B, 1>) {
+    let log_probs = activation::log_softmax(logits, 1);
+    let new_log_prob = (log_probs.clone() * masks(device, actions)).sum_dim(1);
+    let ratio = (new_log_prob - tensor_scalars(device, old_log_probs)).exp();
+    let neg_advantages = tensor_scalars(device, normalized_advantages).mul_scalar(-1.0);
+    let policy_loss = (ratio.clone() * neg_advantages.clone()).max_pair(
+        ratio.clamp(1.0 - clip_epsilon, 1.0 + clip_epsilon) * neg_advantages,
+    ).mean();
+
+    let previous_values = tensor_scalars(device, old_values);
+    let return_targets = tensor_scalars(device, targets);
+    let unclipped = (values.clone() - return_targets.clone()).square();
+    let clipped_predictions = previous_values.clone() +
+        (values - previous_values).clamp(-clip_epsilon, clip_epsilon);
+    let clipped = (clipped_predictions - return_targets).square();
+    let value_loss = unclipped.max_pair(clipped).mean().mul_scalar(0.5);
+
+    let entropy = (log_probs.clone().exp() * log_probs)
+        .sum_dim(1).mean().mul_scalar(-1.0);
+    (policy_loss, value_loss, entropy)
+}
+
 /// Clip one global L2 norm across ALL actor+critic weights and biases.
 /// Burn's built-in GradientClippingConfig::Norm clips individual parameter
 /// tensors, which is not equivalent to CleanRL/PyTorch's clip_grad_norm_.
@@ -485,29 +519,19 @@ impl CleanRlReferenceTrainer {
                 let normalized_adv = mini_batch_advantages(&batch_adv);
 
                 let input = obs_tensor::<AutodiffBackend>(&self.device, &observations);
-                let log_probs = activation::log_softmax(self.model.actor.forward(input.clone()), 1);
-                let new_log_prob = (log_probs.clone() * masks(&self.device, &actions)).sum_dim(1);
-                let ratio = (new_log_prob - tensor_scalars(&self.device, &old_log_probs)).exp();
-                let adv = tensor_scalars(&self.device, &normalized_adv);
-                let neg_adv = adv.mul_scalar(-1.0);
-                let policy_loss = (ratio.clone() * neg_adv.clone()).max_pair(
-                    ratio.clamp(
-                        1.0 - self.config.clip_epsilon,
-                        1.0 + self.config.clip_epsilon,
-                    ) * neg_adv,
-                ).mean();
-
+                let logits = self.model.actor.forward(input.clone());
                 let values = self.model.critic.forward(input);
-                let previous = tensor_scalars(&self.device, &old_values);
-                let targets = tensor_scalars(&self.device, &targets);
-                let unclipped = (values.clone() - targets.clone()).square();
-                let clipped_prediction = previous.clone() + (values - previous)
-                    .clamp(-self.config.clip_epsilon, self.config.clip_epsilon);
-                let clipped = (clipped_prediction - targets).square();
-                let value_loss = unclipped.max_pair(clipped).mean().mul_scalar(0.5);
-
-                let entropy = (log_probs.clone().exp() * log_probs)
-                    .sum_dim(1).mean().mul_scalar(-1.0);
+                let (policy_loss, value_loss, entropy) = ppo_objective_terms(
+                    logits,
+                    values,
+                    &self.device,
+                    &actions,
+                    &old_log_probs,
+                    &old_values,
+                    &targets,
+                    &normalized_adv,
+                    self.config.clip_epsilon,
+                );
                 self.metrics.last_policy_loss = policy_loss.clone().to_data().to_vec::<f32>().unwrap()[0];
                 self.metrics.last_value_loss = value_loss.clone().to_data().to_vec::<f32>().unwrap()[0];
                 self.metrics.last_entropy = entropy.clone().to_data().to_vec::<f32>().unwrap()[0];
@@ -645,6 +669,40 @@ mod tests {
             }
         }
         assert!((new_squared.sqrt() - f64::from(maximum)).abs() < 1e-5);
+    }
+
+    /// Pinned float32 Torch 2.10 reference computed using CleanRL's
+    /// Categorical logits, clipped ratio, value clipping and entropy formula.
+    #[test]
+    fn clipped_ppo_objective_matches_independent_pytorch_fixture() {
+        let device = Default::default();
+        let logits = Tensor::<crate::backend::TrainBackend, 2>::from_data(
+            TensorData::new(
+                vec![0.25, -0.8, -0.3, 0.4, 1.2, -0.6, -0.8, 0.4],
+                [4, 2],
+            ), &device,
+        );
+        let values = Tensor::<crate::backend::TrainBackend, 2>::from_data(
+            TensorData::new(vec![0.9, -0.3, -0.5, 1.8], [4, 1]), &device,
+        );
+        let advantages = mini_batch_advantages(&[-2.0, -0.4, 0.7, 1.2]);
+        let (pg, vf, entropy) = ppo_objective_terms(
+            logits, values, &device, &[0, 1, 1, 0],
+            &[-0.8, -0.1, -0.7, -1.4],
+            &[0.3, -0.5, 0.1, 2.0],
+            &[2.0, -1.0, 0.8, 0.0],
+            &advantages, 0.2,
+        );
+        let scalar = |value: Tensor<crate::backend::TrainBackend, 1>| {
+            value.to_data().to_vec::<f32>().unwrap()[0]
+        };
+        let pg = scalar(pg);
+        let vf = scalar(vf);
+        let entropy = scalar(entropy);
+        assert!((pg - 0.32307282).abs() < 1e-5, "clipped actor surrogate");
+        assert!((vf - 0.95874995).abs() < 1e-5, "clipped critic target");
+        assert!((entropy - 0.53926545).abs() < 1e-5, "categorical entropy");
+        assert!((pg + 0.5 * vf - 0.01 * entropy - 0.79705513).abs() < 1e-5);
     }
 
     #[test]
