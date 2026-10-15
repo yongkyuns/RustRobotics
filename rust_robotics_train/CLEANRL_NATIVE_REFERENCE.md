@@ -78,3 +78,31 @@ Protected MuJoCo and control source, current runtime snapshots and regular
 continuous trainer are untouched. The experimental module intentionally has no
 user-facing switch; the goal remains one supported reliable trainer, not two
 competing production pathways.
+
+## Fixed full-cohort evaluator (manual only)
+
+A source-controlled `rust_robotics_train/examples/cleanrl_reference_cohort.rs`
+runner is provided for the four exposed development seeds. It uses the
+read-only, **64-lane batched** native evaluator (identical batch size across
+completed/inactive lanes), preserving original physical rewards, bounded
+rail/angle terminations and independently seeded action/actuation/observation
+noise. The full training clock never resets between checkpoints.
+
+```bash
+cargo run --release -p rust_robotics_train --features cleanrl-reference \\
+  --example cleanrl_reference_cohort -- 201 /tmp/native-seed201.csv
+```
+
+Fixed checkpoints at updates 0/64/128/256/512/768/976 correspond to
+0/32768/65536/131072/262144/393216/499712 actual transitions. Two
+predeclared panels of 64 reset keys each use independent key namespaces:
+ordinary is a fixed 64-key prefix; difficult is selected solely by initial
+physical-state thresholds (angle magnitude ≥ 0.15, angular-rate magnitude
+≥ 0.25 and outward motion). Both deterministic and stochastic policy
+outputs are evaluated for each checkpoint, with all physical failures,
+returns, rail clearances and force switches stored in create-only CSV files.
+This is **not** the previous Python evaluator's identical state/noise-key
+panel or equivalent RNG generator; the results must not be presented as a
+byte-matched Python-versus-Rust experiment. It is a new fixed task-native
+panel for checking retained recovery as learning proceeds. The full cohort
+is not part of regular CI and has **not been executed or qualified**.
