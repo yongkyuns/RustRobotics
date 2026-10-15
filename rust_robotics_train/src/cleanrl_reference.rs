@@ -601,6 +601,68 @@ mod tests {
     }
 
     #[test]
+    fn global_gradient_clip_scales_actor_and_critic_together() {
+        use crate::backend::TrainBackend;
+        let device = Default::default();
+        let mut rng = StdRng::seed_from_u64(13091);
+        let model = ActorCritic::<AutodiffBackend>::new(&device, &mut rng);
+        let mut gradients = GradientsParams::new();
+        let layers = [
+            &model.actor.input, &model.actor.hidden, &model.actor.output,
+            &model.critic.input, &model.critic.hidden, &model.critic.output,
+        ];
+        let mut total_squared = 0.0_f64;
+        for (index, layer) in layers.iter().enumerate() {
+            let gain = (index + 1) as f32;
+            let shape = layer.weight.shape().dims();
+            let weights = shape[0] * shape[1];
+            let biases = layer.bias.as_ref().unwrap().shape().dims()[0];
+            total_squared += f64::from(gain * gain) * (weights + biases) as f64;
+            let weight = Tensor::<TrainBackend, 2>::from_data(
+                TensorData::new(vec![gain; weights], shape), &device,
+            );
+            let bias = Tensor::<TrainBackend, 1>::from_data(
+                TensorData::new(vec![gain; biases], [biases]), &device,
+            );
+            gradients.register::<TrainBackend, 2>(layer.weight.id, weight);
+            gradients.register::<TrainBackend, 1>(layer.bias.as_ref().unwrap().id, bias);
+        }
+        assert_eq!(gradients.len(), 12);
+        let maximum = 0.5_f32;
+        let coefficient = (f64::from(maximum) / (total_squared.sqrt() + 1e-6)).min(1.0);
+        let clipped = clip_global_gradients(&model, gradients, maximum);
+        assert_eq!(clipped.len(), 12);
+        let mut new_squared = 0.0_f64;
+        for (index, layer) in layers.iter().enumerate() {
+            let expected = ((index + 1) as f64 * coefficient) as f32;
+            let w = clipped.get::<TrainBackend, 2>(layer.weight.id)
+                .unwrap().to_data().to_vec::<f32>().unwrap();
+            let b = clipped.get::<TrainBackend, 1>(layer.bias.as_ref().unwrap().id)
+                .unwrap().to_data().to_vec::<f32>().unwrap();
+            for x in w.into_iter().chain(b) {
+                assert!((x - expected).abs() < 1e-6, "joint clip was not uniform");
+                new_squared += f64::from(x) * f64::from(x);
+            }
+        }
+        assert!((new_squared.sqrt() - f64::from(maximum)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn true_failure_and_timeout_do_not_share_bootstrap_rules() {
+        let rows = [
+            example(2.0, -10.0, true, false, 999.0),
+            example(2.0, 1.0, true, true, 3.0),
+            example(2.0, 2.0, false, false, 999.0),
+        ];
+        // First physical failure has no tail value; second timeout uses the
+        // actual final value 3.0 and not the following 2.0 old value.
+        let (ret, _) = gae_targets(&rows, &[4.0], 1, 3, 0.9, 0.95);
+        assert!((ret[0] - (-10.0)).abs() < 1e-6);
+        assert!((ret[1] - 3.7).abs() < 1e-5);
+        assert!((ret[2] - 5.6).abs() < 1e-5);
+    }
+
+    #[test]
     fn small_native_training_session_preserves_real_physics_and_finite_policy() {
         let mut c = CleanRlReferenceConfig {
             environments: 2, steps_per_environment: 4, minibatch_size: 4,
