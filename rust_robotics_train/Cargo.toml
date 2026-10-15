@@ -3,6 +3,10 @@ name = "rust_robotics_train"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Native-only diagnostic candidate; production training remains the default.
+cleanrl-reference = []
+
 [dependencies]
 rust_robotics_core = { version = "0.1", path = "../rust_robotics_core" }
 rust_robotics_algo = { version = "0.1", path = "../rust_robotics_algo" }
