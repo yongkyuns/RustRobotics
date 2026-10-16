@@ -41,12 +41,7 @@ mod cohort {
     // All keys were selected only AFTER examining exposed development results.
     // First three are Gaussian failures and categorical successes; last is
     // a hard reset that both arms frequently fail.
-    const TRACE_KEYS: [u64; 4] = [
-        4_100_100_015,
-        4_100_100_021,
-        4_100_100_170,
-        4_100_100_100,
-    ];
+    const TRACE_KEYS: [u64; 4] = [4_100_100_015, 4_100_100_021, 4_100_100_170, 4_100_100_100];
 
     fn initial_state(config: &CleanRlReferenceConfig, key: u64) -> [f32; 4] {
         let mut root = StdRng::seed_from_u64(key);
@@ -185,11 +180,11 @@ mod cohort {
                     let rows = trainer.evaluate_seeded(keys, EVAL_TICKS, mode);
                     assert_eq!(rows.len(), PANEL_SIZE);
                     let success = rows.iter().filter(|x| x.completed).count();
-                    if checkpoint == 976 && panel == "heldout_difficult" {
+                    if checkpoint == 976 && *panel == "heldout_difficult" {
                         if let Some(writer) = trace_out.as_mut() {
                             for witness in TRACE_KEYS {
-                                let (audited, frames) =
-                                    trainer.evaluate_seeded_with_actuator_trace(
+                                let (audited, frames) = trainer
+                                    .evaluate_seeded_with_actuator_trace(
                                         keys,
                                         EVAL_TICKS,
                                         mode,
