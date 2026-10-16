@@ -464,6 +464,74 @@ pub struct ReferenceEvaluationEpisode {
     pub force_switches: usize,
 }
 
+/// Frozen, evaluation-only actuator variations. Neither optimizer updates nor
+/// the original nominal evaluator depend on these transforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceActuation {
+    /// Original immediate +/-20 N command (before plant disturbances).
+    Ideal,
+    /// Apply the previous tick's policy command, initially 0 N.
+    DelayOneTick,
+    /// Apply one command for two consecutive 10-ms ticks.
+    HoldTwoTicks,
+    /// Limit each 10-ms tick to a 5 N change in actuator command.
+    SlewFiveNewtonsPerTick,
+}
+
+impl ReferenceActuation {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ideal => "ideal",
+            Self::DelayOneTick => "delay_one_tick",
+            Self::HoldTwoTicks => "hold_two_ticks",
+            Self::SlewFiveNewtonsPerTick => "slew_five_n_per_tick",
+        }
+    }
+
+    fn output_force(
+        self,
+        desired: f32,
+        previous_output: f32,
+        previous_desired: f32,
+        tick: usize,
+    ) -> f32 {
+        match self {
+            Self::Ideal => desired,
+            Self::DelayOneTick => previous_desired,
+            Self::HoldTwoTicks => {
+                if tick.is_multiple_of(2) {
+                    desired
+                } else {
+                    previous_output
+                }
+            }
+            Self::SlewFiveNewtonsPerTick => {
+                previous_output + (desired - previous_output).clamp(-5.0, 5.0)
+            }
+        }
+    }
+}
+
+/// Evaluation-only transition trace. The policy receives the noisy observation
+/// and NEVER receives privileged true state or the realized disturbance force.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceEvaluationStep {
+    pub key: u64,
+    pub tick: usize,
+    pub observation_before: [f32; INPUTS],
+    pub true_state_before: [f32; INPUTS],
+    pub desired_force_n: f32,
+    pub actuator_force_n: f32,
+    pub applied_force_n: f32,
+    pub reward: f32,
+    pub observation_after: [f32; INPUTS],
+    pub true_state_after: [f32; INPUTS],
+    pub rail_breached: bool,
+    pub angle_breached: bool,
+    pub terminated: bool,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CleanRlReferenceMetrics {
     pub updates: usize,
@@ -674,6 +742,165 @@ impl CleanRlReferenceTrainer {
                 force_switches: lane.force_switches,
             })
             .collect()
+    }
+
+    /// Audit-only evaluation: identical seeded 64-lane inference contract,
+    /// with an explicit actuator transform and optional per-step witness trace.
+    /// Does not modify any optimizer, training environment or RNG state.
+    pub fn evaluate_seeded_with_actuator_trace(
+        &self,
+        keys: &[u64],
+        horizon: usize,
+        mode: ReferenceEvaluationMode,
+        actuator: ReferenceActuation,
+        trace_key: Option<u64>,
+    ) -> (Vec<ReferenceEvaluationEpisode>, Vec<ReferenceEvaluationStep>) {
+        assert!(!keys.is_empty() && horizon > 0);
+        let mut traces = Vec::new();
+        struct EvalLane {
+            key: u64,
+            env: PendulumEnv,
+            observation: [f32; INPUTS],
+            environment_rng: StdRng,
+            action_rng: StdRng,
+            initial_state: [f32; INPUTS],
+            initial_value: f32,
+            steps: usize,
+            done: bool,
+            completed: bool,
+            terminated: bool,
+            raw_return: f64,
+            min_cart_clearance_m: f32,
+            force_switches: usize,
+            previous_action: Option<usize>,
+            output_force_n: f32,
+            queued_desired_force_n: f32,
+        }
+
+        let mut env_config = self.config.environment;
+        env_config.max_steps = horizon; // Same physical boundaries; new evaluation cap.
+        let mut lanes = Vec::with_capacity(keys.len());
+        for &key in keys {
+            let mut root = StdRng::seed_from_u64(key);
+            let mut environment_rng = StdRng::seed_from_u64(root.gen());
+            let action_rng = StdRng::seed_from_u64(root.gen());
+            let env = PendulumEnv::new_with_rng(
+                self.config.plant.model(),
+                env_config,
+                &mut environment_rng,
+            );
+            let observation = env.observation_with_rng(&mut environment_rng);
+            let state = env.state();
+            lanes.push(EvalLane {
+                key,
+                env,
+                observation,
+                environment_rng,
+                action_rng,
+                initial_state: [state[0], state[1], state[2], state[3]],
+                initial_value: self.value(observation),
+                steps: 0,
+                done: false,
+                completed: false,
+                terminated: false,
+                raw_return: 0.0,
+                min_cart_clearance_m: env_config.max_position_m - state[0].abs(),
+                force_switches: 0,
+                previous_action: None,
+                output_force_n: 0.0,
+                queued_desired_force_n: 0.0,
+            });
+        }
+
+        let actor = self.model.valid().actor;
+        for _ in 0..horizon {
+            let observations = lanes
+                .iter()
+                .map(|lane| lane.observation)
+                .collect::<Vec<_>>();
+            let tensor = obs_tensor::<
+                <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
+            >(&self.device, &observations);
+            let logits = actor.forward(tensor).to_data().to_vec::<f32>().unwrap();
+            for (i, lane) in lanes.iter_mut().enumerate() {
+                if lane.done {
+                    continue;
+                }
+                let pair = [logits[i * ACTIONS], logits[i * ACTIONS + 1]];
+                let action = match mode {
+                    ReferenceEvaluationMode::Deterministic => deterministic_action(pair),
+                    ReferenceEvaluationMode::Stochastic => {
+                        choose_action(pair, &mut lane.action_rng)
+                    }
+                };
+                if let Some(previous) = lane.previous_action {
+                    lane.force_switches += usize::from(previous != action);
+                }
+                lane.previous_action = Some(action);
+                let desired_force_n = force_for_action(action, env_config.max_force);
+                let observation_before = lane.observation;
+                let before = lane.env.state();
+                let actuator_force_n = actuator.output_force(
+                    desired_force_n,
+                    lane.output_force_n,
+                    lane.queued_desired_force_n,
+                    lane.steps,
+                );
+                lane.output_force_n = actuator_force_n;
+                lane.queued_desired_force_n = desired_force_n;
+                let step = lane
+                    .env
+                    .step_with_rng(actuator_force_n, &mut lane.environment_rng);
+                let after = lane.env.state();
+                lane.steps += 1;
+                if trace_key == Some(lane.key) {
+                    traces.push(ReferenceEvaluationStep {
+                        key: lane.key,
+                        tick: lane.steps,
+                        observation_before,
+                        true_state_before: [before[0], before[1], before[2], before[3]],
+                        desired_force_n,
+                        actuator_force_n,
+                        applied_force_n: lane.env.last_applied_force(),
+                        reward: step.reward,
+                        observation_after: step.observation,
+                        true_state_after: [after[0], after[1], after[2], after[3]],
+                        rail_breached: after[0].abs() > env_config.max_position_m,
+                        angle_breached: after[2].abs() > env_config.max_angle_rad,
+                        terminated: step.terminated(),
+                        truncated: step.truncated,
+                    });
+                }
+                lane.raw_return += f64::from(step.reward);
+                lane.observation = step.observation;
+                lane.min_cart_clearance_m = lane
+                    .min_cart_clearance_m
+                    .min(env_config.max_position_m - lane.env.state()[0].abs());
+                if step.done {
+                    lane.done = true;
+                    lane.completed = step.truncated;
+                    lane.terminated = step.terminated();
+                }
+            }
+            if lanes.iter().all(|lane| lane.done) {
+                break;
+            }
+        }
+        let summaries = lanes
+            .into_iter()
+            .map(|lane| ReferenceEvaluationEpisode {
+                key: lane.key,
+                initial_state: lane.initial_state,
+                initial_value: lane.initial_value,
+                steps: lane.steps,
+                completed: lane.completed,
+                terminated: lane.terminated,
+                raw_return: lane.raw_return,
+                min_cart_clearance_m: lane.min_cart_clearance_m,
+                force_switches: lane.force_switches,
+            })
+            .collect::<Vec<_>>();
+        (summaries, traces)
     }
 
     fn value(&self, observation: [f32; INPUTS]) -> f32 {
@@ -1068,6 +1295,60 @@ mod tests {
         assert_eq!(trainer.metrics().environment_steps, 0);
         assert_eq!(trainer.metrics().updates, 0);
         assert_eq!(trainer.act_deterministic([0.0; INPUTS]), before_action);
+    }
+
+    #[test]
+    fn evaluation_actuator_transform_has_frozen_step_semantics() {
+        let ideal = ReferenceActuation::Ideal;
+        assert_eq!(ideal.output_force(20.0, -20.0, -20.0, 1), 20.0);
+        let delay = ReferenceActuation::DelayOneTick;
+        assert_eq!(delay.output_force(20.0, 0.0, 0.0, 0), 0.0);
+        assert_eq!(delay.output_force(-20.0, 20.0, 20.0, 1), 20.0);
+        let hold = ReferenceActuation::HoldTwoTicks;
+        assert_eq!(hold.output_force(20.0, 0.0, 0.0, 0), 20.0);
+        assert_eq!(hold.output_force(-20.0, 20.0, 20.0, 1), 20.0);
+        assert_eq!(hold.output_force(-20.0, 20.0, 20.0, 2), -20.0);
+        let slew = ReferenceActuation::SlewFiveNewtonsPerTick;
+        assert_eq!(slew.output_force(20.0, 0.0, 0.0, 0), 5.0);
+        assert_eq!(slew.output_force(-20.0, 5.0, 20.0, 1), 0.0);
+    }
+
+    #[test]
+    fn ideal_instrumented_evaluation_matches_original_episode_exactly() {
+        let config = CleanRlReferenceConfig::default();
+        let trainer = CleanRlReferenceTrainer::new(config);
+        let keys = [4_100_100_100_u64, 4_100_100_101, 4_100_100_102];
+        for mode in [
+            ReferenceEvaluationMode::Deterministic,
+            ReferenceEvaluationMode::Stochastic,
+        ] {
+            let legacy = trainer.evaluate_seeded(&keys, 24, mode);
+            let (audited, trace) = trainer.evaluate_seeded_with_actuator_trace(
+                &keys,
+                24,
+                mode,
+                ReferenceActuation::Ideal,
+                Some(keys[0]),
+            );
+            assert_eq!(legacy, audited);
+            assert_eq!(trace.len(), audited[0].steps);
+            for (index, step) in trace.iter().enumerate() {
+                assert_eq!(step.key, keys[0]);
+                assert_eq!(step.tick, index + 1);
+                assert_eq!(step.desired_force_n, step.actuator_force_n);
+                assert!(step.applied_force_n.is_finite());
+                assert!(step.true_state_after.iter().all(|v| v.is_finite()));
+                assert_eq!(
+                    step.rail_breached,
+                    step.true_state_after[0].abs() > config.environment.max_position_m
+                );
+                assert_eq!(
+                    step.angle_breached,
+                    step.true_state_after[2].abs() > config.environment.max_angle_rad
+                );
+            }
+        }
+        assert_eq!(trainer.metrics().updates, 0);
     }
 
     #[test]
