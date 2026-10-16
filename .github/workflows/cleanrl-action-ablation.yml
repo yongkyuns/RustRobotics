@@ -7,6 +7,7 @@ on:
       - ".github/workflows/cleanrl-action-ablation.yml"
   workflow_dispatch:
 
+# Retry on typed Gaussian regression fixture source; preserve the frozen protocol.
 permissions:
   contents: read
 
