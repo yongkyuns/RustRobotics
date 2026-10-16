@@ -1023,7 +1023,7 @@ mod tests {
         assert!((pg - 0.32307282).abs() < 1e-5, "clipped actor surrogate");
         assert!((vf - 0.95874995).abs() < 1e-5, "clipped critic target");
         assert!((entropy - 0.53926545).abs() < 1e-5, "categorical entropy");
-        assert!((pg + 0.5 * vf - 0.01 * entropy - 0.79705513).abs() < 1e-5);
+        assert!((pg + 0.5 * vf - 0.01 * entropy - 0.797_055_1).abs() < 1e-5);
     }
 
     #[test]

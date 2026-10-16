@@ -75,8 +75,8 @@ fn clipped_objective_backward_matches_pytorch_not_just_the_loss() {
         0.00038799748,
         0.03621648,
         -0.03621648,
-        -0.16912010,
-        0.16912010,
+        -0.169_120_1,
+        0.169_120_1,
     ];
     let expected_values = [0.0, 0.0875, -0.1625, 0.1125];
     for (a, b) in actual_logits.iter().zip(expected_logits) {
