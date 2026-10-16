@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: experimental-ppo-action-ablation
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   ablation:
