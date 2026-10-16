@@ -80,7 +80,7 @@ impl CleanRlReferenceConfig {
         assert!(self.environments > 0 && self.steps_per_environment > 0);
         let pool = self.environments.checked_mul(self.steps_per_environment)
             .expect("PPO pool size overflows");
-        assert!(self.minibatch_size > 1 && pool % self.minibatch_size == 0);
+        assert!(self.minibatch_size > 1 && pool.is_multiple_of(self.minibatch_size));
         assert!(self.epochs > 0 && self.total_updates > 0);
         assert!(self.learning_rate.is_finite() && self.learning_rate > 0.0);
         assert!(self.maximum_gradient_norm.is_finite() && self.maximum_gradient_norm > 0.0);
@@ -169,17 +169,17 @@ fn orthogonal_linear<B: Backend, R: Rng + ?Sized>(
         }
         columns.push(basis.expect("unable to generate orthogonal weights"));
     }
-    let mut weight = Vec::with_capacity(inputs * outputs);
-    for input in 0..inputs {
-        for output in 0..outputs {
-            let element = if outputs >= inputs {
-                columns[input][output]
-            } else {
-                columns[output][input]
-            };
-            weight.push((gain as f64 * element) as f32);
-        }
-    }
+    // Row-major Burn weights: [input, output]. Columns contain the
+    // orthonormal basis of the tall orientation.
+    let weight: Vec<f32> = if outputs >= inputs {
+        columns.iter()
+            .flat_map(|column| column.iter().map(|&element| (gain as f64 * element) as f32))
+            .collect()
+    } else {
+        (0..inputs)
+            .flat_map(|input| columns.iter().map(move |column| (gain as f64 * column[input]) as f32))
+            .collect()
+    };
     Linear {
         weight: Param::from_data(TensorData::new(weight, [inputs, outputs]), device),
         bias: Some(Param::from_data(TensorData::new(vec![0.0_f32; outputs], [outputs]), device)),
@@ -253,7 +253,7 @@ fn gae_targets(
     assert_eq!(final_values.len(), environments);
     let mut advantages = vec![0.0; rows.len()];
     let mut returns = vec![0.0; rows.len()];
-    for lane in 0..environments {
+    for (lane, &final_value) in final_values.iter().enumerate() {
         let mut next_advantage = 0.0_f32;
         for t in (0..steps).rev() {
             let index = t * environments + lane;
@@ -261,7 +261,7 @@ fn gae_targets(
             let next_value = if row.done {
                 0.0
             } else if t + 1 == steps {
-                final_values[lane]
+                final_value
             } else {
                 rows[index + environments].old_value
             };
@@ -803,9 +803,9 @@ mod tests {
         let mut total_squared = 0.0_f64;
         for (index, layer) in layers.iter().enumerate() {
             let gain = (index + 1) as f32;
-            let shape = layer.weight.shape().dims();
+            let shape: [usize; 2] = layer.weight.shape().dims();
             let weights = shape[0] * shape[1];
-            let biases = layer.bias.as_ref().unwrap().shape().dims()[0];
+            let [biases]: [usize; 1] = layer.bias.as_ref().unwrap().shape().dims();
             total_squared += f64::from(gain * gain) * (weights + biases) as f64;
             let weight = Tensor::<TrainBackend, 2>::from_data(
                 TensorData::new(vec![gain; weights], shape), &device,
