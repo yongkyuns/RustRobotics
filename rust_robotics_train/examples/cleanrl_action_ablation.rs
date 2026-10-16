@@ -7,9 +7,10 @@
 //!
 //! The output is create-only. Runs all checkpoints without best-checkpoint
 //! selection and retains every episode, including failures and late losses.
-//! Pass --shared-heldout to append common reset-key panels (same across seeds
-//! 201..204) to the original per-seed development panels. Evaluation is
-//! read-only and never feeds observations or rewards to the optimizer.
+//! Always evaluates both development and common held-out panels. An optional
+//! fourth argument creates per-tick traces for four already-exposed difficult
+//! witnesses at checkpoint 976. This is diagnostic ONLY, not confirmation.
+//! Read-only evaluation never feeds trajectories to the optimizer.
 //! Results are evidence, NOT automatic production acceptance on issue #33.
 #[cfg(not(feature = "cleanrl-reference"))]
 fn main() {
@@ -23,7 +24,7 @@ mod cohort {
     use rust_robotics_train::{
         cleanrl_reference::{
             CleanRlReferenceConfig, CleanRlReferenceTrainer, ReferenceActionDistribution,
-            ReferenceEvaluationMode,
+            ReferenceActuation, ReferenceEvaluationMode,
         },
         PendulumEnv,
     };
@@ -37,6 +38,15 @@ mod cohort {
     const UPDATES: [usize; 7] = [0, 64, 128, 256, 512, 768, 976];
     const PANEL_SIZE: usize = 64;
     const EVAL_TICKS: usize = 1500;
+    // All keys were selected only AFTER examining exposed development results.
+    // First three are Gaussian failures and categorical successes; last is
+    // a hard reset that both arms frequently fail.
+    const TRACE_KEYS: [u64; 4] = [
+        4_100_100_015,
+        4_100_100_021,
+        4_100_100_170,
+        4_100_100_100,
+    ];
 
     fn initial_state(config: &CleanRlReferenceConfig, key: u64) -> [f32; 4] {
         let mut root = StdRng::seed_from_u64(key);
@@ -100,10 +110,9 @@ mod cohort {
 
     pub fn run() {
         let args = env::args().collect::<Vec<_>>();
-        assert_eq!(
-            args.len(),
-            4,
-            "usage: cleanrl_action_ablation categorical|squashed_gaussian SEED CREATE_ONLY_CSV_PATH"
+        assert!(
+            args.len() == 4 || args.len() == 5,
+            "usage: cleanrl_action_ablation categorical|squashed_gaussian SEED CREATE_ONLY_CSV_PATH [TRACE_CSV_PATH]"
         );
         let distribution_name = args[1].as_str();
         let action_distribution = match distribution_name {
@@ -127,7 +136,24 @@ mod cohort {
             out,
             "distribution,seed,updates,train_steps,panel,mode,key,initial_x,initial_xdot,initial_theta,initial_omega,\
              initial_value,steps,completed,terminated,raw_return,min_cart_clearance_m,force_switches"
-        ).unwrap();
+        )
+        .unwrap();
+        let mut trace_out = if args.len() == 5 {
+            let trace_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&args[4])
+                .expect("trace output must not already exist");
+            let mut writer = BufWriter::new(trace_file);
+            writeln!(
+                writer,
+                "distribution,seed,mode,key,tick,obs_x,obs_xdot,obs_theta,obs_omega,                 before_x,before_xdot,before_theta,before_omega,desired_force_n,                 applied_force_n,after_x,after_xdot,after_theta,after_omega,                 rail_breached,angle_breached,terminated,truncated"
+            )
+            .unwrap();
+            Some(writer)
+        } else {
+            None
+        };
 
         let config = CleanRlReferenceConfig {
             seed,
@@ -159,6 +185,58 @@ mod cohort {
                     let rows = trainer.evaluate_seeded(keys, EVAL_TICKS, mode);
                     assert_eq!(rows.len(), PANEL_SIZE);
                     let success = rows.iter().filter(|x| x.completed).count();
+                    if checkpoint == 976 && panel == "heldout_difficult" {
+                        if let Some(writer) = trace_out.as_mut() {
+                            for witness in TRACE_KEYS {
+                                let (audited, frames) =
+                                    trainer.evaluate_seeded_with_actuator_trace(
+                                        keys,
+                                        EVAL_TICKS,
+                                        mode,
+                                        ReferenceActuation::Ideal,
+                                        Some(witness),
+                                    );
+                                assert_eq!(
+                                    audited, rows,
+                                    "trace instrumentation changed the original evaluator"
+                                );
+                                let expected_steps = rows
+                                    .iter()
+                                    .find(|r| r.key == witness)
+                                    .expect("trace witness missing from common difficult panel")
+                                    .steps;
+                                assert_eq!(frames.len(), expected_steps);
+                                for frame in frames {
+                                    let fields = [
+                                        distribution_name.to_string(),
+                                        seed.to_string(),
+                                        mode_name.to_string(),
+                                        witness.to_string(),
+                                        frame.tick.to_string(),
+                                        frame.observation_before[0].to_string(),
+                                        frame.observation_before[1].to_string(),
+                                        frame.observation_before[2].to_string(),
+                                        frame.observation_before[3].to_string(),
+                                        frame.true_state_before[0].to_string(),
+                                        frame.true_state_before[1].to_string(),
+                                        frame.true_state_before[2].to_string(),
+                                        frame.true_state_before[3].to_string(),
+                                        frame.desired_force_n.to_string(),
+                                        frame.applied_force_n.to_string(),
+                                        frame.true_state_after[0].to_string(),
+                                        frame.true_state_after[1].to_string(),
+                                        frame.true_state_after[2].to_string(),
+                                        frame.true_state_after[3].to_string(),
+                                        frame.rail_breached.to_string(),
+                                        frame.angle_breached.to_string(),
+                                        frame.terminated.to_string(),
+                                        frame.truncated.to_string(),
+                                    ];
+                                    writeln!(writer, "{}", fields.join(",")).unwrap();
+                                }
+                            }
+                        }
+                    }
                     for row in rows {
                         let s = row.initial_state;
                         writeln!(
@@ -176,6 +254,9 @@ mod cohort {
                 }
             }
             out.flush().expect("persist all checkpoint records");
+            if let Some(writer) = trace_out.as_mut() {
+                writer.flush().expect("persist trace records");
+            }
         }
         assert_eq!(done_updates, 976);
     }
