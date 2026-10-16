@@ -27,6 +27,16 @@ use rust_robotics_algo::cart_pole::CartPoleParameters;
 const INPUTS: usize = 4;
 const ACTIONS: usize = 2;
 
+/// Action distribution is the SINGLE experimental ablation variable. Shared
+/// PPO rollout, advantage, critic and optimizer code remains the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceActionDistribution {
+    Categorical,
+    /// Two actor outputs mean and log standard deviation for a scalar
+    /// Gaussian latent, followed by bounded force = F*tanh(latent).
+    SquashedGaussian,
+}
+
 /// Fixed, explicit experiment parameters. The real native plant/reward/noise
 /// model is always used; these are not standard-Gym CartPole dynamics.
 #[derive(Debug, Clone)]
@@ -34,6 +44,7 @@ pub struct CleanRlReferenceConfig {
     pub plant: CartPoleParameters,
     pub environment: PendulumEnvConfig,
     pub seed: u64,
+    pub action_distribution: ReferenceActionDistribution,
     pub environments: usize,
     pub steps_per_environment: usize,
     pub minibatch_size: usize,
@@ -58,6 +69,7 @@ impl Default for CleanRlReferenceConfig {
             plant: CartPoleParameters::default(),
             environment,
             seed: 201,
+            action_distribution: ReferenceActionDistribution::Categorical,
             environments: 4,
             steps_per_environment: 128,
             minibatch_size: 128,
@@ -238,6 +250,52 @@ fn choose_action<R: Rng + ?Sized>(logits: [f32; 2], rng: &mut R) -> usize {
     usize::from(rng.gen::<f32>() >= probability)
 }
 
+/// The Gaussian is a density in the PRE-tanh latent domain. PPO uses the
+/// exact same stored latent z on collection and replay. The tanh Jacobian
+/// cancels from the importance ratio (but not from true action entropy).
+const NORMAL_LOG_NORM: f32 = 0.918_938_5; // ln(sqrt(2*pi))
+const GAUSSIAN_ENTROPY_BASE: f32 = 1.418_938_5; // 0.5*ln(2*pi*e)
+const MIN_LOG_STD: f32 = -2.0;
+const MAX_LOG_STD: f32 = 1.0;
+
+fn continuous_force(latent: f32, max_force: f32) -> f32 {
+    let force = max_force * latent.tanh();
+    assert!(force.is_finite() && force.abs() <= max_force);
+    force
+}
+
+fn choose_policy_force<R: Rng + ?Sized>(
+    parameters: [f32; 2],
+    distribution: ReferenceActionDistribution,
+    mode: ReferenceEvaluationMode,
+    max_force: f32,
+    rng: &mut R,
+) -> (usize, f32, f32) {
+    match distribution {
+        ReferenceActionDistribution::Categorical => {
+            let action = match mode {
+                ReferenceEvaluationMode::Deterministic => deterministic_action(parameters),
+                ReferenceEvaluationMode::Stochastic => choose_action(parameters, rng),
+            };
+            (action, 0.0, force_for_action(action, max_force))
+        }
+        ReferenceActionDistribution::SquashedGaussian => {
+            assert!(parameters.iter().all(|x| x.is_finite()));
+            let mean = parameters[0];
+            let log_std = parameters[1].clamp(MIN_LOG_STD, MAX_LOG_STD);
+            let latent = match mode {
+                ReferenceEvaluationMode::Deterministic => mean,
+                ReferenceEvaluationMode::Stochastic => {
+                    mean + log_std.exp() * normal(rng) as f32
+                }
+            };
+            // For diagnostics only, "force_switches" counts sign crossings,
+            // not full-scale +/-20 N reversals as it does for categorical.
+            (usize::from(latent > 0.0), latent, continuous_force(latent, max_force))
+        }
+    }
+}
+
 pub fn force_for_action(action: usize, max_force: f32) -> f32 {
     match action {
         0 => -max_force,
@@ -257,6 +315,8 @@ struct Lane {
 struct Sample {
     observation: [f32; INPUTS],
     action: usize,
+    /// Pre-tanh continuous latent; zero and unused for categorical samples.
+    action_latent: f32,
     old_log_prob: f32,
     old_value: f32,
     raw_reward: f32,
@@ -345,22 +405,81 @@ fn torch_maximum<B: Backend, const D: usize>(
     left * weight + right * other_weight
 }
 
-/// Same clipped categorical surrogate, critic clip and entropy calculation
-/// as the pinned CleanRL PPO update, extracted for independent Torch fixtures.
+/// Return selected-action log likelihood [N,1] and mean entropy [1].
+///
+/// For tanh-Gaussian: the Jacobian cancels in the PPO importance ratio when
+/// the identical PRE-tanh action z is replayed. The entropy bonus is the
+/// UNSQUASHED Gaussian's differential entropy, not exact tanh-action entropy.
+/// It is a deliberate cross-distribution semantic difference and MUST NOT
+/// be interpreted as an identical Shannon-entropy regularizer.
+fn action_log_prob_and_entropy<B: Backend>(
+    logits: Tensor<B, 2>,
+    device: &B::Device,
+    actions: &[usize],
+    latents: &[f32],
+    distribution: ReferenceActionDistribution,
+) -> (Tensor<B, 2>, Tensor<B, 1>) {
+    match distribution {
+        ReferenceActionDistribution::Categorical => {
+            let log_probs = activation::log_softmax(logits, 1);
+            let selected = (log_probs.clone() * masks(device, actions)).sum_dim(1);
+            let entropy = (log_probs.clone().exp() * log_probs)
+                .sum_dim(1)
+                .mean()
+                .mul_scalar(-1.0);
+            (selected, entropy)
+        }
+        ReferenceActionDistribution::SquashedGaussian => {
+            let n = latents.len();
+            assert_eq!(actions.len(), n);
+            let mean_mask = Tensor::<B, 2>::from_data(
+                TensorData::new(vec![1.0_f32, 0.0].repeat(n), [n, ACTIONS]),
+                device,
+            );
+            let log_std_mask = Tensor::<B, 2>::from_data(
+                TensorData::new(vec![0.0_f32, 1.0].repeat(n), [n, ACTIONS]),
+                device,
+            );
+            let mean = (logits.clone() * mean_mask).sum_dim(1);
+            let log_std = (logits * log_std_mask)
+                .sum_dim(1)
+                .clamp(MIN_LOG_STD, MAX_LOG_STD);
+            let centered = tensor_scalars(device, latents) - mean;
+            let standardized = centered * log_std.clone().neg().exp();
+            let log_prob = standardized
+                .square()
+                .mul_scalar(-0.5)
+                - log_std.clone()
+                - NORMAL_LOG_NORM;
+            let entropy = log_std.add_scalar(GAUSSIAN_ENTROPY_BASE).mean();
+            (log_prob, entropy)
+        }
+    }
+}
+
+/// Same clipped PPO surrogate, critic clip and GAE targets in both action
+/// distributions; only log density and entropy of the action law change.
 #[allow(clippy::too_many_arguments)] // Explicit operand contract shared with the numerical fixture.
 fn ppo_objective_terms<B: Backend>(
     logits: Tensor<B, 2>,
     values: Tensor<B, 2>,
     device: &B::Device,
     actions: &[usize],
+    action_latents: &[f32],
+    distribution: ReferenceActionDistribution,
     old_log_probs: &[f32],
     old_values: &[f32],
     targets: &[f32],
     normalized_advantages: &[f32],
     clip_epsilon: f32,
 ) -> (Tensor<B, 1>, Tensor<B, 1>, Tensor<B, 1>) {
-    let log_probs = activation::log_softmax(logits, 1);
-    let new_log_prob = (log_probs.clone() * masks(device, actions)).sum_dim(1);
+    let (new_log_prob, entropy) = action_log_prob_and_entropy(
+        logits,
+        device,
+        actions,
+        action_latents,
+        distribution,
+    );
     let ratio = (new_log_prob - tensor_scalars(device, old_log_probs)).exp();
     let neg_advantages = tensor_scalars(device, normalized_advantages).mul_scalar(-1.0);
     let policy_loss = torch_maximum(
@@ -377,10 +496,6 @@ fn ppo_objective_terms<B: Backend>(
     let clipped = (clipped_predictions - return_targets).square();
     let value_loss = torch_maximum(unclipped, clipped).mean().mul_scalar(0.5);
 
-    let entropy = (log_probs.clone().exp() * log_probs)
-        .sum_dim(1)
-        .mean()
-        .mul_scalar(-1.0);
     (policy_loss, value_loss, entropy)
 }
 
@@ -561,7 +676,7 @@ impl CleanRlReferenceTrainer {
         let device = Default::default();
         let mut root = StdRng::seed_from_u64(config.seed);
         let mut initialization_rng = StdRng::seed_from_u64(root.gen());
-        let model = ActorCritic::new(&device, &mut initialization_rng);
+        let model = ActorCritic::new(&device, &mut initialization_rng); // identical 2-output architecture
         let mut lanes = Vec::with_capacity(config.environments);
         for _ in 0..config.environments {
             let mut environment_rng = StdRng::seed_from_u64(root.gen());
@@ -614,10 +729,15 @@ impl CleanRlReferenceTrainer {
             .to_data()
             .to_vec::<f32>()
             .unwrap();
-        force_for_action(
-            deterministic_action([logits[0], logits[1]]),
-            self.config.environment.max_force,
-        )
+        match self.config.action_distribution {
+            ReferenceActionDistribution::Categorical => force_for_action(
+                deterministic_action([logits[0], logits[1]]),
+                self.config.environment.max_force,
+            ),
+            ReferenceActionDistribution::SquashedGaussian => {
+                continuous_force(logits[0], self.config.environment.max_force)
+            }
+        }
     }
 
     /// Evaluate a frozen checkpoint on a caller-owned panel of reset keys.
@@ -700,17 +820,17 @@ impl CleanRlReferenceTrainer {
                     continue;
                 }
                 let pair = [logits[i * ACTIONS], logits[i * ACTIONS + 1]];
-                let action = match mode {
-                    ReferenceEvaluationMode::Deterministic => deterministic_action(pair),
-                    ReferenceEvaluationMode::Stochastic => {
-                        choose_action(pair, &mut lane.action_rng)
-                    }
-                };
+                let (action, _latent, force) = choose_policy_force(
+                    pair,
+                    self.config.action_distribution,
+                    mode,
+                    env_config.max_force,
+                    &mut lane.action_rng,
+                );
                 if let Some(previous) = lane.previous_action {
                     lane.force_switches += usize::from(previous != action);
                 }
                 lane.previous_action = Some(action);
-                let force = force_for_action(action, env_config.max_force);
                 let step = lane.env.step_with_rng(force, &mut lane.environment_rng);
                 lane.steps += 1;
                 lane.raw_return += f64::from(step.reward);
@@ -830,17 +950,18 @@ impl CleanRlReferenceTrainer {
                     continue;
                 }
                 let pair = [logits[i * ACTIONS], logits[i * ACTIONS + 1]];
-                let action = match mode {
-                    ReferenceEvaluationMode::Deterministic => deterministic_action(pair),
-                    ReferenceEvaluationMode::Stochastic => {
-                        choose_action(pair, &mut lane.action_rng)
-                    }
-                };
+                let (action, _latent, force) = choose_policy_force(
+                    pair,
+                    self.config.action_distribution,
+                    mode,
+                    env_config.max_force,
+                    &mut lane.action_rng,
+                );
                 if let Some(previous) = lane.previous_action {
                     lane.force_switches += usize::from(previous != action);
                 }
                 lane.previous_action = Some(action);
-                let desired_force_n = force_for_action(action, env_config.max_force);
+                let desired_force_n = force;
                 let observation_before = lane.observation;
                 let before = lane.env.state();
                 let actuator_force_n = actuator.output_force(
@@ -942,13 +1063,33 @@ impl CleanRlReferenceTrainer {
                 <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
             >(&self.device, &observations);
             let policy_logits = valid.actor.forward(inputs.clone());
-            // Record the same log-softmax used by PPO replay. Logging ln(1-p)
-            // can produce a non-unit ratio even when the actor is unchanged.
-            let log_probs = activation::log_softmax(policy_logits.clone(), 1)
-                .to_data()
-                .to_vec::<f32>()
-                .unwrap();
-            let logits = policy_logits.to_data().to_vec::<f32>().unwrap();
+            let logits = policy_logits.clone().to_data().to_vec::<f32>().unwrap();
+            // Sample actions first; use the exact same tensor likelihood
+            // arithmetic in collection and replay for both distributions.
+            let sampled = self
+                .lanes
+                .iter_mut()
+                .enumerate()
+                .map(|(i, lane)| {
+                    choose_policy_force(
+                        [logits[2 * i], logits[2 * i + 1]],
+                        self.config.action_distribution,
+                        ReferenceEvaluationMode::Stochastic,
+                        self.config.environment.max_force,
+                        &mut lane.action_rng,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let actions = sampled.iter().map(|x| x.0).collect::<Vec<_>>();
+            let latents = sampled.iter().map(|x| x.1).collect::<Vec<_>>();
+            let (log_prob_tensor, _) = action_log_prob_and_entropy(
+                policy_logits,
+                &self.device,
+                &actions,
+                &latents,
+                self.config.action_distribution,
+            );
+            let log_probs = log_prob_tensor.to_data().to_vec::<f32>().unwrap();
             let values = valid
                 .critic
                 .forward(inputs)
@@ -956,13 +1097,9 @@ impl CleanRlReferenceTrainer {
                 .to_vec::<f32>()
                 .unwrap();
             for (i, lane) in self.lanes.iter_mut().enumerate() {
-                let distribution = [logits[2 * i], logits[2 * i + 1]];
-                let action = choose_action(distribution, &mut lane.action_rng);
-                let log_prob = log_probs[2 * i + action];
-                let step = lane.env.step_with_rng(
-                    force_for_action(action, self.config.environment.max_force),
-                    &mut lane.environment_rng,
-                );
+                let (action, action_latent, force) = sampled[i];
+                let log_prob = log_probs[i];
+                let step = lane.env.step_with_rng(force, &mut lane.environment_rng);
                 let final_value = if step.truncated {
                     let input = obs_tensor::<
                         <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
@@ -979,6 +1116,7 @@ impl CleanRlReferenceTrainer {
                 rows.push(Sample {
                     observation: lane.observation,
                     action,
+                    action_latent,
                     old_log_prob: log_prob,
                     old_value: values[i],
                     raw_reward: step.reward,
@@ -1026,6 +1164,7 @@ impl CleanRlReferenceTrainer {
                     .map(|&i| rows[i].observation)
                     .collect::<Vec<_>>();
                 let actions = batch.iter().map(|&i| rows[i].action).collect::<Vec<_>>();
+                let latents = batch.iter().map(|&i| rows[i].action_latent).collect::<Vec<_>>();
                 let old_log_probs = batch
                     .iter()
                     .map(|&i| rows[i].old_log_prob)
@@ -1043,6 +1182,8 @@ impl CleanRlReferenceTrainer {
                     values,
                     &self.device,
                     &actions,
+                    &latents,
+                    self.config.action_distribution,
                     &old_log_probs,
                     &old_values,
                     &targets,
@@ -1076,6 +1217,7 @@ mod tests {
         Sample {
             observation: [0.0; INPUTS],
             action: 0,
+            action_latent: 0.0,
             old_log_prob: 0.0,
             old_value: value,
             raw_reward: reward,
@@ -1238,6 +1380,8 @@ mod tests {
             values,
             &device,
             &[0, 1, 1, 0],
+            &[0.0; 4],
+            ReferenceActionDistribution::Categorical,
             &[-0.8, -0.1, -0.7, -1.4],
             &[0.3, -0.5, 0.1, 2.0],
             &[2.0, -1.0, 0.8, 0.0],
@@ -1352,6 +1496,87 @@ mod tests {
             }
         }
         assert_eq!(trainer.metrics().updates, 0);
+    }
+
+    #[test]
+    fn squashed_gaussian_log_density_and_bounds_match_scalar_reference() {
+        use crate::backend::TrainBackend;
+        let device = Default::default();
+        let logits = Tensor::<TrainBackend, 2>::from_data(
+            TensorData::new(vec![0.2_f32, -0.5, -0.3, 0.4], [2, 2]),
+            &device,
+        );
+        let z = [0.7_f32, -1.1];
+        let (log_probs, entropy) = action_log_prob_and_entropy(
+            logits,
+            &device,
+            &[0, 1],
+            &z,
+            ReferenceActionDistribution::SquashedGaussian,
+        );
+        let measured = log_probs.to_data().to_vec::<f32>().unwrap();
+        for (i, &(mu, log_std)) in [(0.2_f32, -0.5), (-0.3, 0.4)].iter().enumerate() {
+            let expected = -0.5 * ((z[i] - mu) / log_std.exp()).powi(2)
+                - log_std
+                - NORMAL_LOG_NORM;
+            assert!((measured[i] - expected).abs() < 1e-5);
+        }
+        let expected_entropy = GAUSSIAN_ENTROPY_BASE + (-0.5 + 0.4) / 2.0;
+        assert!(
+            (entropy.to_data().to_vec::<f32>().unwrap()[0] - expected_entropy).abs() < 1e-5
+        );
+        for latent in [-100.0_f32, -2.0, 0.0, 0.5, 1.0, 100.0] {
+            let force = continuous_force(latent, 20.0);
+            assert!(force >= -20.0 && force <= 20.0);
+        }
+        let ratio = measured
+            .iter()
+            .zip(z)
+            .enumerate()
+            .map(|(i, (&old_log_prob, latent))| {
+                let mu = if i == 0 { 0.2_f32 } else { -0.3 };
+                let log_std = if i == 0 { -0.5_f32 } else { 0.4 };
+                let replay = -0.5 * ((latent - mu) / log_std.exp()).powi(2)
+                    - log_std
+                    - NORMAL_LOG_NORM;
+                (replay - old_log_prob).exp()
+            })
+            .collect::<Vec<_>>();
+        for r in ratio {
+            assert!((r - 1.0).abs() < 1e-5, "unchanged Gaussian policy ratio");
+        }
+    }
+
+    #[test]
+    fn squashed_gaussian_two_update_native_learning_smoke() {
+        let mut config = CleanRlReferenceConfig {
+            action_distribution: ReferenceActionDistribution::SquashedGaussian,
+            environments: 2,
+            steps_per_environment: 4,
+            minibatch_size: 4,
+            epochs: 1,
+            total_updates: 2,
+            ..Default::default()
+        };
+        config.environment.max_steps = 3;
+        let mut trainer = CleanRlReferenceTrainer::new(config);
+        for obs in [[0.0; 4], [0.2, 0.1, -0.2, -0.1]] {
+            let a = trainer.act_deterministic(obs);
+            assert!(a.is_finite() && a.abs() <= 20.0);
+        }
+        trainer.train_updates(2);
+        assert_eq!(trainer.metrics().updates, 2);
+        assert_eq!(trainer.metrics().environment_steps, 16);
+        assert!(trainer.metrics().last_policy_loss.is_finite());
+        assert!(trainer.metrics().last_value_loss.is_finite());
+        assert!(trainer.metrics().last_entropy.is_finite());
+        let rows = trainer.evaluate_seeded(
+            &[4_000_100_000_u64, 4_100_100_100],
+            24,
+            ReferenceEvaluationMode::Stochastic,
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.raw_return.is_finite()));
     }
 
     #[test]
