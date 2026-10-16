@@ -449,8 +449,8 @@ fn action_log_prob_and_entropy<B: Backend>(
             let log_prob = standardized
                 .square()
                 .mul_scalar(-0.5)
-                - log_std.clone()
-                - NORMAL_LOG_NORM;
+                - log_std.clone();
+            let log_prob = log_prob.sub_scalar(NORMAL_LOG_NORM);
             let entropy = log_std.add_scalar(GAUSSIAN_ENTROPY_BASE).mean();
             (log_prob, entropy)
         }
