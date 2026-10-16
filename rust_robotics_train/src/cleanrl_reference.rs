@@ -585,6 +585,10 @@ pub enum ReferenceActuation {
     HoldTwoTicks,
     /// Limit each 10-ms tick to a 5 N change in actuator command.
     SlewFiveNewtonsPerTick,
+    /// Evaluation-only corrective-force interventions, clipped to max force.
+    BoostOneAndHalf,
+    BoostTwo,
+    BangBangSign,
 }
 
 impl ReferenceActuation {
@@ -594,6 +598,9 @@ impl ReferenceActuation {
             Self::DelayOneTick => "delay_one_tick",
             Self::HoldTwoTicks => "hold_two_ticks",
             Self::SlewFiveNewtonsPerTick => "slew_five_n_per_tick",
+            Self::BoostOneAndHalf => "boost_1p5",
+            Self::BoostTwo => "boost_2p0",
+            Self::BangBangSign => "bang_bang_sign",
         }
     }
 
@@ -603,7 +610,9 @@ impl ReferenceActuation {
         previous_output: f32,
         previous_desired: f32,
         tick: usize,
+        max_force: f32,
     ) -> f32 {
+        assert!(max_force.is_finite() && max_force > 0.0);
         match self {
             Self::Ideal => desired,
             Self::DelayOneTick => previous_desired,
@@ -616,6 +625,17 @@ impl ReferenceActuation {
             }
             Self::SlewFiveNewtonsPerTick => {
                 previous_output + (desired - previous_output).clamp(-5.0, 5.0)
+            }
+            Self::BoostOneAndHalf => (1.5 * desired).clamp(-max_force, max_force),
+            Self::BoostTwo => (2.0 * desired).clamp(-max_force, max_force),
+            Self::BangBangSign => {
+                if desired > 0.0 {
+                    max_force
+                } else if desired < 0.0 {
+                    -max_force
+                } else {
+                    0.0
+                }
             }
         }
     }
@@ -963,6 +983,7 @@ impl CleanRlReferenceTrainer {
                     lane.output_force_n,
                     lane.queued_desired_force_n,
                     lane.steps,
+                    env_config.max_force,
                 );
                 lane.output_force_n = actuator_force_n;
                 lane.queued_desired_force_n = desired_force_n;
@@ -1444,17 +1465,27 @@ mod tests {
     #[test]
     fn evaluation_actuator_transform_has_frozen_step_semantics() {
         let ideal = ReferenceActuation::Ideal;
-        assert_eq!(ideal.output_force(20.0, -20.0, -20.0, 1), 20.0);
+        assert_eq!(ideal.output_force(20.0, -20.0, -20.0, 1, 20.0), 20.0);
         let delay = ReferenceActuation::DelayOneTick;
-        assert_eq!(delay.output_force(20.0, 0.0, 0.0, 0), 0.0);
-        assert_eq!(delay.output_force(-20.0, 20.0, 20.0, 1), 20.0);
+        assert_eq!(delay.output_force(20.0, 0.0, 0.0, 0, 20.0), 0.0);
+        assert_eq!(delay.output_force(-20.0, 20.0, 20.0, 1, 20.0), 20.0);
         let hold = ReferenceActuation::HoldTwoTicks;
-        assert_eq!(hold.output_force(20.0, 0.0, 0.0, 0), 20.0);
-        assert_eq!(hold.output_force(-20.0, 20.0, 20.0, 1), 20.0);
-        assert_eq!(hold.output_force(-20.0, 20.0, 20.0, 2), -20.0);
+        assert_eq!(hold.output_force(20.0, 0.0, 0.0, 0, 20.0), 20.0);
+        assert_eq!(hold.output_force(-20.0, 20.0, 20.0, 1, 20.0), 20.0);
+        assert_eq!(hold.output_force(-20.0, 20.0, 20.0, 2, 20.0), -20.0);
         let slew = ReferenceActuation::SlewFiveNewtonsPerTick;
-        assert_eq!(slew.output_force(20.0, 0.0, 0.0, 0), 5.0);
-        assert_eq!(slew.output_force(-20.0, 5.0, 20.0, 1), 0.0);
+        assert_eq!(slew.output_force(20.0, 0.0, 0.0, 0, 20.0), 5.0);
+        assert_eq!(slew.output_force(-20.0, 5.0, 20.0, 1, 20.0), 0.0);
+        let boost = ReferenceActuation::BoostOneAndHalf;
+        assert_eq!(boost.output_force(12.0, 0.0, 0.0, 0, 20.0), 18.0);
+        assert_eq!(boost.output_force(-16.0, 0.0, 0.0, 0, 20.0), -20.0);
+        let double = ReferenceActuation::BoostTwo;
+        assert_eq!(double.output_force(7.0, 0.0, 0.0, 0, 20.0), 14.0);
+        assert_eq!(double.output_force(-12.0, 0.0, 0.0, 0, 20.0), -20.0);
+        let sign = ReferenceActuation::BangBangSign;
+        assert_eq!(sign.output_force(0.01, 0.0, 0.0, 0, 20.0), 20.0);
+        assert_eq!(sign.output_force(-0.01, 0.0, 0.0, 0, 20.0), -20.0);
+        assert_eq!(sign.output_force(0.0, 0.0, 0.0, 0, 20.0), 0.0);
     }
 
     #[test]
