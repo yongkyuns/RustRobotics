@@ -39,6 +39,12 @@ jobs:
           cargo fmt --all -- --check
           cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
           cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
+      - name: Retain rustfmt correction if validation fails
+        if: failure()
+        shell: bash
+        run: |
+          cargo fmt --all
+          git diff -- rust_robotics_train > actuator-evidence/rustfmt.patch
       - name: Build release diagnostic once
         run: cargo build --locked --release -p rust_robotics_train --features cleanrl-reference --example cleanrl_actuator_sensitivity
       - name: Reproduce four policies with frozen actuator modes
