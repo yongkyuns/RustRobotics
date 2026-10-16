@@ -5,8 +5,10 @@
 //!
 //! The output is create-only. Runs all checkpoints without best-checkpoint
 //! selection and retains every episode, including failures and late losses.
-//! This is an experimental cohort, NOT a substitute for independent held-out
-//! sustained-balancing acceptance on issue #33.
+//! Pass --shared-heldout to append common reset-key panels (same across seeds
+//! 201..204) to the original per-seed development panels. Evaluation is
+//! read-only and never feeds observations or rewards to the optimizer.
+//! Results are evidence, NOT automatic production acceptance on issue #33.
 #[cfg(not(feature = "cleanrl-reference"))]
 fn main() {
     eprintln!("Enable --features cleanrl-reference to run this diagnostic");
@@ -68,11 +70,36 @@ mod cohort {
         (ordinary, difficult)
     }
 
+    fn shared_heldout_panels(config: &CleanRlReferenceConfig) -> (Vec<u64>, Vec<u64>) {
+        // Predeclared, common across training seeds and never fed to the optimizer.
+        // Disjoint key namespaces from the seed-specific development panels.
+        let ordinary_start = 4_000_100_000_u64;
+        let difficult_start = 4_100_100_000_u64;
+        let ordinary = (ordinary_start..ordinary_start + PANEL_SIZE as u64).collect::<Vec<_>>();
+        let mut difficult = Vec::with_capacity(PANEL_SIZE);
+        for key in difficult_start..difficult_start + 20_000 {
+            let s = initial_state(config, key);
+            // Same physics-only outward-motion predicate as development.
+            if s[2].abs() >= 0.15 && s[3].abs() >= 0.25 && s[2] * s[3] > 0.0 {
+                difficult.push(key);
+                if difficult.len() == PANEL_SIZE {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            difficult.len(),
+            PANEL_SIZE,
+            "insufficient common held-out reset keys"
+        );
+        (ordinary, difficult)
+    }
+
     pub fn run() {
         let args = env::args().collect::<Vec<_>>();
         assert!(
-            args.len() == 3,
-            "usage: cleanrl_reference_cohort SEED CREATE_ONLY_CSV_PATH"
+            args.len() == 3 || (args.len() == 4 && args[3] == "--shared-heldout"),
+            "usage: cleanrl_reference_cohort SEED CREATE_ONLY_CSV_PATH [--shared-heldout]"
         );
         let seed: u64 = args[1].parse().expect("seed must be u64");
         assert!(
@@ -97,6 +124,12 @@ mod cohort {
             ..CleanRlReferenceConfig::default()
         };
         let (ordinary, difficult) = fixed_panels(&config, seed);
+        let mut panels = vec![("ordinary", ordinary), ("difficult", difficult)];
+        if args.len() == 4 {
+            let (heldout_ordinary, heldout_difficult) = shared_heldout_panels(&config);
+            panels.push(("heldout_ordinary", heldout_ordinary));
+            panels.push(("heldout_difficult", heldout_difficult));
+        }
         let mut trainer = CleanRlReferenceTrainer::new(config);
         let mut done_updates = 0;
         for &checkpoint in &UPDATES {
@@ -106,7 +139,7 @@ mod cohort {
             done_updates = checkpoint;
             assert_eq!(trainer.metrics().updates, checkpoint);
             assert_eq!(trainer.metrics().environment_steps, checkpoint * 512);
-            for (panel, keys) in [("ordinary", &ordinary), ("difficult", &difficult)] {
+            for (panel, keys) in &panels {
                 for (mode_name, mode) in [
                     ("deterministic", ReferenceEvaluationMode::Deterministic),
                     ("stochastic", ReferenceEvaluationMode::Stochastic),

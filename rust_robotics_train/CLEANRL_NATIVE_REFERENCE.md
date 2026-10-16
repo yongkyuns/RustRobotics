@@ -1,6 +1,8 @@
 # Native CleanRL-reference PPO — experimental
 
-**Status: prototype; no validated 499,712-interaction training result; not the production trainer.**
+**Status: experimental. Seed 201 completed its full 976-update / 499,712-interaction
+native training budget in [run #38844353112](https://github.com/yongkyuns/RustRobotics/actions/runs/38844353112);
+this does not qualify multi-seed or production reliability.**
 
 This is a port of the successful *recipe*, not a byte-for-byte port of
 CleanRL's PyTorch implementation. It lives behind
@@ -56,9 +58,9 @@ This is **not** claimed to be identical to CleanRL:
    independent of Torch, and no exact trajectory-equality is expected.
 4. Gym vectorized evaluation and native model export/snapshot and UI
    integration have **not** been ported.
-5. Actual 4-seed, full-budget Rust training, the original independent native
-   difficult-case panels, retained checkpoint evaluation and direct
-   step-by-step PPO gradient/Adam comparisons **have not yet been run**.
+5. Seed 201 completed its full-budget native development-panel run. The four-seed
+   common-panel qualification and direct full-network, step-by-step PPO
+   gradient/Adam comparisons **have not yet passed**.
 6. Live tests can verify timeout targets and finite forward/backward, but
    cannot establish performance, long-run retention, or deployment safety.
 
@@ -104,5 +106,43 @@ returns, rail clearances and force switches stored in create-only CSV files.
 This is **not** the previous Python evaluator's identical state/noise-key
 panel or equivalent RNG generator; the results must not be presented as a
 byte-matched Python-versus-Rust experiment. It is a new fixed task-native
-panel for checking retained recovery as learning proceeds. The full cohort
-is not part of regular CI and has **not been executed or qualified**.
+panel for checking retained recovery as learning proceeds. The seed-201
+development run completed, while the additional four-seed common-panel
+qualification remains separate from routine CI.
+
+
+## Frozen four-seed + common held-out protocol (opt-in)
+
+The one-seed release workflow on commit `8d0d9d31` passed source gates
+(17 targeted tests, formatting, strict Clippy), 976 updates and full CSV
+verification. Seed 201's final development-panel completions were 64/64
+ordinary and 63/64 difficult in **both** deterministic/stochastic modes.
+This is a single development seed only, not four-seed reproducibility,
+matching Torch parameters or held-out deployment readiness.
+
+The optional `--shared-heldout` flag appends two **common** panels to
+the unchanged existing seed-specific development panels. Every checkpoint
+(0/64/128/256/512/768/976) evaluates each panel in deterministic and
+stochastic modes for 1500 ticks and records **all** 64 individual outcomes.
+The two new reset-key sets are identical across training seeds 201–204.
+The ordinary panel starts at key `4_000_100_000`; the difficult panel is
+selected from keys starting at `4_100_100_000` with the same predeclared
+physics-only predicate: abs(angle) >= 0.15, abs(angular rate) >= 0.25, and
+angle * angular rate > 0. No seed is dropped or checkpoint selected after
+seeing learning outcomes. Held-out evaluations are read-only: their
+observations/rewards never contribute to PPO optimization.
+
+The separate create-once [four-seed workflow](../.github/workflows/cleanrl-native-four-seed.yml)
+builds the release example **once**, trains the four seeds sequentially
+without restarting each seed's Adam state between checkpoints, and validates
+4 × 976 updates, 4 × 499,712 training transitions and 14,336 evaluation
+records (4 seeds × 7 checkpoints × 4 panels × 2 modes × 64 resets). It
+verifies the *same* common-panel reset keys across seeds, publishes all
+per-seed CSVs and logs including incomplete failure evidence, and reports
+the 512/768/976 checkpoint completion counts. The workflow has a 90-minute
+cap, a one-off push-path trigger and manual dispatch; it is NOT in normal
+PR CI. The **workflow conclusion means evidence completeness only**.
+Whether the policy meets a sufficiently strict independent held-out success,
+variance and retention threshold requires interpretation of the actual
+results, and matching Torch gradients/Adam remains a distinct gate. No
+merge/default change is authorized by a green workflow.

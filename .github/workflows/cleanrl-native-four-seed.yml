@@ -1,0 +1,155 @@
+name: Experimental native PPO four-seed qualification
+
+on:
+  push:
+    branches: ["experiment/ppo-cleanrl-native-reference"]
+    paths:
+      - ".github/workflows/cleanrl-native-four-seed.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: experimental-native-ppo-four-seed
+  cancel-in-progress: false
+
+jobs:
+  four-seed:
+    name: Four fixed-budget native PPO seeds and common held-out panels
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-ppo-cleanrl-experiment-v1
+      - name: Record frozen cohort protocol and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p four-seed-evidence
+          {
+            printf 'source_sha='
+            git rev-parse HEAD
+            rustc --version
+            cargo --version
+            printf 'seeds=201,202,203,204\n'
+            printf 'updates_per_seed=976\n'
+            printf 'interactions_per_seed=499712\n'
+            printf 'evaluation_horizon_ticks=1500\n'
+            printf 'checkpoints=0,64,128,256,512,768,976\n'
+            printf 'shared_heldout_ordinary_key_start=4000100000\n'
+            printf 'shared_heldout_difficult_search_start=4100100000\n'
+            printf 'panel_size_per_mode=64\n'
+          } > four-seed-evidence/provenance.txt
+      - name: Validate source before training
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
+          cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
+      - name: Build native release cohort once
+        run: cargo build --locked --release -p rust_robotics_train --features cleanrl-reference --example cleanrl_reference_cohort
+      - name: Run all four seeds with frozen read-only panels
+        shell: bash
+        run: |
+          set -euo pipefail
+          for seed in 201 202 203 204; do
+            printf 'starting_seed=%s\n' "$seed" >> four-seed-evidence/provenance.txt
+            ./target/release/examples/cleanrl_reference_cohort \
+              "$seed" "four-seed-evidence/seed-$seed.csv" --shared-heldout \
+              2>&1 | tee "four-seed-evidence/seed-$seed.log"
+            printf 'seed_%s_complete=yes\n' "$seed" >> four-seed-evidence/provenance.txt
+          done
+      - name: Verify every update, training step and comparable held-out key
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections
+          import csv
+          import hashlib
+          import itertools
+          import os
+          from pathlib import Path
+
+          output = Path('four-seed-evidence')
+          seeds = (201, 202, 203, 204)
+          checkpoints = (0, 64, 128, 256, 512, 768, 976)
+          panels = ('ordinary', 'difficult', 'heldout_ordinary', 'heldout_difficult')
+          heldout_panels = ('heldout_ordinary', 'heldout_difficult')
+          modes = ('deterministic', 'stochastic')
+          expected = set(itertools.product(checkpoints, panels, modes))
+          shared_keys = {}
+          summary = [
+              '# Native PPO four-seed evidence',
+              '',
+              'The workflow succeeds only if four complete fixed-budget runs and all',
+              'predeclared evaluation records exist. It does NOT assert policy-quality acceptance.',
+              '',
+              '| Seed | Updates | Ordinary det | Ordinary stoch | Difficult det | Difficult stoch | Common ordinary det | Common ordinary stoch | Common difficult det | Common difficult stoch |',
+              '| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+          ]
+          for seed in seeds:
+              path = output / f'seed-{seed}.csv'
+              with path.open(newline='') as handle:
+                  reader = csv.DictReader(handle)
+                  required = {'seed', 'updates', 'train_steps', 'panel', 'mode', 'key', 'completed'}
+                  assert required.issubset(reader.fieldnames or []), (seed, reader.fieldnames)
+                  rows = list(reader)
+              assert len(rows) == len(expected) * 64, (seed, len(rows))
+              groups = collections.defaultdict(list)
+              for row in rows:
+                  assert int(row['seed']) == seed, row
+                  update = int(row['updates'])
+                  assert int(row['train_steps']) == update * 512, row
+                  assert row['completed'] in ('true', 'false'), row
+                  assert row['panel'] in panels and row['mode'] in modes, row
+                  groups[(update, row['panel'], row['mode'])].append(row)
+              assert set(groups) == expected, (seed, expected - set(groups), set(groups) - expected)
+              for key, subset in groups.items():
+                  assert len(subset) == 64, (seed, key, len(subset))
+                  assert len({r['key'] for r in subset}) == 64, (seed, key, 'duplicate keys')
+              for panel in heldout_panels:
+                  for checkpoint in checkpoints:
+                      for mode in modes:
+                          keys = tuple(sorted(int(r['key']) for r in groups[(checkpoint, panel, mode)]))
+                          assert len(keys) == 64
+                          if panel in shared_keys:
+                              assert keys == shared_keys[panel], (seed, checkpoint, panel, mode)
+                          else:
+                              shared_keys[panel] = keys
+              for checkpoint in (512, 768, 976):
+                  counts = []
+                  for panel in panels:
+                      for mode in modes:
+                          count = sum(r['completed'] == 'true' for r in groups[(checkpoint, panel, mode)])
+                          counts.append(f'{count}/64')
+                  summary.append(f"| {seed} | {checkpoint} | " + ' | '.join(counts) + ' |')
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              with (output / 'provenance.txt').open('a') as handle:
+                  handle.write(f'seed_{seed}_csv_sha256={digest}\n')
+          summary.extend(['', 'Evidence complete: 4 × 976 updates, 4 × 499,712 training interactions,',
+                          'and 4 × 7 × 4 × 2 × 64 = 14,336 evaluation records.',
+                          'Final learning and retention outcomes are the table values, NOT the GitHub workflow status.'])
+          result = '\n'.join(summary) + '\n'
+          (output / 'summary.md').write_text(result)
+          print(result)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as handle:
+              handle.write(result)
+          PY
+      - name: Retain logs, all outcomes and partial failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ppo-cleanrl-four-seed-evidence
+          path: four-seed-evidence/
+          retention-days: 14
+          if-no-files-found: warn
