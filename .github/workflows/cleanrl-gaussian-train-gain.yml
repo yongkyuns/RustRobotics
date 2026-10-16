@@ -1,0 +1,94 @@
+name: Experimental PPO Gaussian training-force gain
+
+on:
+  push:
+    branches: ["experiment/ppo-cleanrl-native-reference"]
+    paths:
+      - ".github/workflows/cleanrl-gaussian-train-gain.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: experimental-ppo-gaussian-training-gain
+  cancel-in-progress: true
+
+jobs:
+  train-gain:
+    name: Fixed-budget training with 1x, 1.5x and 2x Gaussian force maps
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-ppo-cleanrl-experiment-v1
+      - name: Record immutable source and frozen protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p train-gain-evidence
+          {
+            printf 'source_sha='
+            git rev-parse HEAD
+            rustc --version
+            cargo --version
+            printf 'gaussian_gains=gain_1p0,gain_1p5,gain_2p0\n'
+            printf 'exposed_training_seeds=201,202,203,204\n'
+            printf 'updates_per_policy=976\n'
+            printf 'interactions_per_policy=499712\n'
+            printf 'checkpoints=0,64,128,256,512,768,976\n'
+            printf 'force_clipping_newtons=20\n'
+            printf 'mapping=clip(gain*(20*tanh(z)),-20,20)\n'
+            printf 'gaussian_logprob=latent_z_not_clipped_force\n'
+            printf 'evaluation_horizon_ticks=1500\n'
+            printf 'fresh_confirmation=no\n'
+          } > train-gain-evidence/provenance.txt
+      - name: Validate Rust formatting, tests, strict warnings
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
+          cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
+      - name: Capture formatting correction on failure
+        if: failure()
+        shell: bash
+        run: |
+          cargo fmt --all
+          git diff -- rust_robotics_train > train-gain-evidence/rustfmt.patch
+      - name: Build release trainer once
+        run: cargo build --locked --release -p rust_robotics_train --features cleanrl-reference --example cleanrl_train_force_gain
+      - name: Train all Gaussian policies at predeclared gains and seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          for gain in gain_1p0 gain_1p5 gain_2p0; do
+            for seed in 201 202 203 204; do
+              printf 'started_%s_%s=yes\n' "$gain" "$seed" >> train-gain-evidence/provenance.txt
+              ./target/release/examples/cleanrl_train_force_gain "$gain" "$seed" \
+                "train-gain-evidence/$gain-$seed.csv" \
+                2>&1 | tee "train-gain-evidence/$gain-$seed.log"
+              printf 'completed_%s_%s=yes\n' "$gain" "$seed" >> train-gain-evidence/provenance.txt
+            done
+          done
+      - name: Independently verify baseline identity and every experimental row
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_cleanrl_train_force_gain.py train-gain-evidence \
+            --output train-gain-evidence/summary.md
+      - name: Retain all evidence, including partial and failed training
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ppo-gaussian-train-force-gain
+          path: train-gain-evidence/
+          retention-days: 14
+          if-no-files-found: warn
