@@ -1515,7 +1515,9 @@ mod tests {
             ReferenceActionDistribution::SquashedGaussian,
         );
         let measured = log_probs.to_data().to_vec::<f32>().unwrap();
-        for (i, &(mu, log_std)) in [(0.2_f32, -0.5), (-0.3, 0.4)].iter().enumerate() {
+        for (i, &(mu, log_std)) in [(0.2_f32, -0.5_f32), (-0.3_f32, 0.4_f32)]
+            .iter()
+            .enumerate() {
             let expected = -0.5 * ((z[i] - mu) / log_std.exp()).powi(2)
                 - log_std
                 - NORMAL_LOG_NORM;
