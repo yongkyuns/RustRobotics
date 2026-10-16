@@ -32,7 +32,7 @@ At updates **768** and **976**, ordinary held-out success was 64/64 for every se
 
 ## Residual failures — one key dominates
 
-All **seven of the eight final common-difficult panel evaluations that did not complete** share **reset key `4100100100`**. Seed 204's deterministic evaluation was the lone success at this key.
+All **seven failed final common-difficult evaluations** (out of 512 evaluated seed/mode/key combinations) share **reset key `4100100100`**. Seed 204's deterministic evaluation was the lone success at this key.
 
 Initial true simulator state for this key:
 - cart position **+0.123918 m**, cart velocity **+0.397964 m/s**
