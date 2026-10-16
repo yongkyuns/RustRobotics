@@ -285,13 +285,15 @@ fn choose_policy_force<R: Rng + ?Sized>(
             let log_std = parameters[1].clamp(MIN_LOG_STD, MAX_LOG_STD);
             let latent = match mode {
                 ReferenceEvaluationMode::Deterministic => mean,
-                ReferenceEvaluationMode::Stochastic => {
-                    mean + log_std.exp() * normal(rng) as f32
-                }
+                ReferenceEvaluationMode::Stochastic => mean + log_std.exp() * normal(rng) as f32,
             };
             // For diagnostics only, "force_switches" counts sign crossings,
             // not full-scale +/-20 N reversals as it does for categorical.
-            (usize::from(latent > 0.0), latent, continuous_force(latent, max_force))
+            (
+                usize::from(latent > 0.0),
+                latent,
+                continuous_force(latent, max_force),
+            )
         }
     }
 }
@@ -433,11 +435,11 @@ fn action_log_prob_and_entropy<B: Backend>(
             let n = latents.len();
             assert_eq!(actions.len(), n);
             let mean_mask = Tensor::<B, 2>::from_data(
-                TensorData::new(vec![1.0_f32, 0.0].repeat(n), [n, ACTIONS]),
+                TensorData::new([1.0_f32, 0.0].repeat(n), [n, ACTIONS]),
                 device,
             );
             let log_std_mask = Tensor::<B, 2>::from_data(
-                TensorData::new(vec![0.0_f32, 1.0].repeat(n), [n, ACTIONS]),
+                TensorData::new([0.0_f32, 1.0].repeat(n), [n, ACTIONS]),
                 device,
             );
             let mean = (logits.clone() * mean_mask).sum_dim(1);
@@ -446,10 +448,7 @@ fn action_log_prob_and_entropy<B: Backend>(
                 .clamp(MIN_LOG_STD, MAX_LOG_STD);
             let centered = tensor_scalars(device, latents) - mean;
             let standardized = centered * log_std.clone().neg().exp();
-            let log_prob = standardized
-                .square()
-                .mul_scalar(-0.5)
-                - log_std.clone();
+            let log_prob = standardized.square().mul_scalar(-0.5) - log_std.clone();
             let log_prob = log_prob.sub_scalar(NORMAL_LOG_NORM);
             let entropy = log_std.add_scalar(GAUSSIAN_ENTROPY_BASE).mean();
             (log_prob, entropy)
@@ -473,13 +472,8 @@ fn ppo_objective_terms<B: Backend>(
     normalized_advantages: &[f32],
     clip_epsilon: f32,
 ) -> (Tensor<B, 1>, Tensor<B, 1>, Tensor<B, 1>) {
-    let (new_log_prob, entropy) = action_log_prob_and_entropy(
-        logits,
-        device,
-        actions,
-        action_latents,
-        distribution,
-    );
+    let (new_log_prob, entropy) =
+        action_log_prob_and_entropy(logits, device, actions, action_latents, distribution);
     let ratio = (new_log_prob - tensor_scalars(device, old_log_probs)).exp();
     let neg_advantages = tensor_scalars(device, normalized_advantages).mul_scalar(-1.0);
     let policy_loss = torch_maximum(
@@ -1164,7 +1158,10 @@ impl CleanRlReferenceTrainer {
                     .map(|&i| rows[i].observation)
                     .collect::<Vec<_>>();
                 let actions = batch.iter().map(|&i| rows[i].action).collect::<Vec<_>>();
-                let latents = batch.iter().map(|&i| rows[i].action_latent).collect::<Vec<_>>();
+                let latents = batch
+                    .iter()
+                    .map(|&i| rows[i].action_latent)
+                    .collect::<Vec<_>>();
                 let old_log_probs = batch
                     .iter()
                     .map(|&i| rows[i].old_log_prob)
@@ -1517,19 +1514,16 @@ mod tests {
         let measured = log_probs.to_data().to_vec::<f32>().unwrap();
         for (i, &(mu, log_std)) in [(0.2_f32, -0.5_f32), (-0.3_f32, 0.4_f32)]
             .iter()
-            .enumerate() {
-            let expected = -0.5 * ((z[i] - mu) / log_std.exp()).powi(2)
-                - log_std
-                - NORMAL_LOG_NORM;
+            .enumerate()
+        {
+            let expected = -0.5 * ((z[i] - mu) / log_std.exp()).powi(2) - log_std - NORMAL_LOG_NORM;
             assert!((measured[i] - expected).abs() < 1e-5);
         }
         let expected_entropy = GAUSSIAN_ENTROPY_BASE + (-0.5 + 0.4) / 2.0;
-        assert!(
-            (entropy.to_data().to_vec::<f32>().unwrap()[0] - expected_entropy).abs() < 1e-5
-        );
+        assert!((entropy.to_data().to_vec::<f32>().unwrap()[0] - expected_entropy).abs() < 1e-5);
         for latent in [-100.0_f32, -2.0, 0.0, 0.5, 1.0, 100.0] {
             let force = continuous_force(latent, 20.0);
-            assert!(force >= -20.0 && force <= 20.0);
+            assert!((-20.0..=20.0).contains(&force));
         }
         let ratio = measured
             .iter()
@@ -1538,9 +1532,8 @@ mod tests {
             .map(|(i, (&old_log_prob, latent))| {
                 let mu = if i == 0 { 0.2_f32 } else { -0.3 };
                 let log_std = if i == 0 { -0.5_f32 } else { 0.4 };
-                let replay = -0.5 * ((latent - mu) / log_std.exp()).powi(2)
-                    - log_std
-                    - NORMAL_LOG_NORM;
+                let replay =
+                    -0.5 * ((latent - mu) / log_std.exp()).powi(2) - log_std - NORMAL_LOG_NORM;
                 (replay - old_log_prob).exp()
             })
             .collect::<Vec<_>>();
