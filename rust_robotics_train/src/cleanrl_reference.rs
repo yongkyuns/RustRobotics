@@ -1316,7 +1316,7 @@ mod tests {
     #[test]
     fn ideal_instrumented_evaluation_matches_original_episode_exactly() {
         let config = CleanRlReferenceConfig::default();
-        let trainer = CleanRlReferenceTrainer::new(config);
+        let trainer = CleanRlReferenceTrainer::new(config.clone());
         let keys = [4_100_100_100_u64, 4_100_100_101, 4_100_100_102];
         for mode in [
             ReferenceEvaluationMode::Deterministic,
