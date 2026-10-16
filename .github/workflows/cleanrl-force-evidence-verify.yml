@@ -1,0 +1,47 @@
+name: Verify retained PPO force witness artifact
+
+on:
+  push:
+    branches: ["experiment/ppo-cleanrl-native-reference"]
+    paths:
+      - ".github/workflows/cleanrl-force-evidence-verify.yml"
+      - "scripts/verify_cleanrl_force_witness.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: verify-ppo-retained-force-witness
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download evidence from exact previously completed training run
+        uses: actions/download-artifact@v4
+        with:
+          name: native-ppo-action-force-witness
+          run-id: 38944679027
+          github-token: ${{ github.token }}
+          path: retained-force-evidence
+      - name: Verify source provenance, full CSVs, and force traces
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_cleanrl_force_witness.py retained-force-evidence \
+            --output retained-verification/force-witness-report.md
+      - name: Retain independent verification output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-retained-force-verification
+          path: retained-verification/
+          retention-days: 14
+          if-no-files-found: warn
