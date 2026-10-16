@@ -45,6 +45,9 @@ pub struct CleanRlReferenceConfig {
     pub environment: PendulumEnvConfig,
     pub seed: u64,
     pub action_distribution: ReferenceActionDistribution,
+    /// Experimental bounded output-force gain used in BOTH training and
+    /// evaluation. Categorical must retain the 1.0 default.
+    pub continuous_force_gain: f32,
     pub environments: usize,
     pub steps_per_environment: usize,
     pub minibatch_size: usize,
@@ -70,6 +73,7 @@ impl Default for CleanRlReferenceConfig {
             environment,
             seed: 201,
             action_distribution: ReferenceActionDistribution::Categorical,
+            continuous_force_gain: 1.0,
             environments: 4,
             steps_per_environment: 128,
             minibatch_size: 128,
@@ -104,6 +108,12 @@ impl CleanRlReferenceConfig {
         assert!(self.entropy_coefficient.is_finite() && self.entropy_coefficient >= 0.0);
         assert!(self.value_coefficient.is_finite() && self.value_coefficient >= 0.0);
         assert!(self.environment.max_force.is_finite() && self.environment.max_force > 0.0);
+        assert!(self.continuous_force_gain.is_finite() && self.continuous_force_gain > 0.0);
+        assert!(
+            self.action_distribution == ReferenceActionDistribution::SquashedGaussian
+                || self.continuous_force_gain == 1.0,
+            "categorical reference must retain default force gain"
+        );
     }
 
     /// Mirrors upstream's per-iteration annealing; the final rate is positive.
@@ -264,11 +274,20 @@ fn continuous_force(latent: f32, max_force: f32) -> f32 {
     force
 }
 
+/// Train-time force map. The policy importance ratio is taken over the
+/// stored Gaussian latent, including where this clipped map is many-to-one.
+/// This is not a physical-force-density or exact squashed-entropy claim.
+fn continuous_force_with_gain(latent: f32, max_force: f32, gain: f32) -> f32 {
+    assert!(gain.is_finite() && gain > 0.0);
+    (continuous_force(latent, max_force) * gain).clamp(-max_force, max_force)
+}
+
 fn choose_policy_force<R: Rng + ?Sized>(
     parameters: [f32; 2],
     distribution: ReferenceActionDistribution,
     mode: ReferenceEvaluationMode,
     max_force: f32,
+    continuous_gain: f32,
     rng: &mut R,
 ) -> (usize, f32, f32) {
     match distribution {
@@ -292,7 +311,7 @@ fn choose_policy_force<R: Rng + ?Sized>(
             (
                 usize::from(latent > 0.0),
                 latent,
-                continuous_force(latent, max_force),
+                continuous_force_with_gain(latent, max_force, continuous_gain),
             )
         }
     }
@@ -749,7 +768,11 @@ impl CleanRlReferenceTrainer {
                 self.config.environment.max_force,
             ),
             ReferenceActionDistribution::SquashedGaussian => {
-                continuous_force(logits[0], self.config.environment.max_force)
+                continuous_force_with_gain(
+                    logits[0],
+                    self.config.environment.max_force,
+                    self.config.continuous_force_gain,
+                )
             }
         }
     }
@@ -839,6 +862,7 @@ impl CleanRlReferenceTrainer {
                     self.config.action_distribution,
                     mode,
                     env_config.max_force,
+                    self.config.continuous_force_gain,
                     &mut lane.action_rng,
                 );
                 if let Some(previous) = lane.previous_action {
@@ -969,6 +993,7 @@ impl CleanRlReferenceTrainer {
                     self.config.action_distribution,
                     mode,
                     env_config.max_force,
+                    self.config.continuous_force_gain,
                     &mut lane.action_rng,
                 );
                 if let Some(previous) = lane.previous_action {
@@ -1091,6 +1116,7 @@ impl CleanRlReferenceTrainer {
                         self.config.action_distribution,
                         ReferenceEvaluationMode::Stochastic,
                         self.config.environment.max_force,
+                        self.config.continuous_force_gain,
                         &mut lane.action_rng,
                     )
                 })
@@ -1603,6 +1629,50 @@ mod tests {
         );
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.raw_return.is_finite()));
+    }
+
+    #[test]
+    fn bounded_continuous_force_gain_matches_nominal_map_at_one() {
+        for latent in [-3.0_f32, -0.8, -0.1, 0.0, 0.1, 0.8, 3.0] {
+            let force = continuous_force(latent, 20.0);
+            assert_eq!(continuous_force_with_gain(latent, 20.0, 1.0), force);
+            assert_eq!(
+                continuous_force_with_gain(latent, 20.0, 1.5),
+                (force * 1.5).clamp(-20.0, 20.0)
+            );
+            assert_eq!(
+                continuous_force_with_gain(latent, 20.0, 2.0),
+                (force * 2.0).clamp(-20.0, 20.0)
+            );
+        }
+    }
+
+    #[test]
+    fn train_and_evaluate_with_gained_gaussian_is_bounded_and_finite() {
+        let mut config = CleanRlReferenceConfig {
+            action_distribution: ReferenceActionDistribution::SquashedGaussian,
+            continuous_force_gain: 2.0,
+            environments: 2,
+            steps_per_environment: 4,
+            minibatch_size: 4,
+            epochs: 1,
+            total_updates: 2,
+            ..Default::default()
+        };
+        config.environment.max_steps = 3;
+        let mut trainer = CleanRlReferenceTrainer::new(config);
+        let before = trainer.act_deterministic([0.0; INPUTS]);
+        assert!(before.is_finite() && (-20.0..=20.0).contains(&before));
+        trainer.train_updates(2);
+        assert_eq!(trainer.metrics().updates, 2);
+        assert_eq!(trainer.metrics().environment_steps, 16);
+        let rows = trainer.evaluate_seeded(
+            &[4_000_100_000_u64, 4_100_100_100],
+            24,
+            ReferenceEvaluationMode::Stochastic,
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.raw_return.is_finite()));
     }
 
     #[test]
