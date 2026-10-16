@@ -1,5 +1,7 @@
 name: Experimental PPO Gaussian training-force gain
 
+# Retry after rustfmt exact output correction; protocol and budget unchanged.
+
 on:
   push:
     branches: ["experiment/ppo-cleanrl-native-reference"]

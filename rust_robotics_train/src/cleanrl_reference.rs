@@ -767,13 +767,11 @@ impl CleanRlReferenceTrainer {
                 deterministic_action([logits[0], logits[1]]),
                 self.config.environment.max_force,
             ),
-            ReferenceActionDistribution::SquashedGaussian => {
-                continuous_force_with_gain(
-                    logits[0],
-                    self.config.environment.max_force,
-                    self.config.continuous_force_gain,
-                )
-            }
+            ReferenceActionDistribution::SquashedGaussian => continuous_force_with_gain(
+                logits[0],
+                self.config.environment.max_force,
+                self.config.continuous_force_gain,
+            ),
         }
     }
 
