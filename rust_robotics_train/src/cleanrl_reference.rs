@@ -18,8 +18,8 @@ use crate::{
 use burn::{
     module::{AutodiffModule, Module, Param},
     nn::Linear,
-    optim::{AdamConfig, GradientsParams, Optimizer, adaptor::OptimizerAdaptor},
-    tensor::{Tensor, TensorData, activation, backend::Backend},
+    optim::{adaptor::OptimizerAdaptor, AdamConfig, GradientsParams, Optimizer},
+    tensor::{activation, backend::Backend, Tensor, TensorData},
 };
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 use rust_robotics_algo::cart_pole::CartPoleParameters;
@@ -78,7 +78,9 @@ impl CleanRlReferenceConfig {
     fn validate(&self) {
         self.plant.validate();
         assert!(self.environments > 0 && self.steps_per_environment > 0);
-        let pool = self.environments.checked_mul(self.steps_per_environment)
+        let pool = self
+            .environments
+            .checked_mul(self.steps_per_environment)
             .expect("PPO pool size overflows");
         assert!(self.minibatch_size > 1 && pool.is_multiple_of(self.minibatch_size));
         assert!(self.epochs > 0 && self.total_updates > 0);
@@ -107,7 +109,12 @@ struct TanhMlp<B: Backend> {
 }
 
 impl<B: Backend> TanhMlp<B> {
-    fn new<R: Rng + ?Sized>(device: &B::Device, output_dim: usize, output_gain: f32, rng: &mut R) -> Self {
+    fn new<R: Rng + ?Sized>(
+        device: &B::Device,
+        output_dim: usize,
+        output_gain: f32,
+        rng: &mut R,
+    ) -> Self {
         Self {
             input: orthogonal_linear(device, INPUTS, 64, 2.0_f32.sqrt(), rng),
             hidden: orthogonal_linear(device, 64, 64, 2.0_f32.sqrt(), rng),
@@ -142,7 +149,11 @@ impl<B: Backend> ActorCritic<B> {
 // This reproduces the orthogonal-variance/gain contract, not PyTorch's
 // byte-identical seeded QR matrices or RNG order.
 fn orthogonal_linear<B: Backend, R: Rng + ?Sized>(
-    device: &B::Device, inputs: usize, outputs: usize, gain: f32, rng: &mut R,
+    device: &B::Device,
+    inputs: usize,
+    outputs: usize,
+    gain: f32,
+    rng: &mut R,
 ) -> Linear<B> {
     let height = inputs.max(outputs);
     let width = inputs.min(outputs);
@@ -162,7 +173,9 @@ fn orthogonal_linear<B: Backend, R: Rng + ?Sized>(
             }
             let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
             if norm > 1e-10 {
-                for x in &mut v { *x /= norm; }
+                for x in &mut v {
+                    *x /= norm;
+                }
                 basis = Some(v);
                 break;
             }
@@ -172,17 +185,25 @@ fn orthogonal_linear<B: Backend, R: Rng + ?Sized>(
     // Row-major Burn weights: [input, output]. Columns contain the
     // orthonormal basis of the tall orientation.
     let weight: Vec<f32> = if outputs >= inputs {
-        columns.iter()
+        columns
+            .iter()
             .flat_map(|column| column.iter().map(|&element| (gain as f64 * element) as f32))
             .collect()
     } else {
         (0..inputs)
-            .flat_map(|input| columns.iter().map(move |column| (gain as f64 * column[input]) as f32))
+            .flat_map(|input| {
+                columns
+                    .iter()
+                    .map(move |column| (gain as f64 * column[input]) as f32)
+            })
             .collect()
     };
     Linear {
         weight: Param::from_data(TensorData::new(weight, [inputs, outputs]), device),
-        bias: Some(Param::from_data(TensorData::new(vec![0.0_f32; outputs], [outputs]), device)),
+        bias: Some(Param::from_data(
+            TensorData::new(vec![0.0_f32; outputs], [outputs]),
+            device,
+        )),
     }
 }
 
@@ -246,8 +267,12 @@ struct Sample {
 }
 
 fn gae_targets(
-    rows: &[Sample], final_values: &[f32], environments: usize, steps: usize,
-    gamma: f32, lambda: f32,
+    rows: &[Sample],
+    final_values: &[f32],
+    environments: usize,
+    steps: usize,
+    gamma: f32,
+    lambda: f32,
 ) -> (Vec<f32>, Vec<f32>) {
     assert_eq!(rows.len(), environments * steps);
     assert_eq!(final_values.len(), environments);
@@ -266,7 +291,11 @@ fn gae_targets(
                 rows[index + environments].old_value
             };
             let corrected_reward = row.raw_reward
-                + if row.truncated { gamma * row.final_value } else { 0.0 };
+                + if row.truncated {
+                    gamma * row.final_value
+                } else {
+                    0.0
+                };
             let mask = if row.done { 0.0 } else { 1.0 };
             let delta = corrected_reward + gamma * mask * next_value - row.old_value;
             let advantage = delta + gamma * lambda * mask * next_advantage;
@@ -286,16 +315,21 @@ fn masks<B: Backend>(device: &B::Device, actions: &[usize]) -> Tensor<B, 2> {
     let mut values = Vec::with_capacity(actions.len() * ACTIONS);
     for &action in actions {
         assert!(action < ACTIONS, "only left/right categorical actions");
-        values.extend_from_slice(if action == 0 { &[1.0_f32, 0.0] } else { &[0.0, 1.0] });
+        values.extend_from_slice(if action == 0 {
+            &[1.0_f32, 0.0]
+        } else {
+            &[0.0, 1.0]
+        });
     }
     Tensor::from_data(TensorData::new(values, [actions.len(), ACTIONS]), device)
 }
 
 fn mini_batch_advantages(src: &[f32]) -> Vec<f32> {
     let mean = src.iter().copied().sum::<f32>() / src.len() as f32;
-    let variance = src.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
-        / (src.len() - 1) as f32; // torch.std: ddof=1
-    src.iter().map(|x| (x - mean) / (variance.sqrt() + 1e-8)).collect()
+    let variance = src.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / (src.len() - 1) as f32; // torch.std: ddof=1
+    src.iter()
+        .map(|x| (x - mean) / (variance.sqrt() + 1e-8))
+        .collect()
 }
 
 /// Elementwise maximum with PyTorch's half-gradient on exact ties.
@@ -332,18 +366,21 @@ fn ppo_objective_terms<B: Backend>(
     let policy_loss = torch_maximum(
         ratio.clone() * neg_advantages.clone(),
         ratio.clamp(1.0 - clip_epsilon, 1.0 + clip_epsilon) * neg_advantages,
-    ).mean();
+    )
+    .mean();
 
     let previous_values = tensor_scalars(device, old_values);
     let return_targets = tensor_scalars(device, targets);
     let unclipped = (values.clone() - return_targets.clone()).square();
-    let clipped_predictions = previous_values.clone() +
-        (values - previous_values).clamp(-clip_epsilon, clip_epsilon);
+    let clipped_predictions =
+        previous_values.clone() + (values - previous_values).clamp(-clip_epsilon, clip_epsilon);
     let clipped = (clipped_predictions - return_targets).square();
     let value_loss = torch_maximum(unclipped, clipped).mean().mul_scalar(0.5);
 
     let entropy = (log_probs.clone().exp() * log_probs)
-        .sum_dim(1).mean().mul_scalar(-1.0);
+        .sum_dim(1)
+        .mean()
+        .mul_scalar(-1.0);
     (policy_loss, value_loss, entropy)
 }
 
@@ -358,34 +395,47 @@ fn clip_global_gradients(
     use crate::backend::TrainBackend;
 
     let layers = [
-        &model.actor.input, &model.actor.hidden, &model.actor.output,
-        &model.critic.input, &model.critic.hidden, &model.critic.output,
+        &model.actor.input,
+        &model.actor.hidden,
+        &model.actor.output,
+        &model.critic.input,
+        &model.critic.hidden,
+        &model.critic.output,
     ];
     let mut squared_norm = 0.0_f64;
     for linear in layers {
         let weight = gradients
             .get::<TrainBackend, 2>(linear.weight.id)
             .expect("missing PPO weight gradient")
-            .to_data().to_vec::<f32>().unwrap();
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
         let bias = gradients
             .get::<TrainBackend, 1>(linear.bias.as_ref().unwrap().id)
             .expect("missing PPO bias gradient")
-            .to_data().to_vec::<f32>().unwrap();
-        squared_norm += weight.into_iter().chain(bias).map(|v| {
-            let v = f64::from(v);
-            v * v
-        }).sum::<f64>();
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
+        squared_norm += weight
+            .into_iter()
+            .chain(bias)
+            .map(|v| {
+                let v = f64::from(v);
+                v * v
+            })
+            .sum::<f64>();
     }
     assert!(squared_norm.is_finite(), "nonfinite PPO global gradient");
-    let coefficient = (f64::from(maximum_norm) / (squared_norm.sqrt() + 1e-6))
-        .min(1.0) as f32;
+    let coefficient = (f64::from(maximum_norm) / (squared_norm.sqrt() + 1e-6)).min(1.0) as f32;
     for linear in layers {
         let weight_id = linear.weight.id;
         let bias_id = linear.bias.as_ref().unwrap().id;
-        let weight = gradients.remove::<TrainBackend, 2>(weight_id)
+        let weight = gradients
+            .remove::<TrainBackend, 2>(weight_id)
             .expect("missing PPO weight gradient");
         gradients.register::<TrainBackend, 2>(weight_id, weight.mul_scalar(coefficient));
-        let bias = gradients.remove::<TrainBackend, 1>(bias_id)
+        let bias = gradients
+            .remove::<TrainBackend, 1>(bias_id)
             .expect("missing PPO bias gradient");
         gradients.register::<TrainBackend, 1>(bias_id, bias.mul_scalar(coefficient));
     }
@@ -449,17 +499,29 @@ impl CleanRlReferenceTrainer {
             let mut environment_rng = StdRng::seed_from_u64(root.gen());
             let action_rng = StdRng::seed_from_u64(root.gen());
             let env = PendulumEnv::new_with_rng(
-                config.plant.model(), config.environment, &mut environment_rng,
+                config.plant.model(),
+                config.environment,
+                &mut environment_rng,
             );
             let observation = env.observation_with_rng(&mut environment_rng);
-            lanes.push(Lane { env, observation, environment_rng, action_rng });
+            lanes.push(Lane {
+                env,
+                observation,
+                environment_rng,
+                action_rng,
+            });
         }
         let optimizer_rng = StdRng::seed_from_u64(root.gen());
         // Apply an explicit joint global norm to the full actor+critic gradient
         // before Adam. Burn's built-in Norm clips EACH tensor independently.
         let optimizer = AdamConfig::new().with_epsilon(1e-5).init();
         Self {
-            config, device, model, optimizer, lanes, optimizer_rng,
+            config,
+            device,
+            model,
+            optimizer,
+            lanes,
+            optimizer_rng,
             metrics: CleanRlReferenceMetrics::default(),
         }
     }
@@ -475,11 +537,19 @@ impl CleanRlReferenceTrainer {
     /// Deterministic inference only; does not touch RNG, optimizer or live env.
     pub fn act_deterministic(&self, observation: [f32; INPUTS]) -> f32 {
         let valid = self.model.valid();
-        let input = obs_tensor::<<AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend>(
-            &self.device, &[observation],
-        );
-        let logits = valid.actor.forward(input).to_data().to_vec::<f32>().unwrap();
-        force_for_action(deterministic_action([logits[0], logits[1]]), self.config.environment.max_force)
+        let input = obs_tensor::<
+            <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
+        >(&self.device, &[observation]);
+        let logits = valid
+            .actor
+            .forward(input)
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
+        force_for_action(
+            deterministic_action([logits[0], logits[1]]),
+            self.config.environment.max_force,
+        )
     }
 
     /// Evaluate a frozen checkpoint on a caller-owned panel of reset keys.
@@ -522,15 +592,24 @@ impl CleanRlReferenceTrainer {
             let mut environment_rng = StdRng::seed_from_u64(root.gen());
             let action_rng = StdRng::seed_from_u64(root.gen());
             let env = PendulumEnv::new_with_rng(
-                self.config.plant.model(), env_config, &mut environment_rng,
+                self.config.plant.model(),
+                env_config,
+                &mut environment_rng,
             );
             let observation = env.observation_with_rng(&mut environment_rng);
             let state = env.state();
             lanes.push(EvalLane {
-                key, env, observation, environment_rng, action_rng,
+                key,
+                env,
+                observation,
+                environment_rng,
+                action_rng,
                 initial_state: [state[0], state[1], state[2], state[3]],
                 initial_value: self.value(observation),
-                steps: 0, done: false, completed: false, terminated: false,
+                steps: 0,
+                done: false,
+                completed: false,
+                terminated: false,
                 raw_return: 0.0,
                 min_cart_clearance_m: env_config.max_position_m - state[0].abs(),
                 force_switches: 0,
@@ -540,7 +619,10 @@ impl CleanRlReferenceTrainer {
 
         let actor = self.model.valid().actor;
         for _ in 0..horizon {
-            let observations = lanes.iter().map(|lane| lane.observation).collect::<Vec<_>>();
+            let observations = lanes
+                .iter()
+                .map(|lane| lane.observation)
+                .collect::<Vec<_>>();
             let tensor = obs_tensor::<
                 <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
             >(&self.device, &observations);
@@ -551,9 +633,7 @@ impl CleanRlReferenceTrainer {
                 }
                 let pair = [logits[i * ACTIONS], logits[i * ACTIONS + 1]];
                 let action = match mode {
-                    ReferenceEvaluationMode::Deterministic => {
-                        deterministic_action(pair)
-                    }
+                    ReferenceEvaluationMode::Deterministic => deterministic_action(pair),
                     ReferenceEvaluationMode::Stochastic => {
                         choose_action(pair, &mut lane.action_rng)
                     }
@@ -567,9 +647,9 @@ impl CleanRlReferenceTrainer {
                 lane.steps += 1;
                 lane.raw_return += f64::from(step.reward);
                 lane.observation = step.observation;
-                lane.min_cart_clearance_m = lane.min_cart_clearance_m.min(
-                    env_config.max_position_m - lane.env.state()[0].abs()
-                );
+                lane.min_cart_clearance_m = lane
+                    .min_cart_clearance_m
+                    .min(env_config.max_position_m - lane.env.state()[0].abs());
                 if step.done {
                     lane.done = true;
                     lane.completed = step.truncated;
@@ -580,30 +660,40 @@ impl CleanRlReferenceTrainer {
                 break;
             }
         }
-        lanes.into_iter().map(|lane| ReferenceEvaluationEpisode {
-            key: lane.key,
-            initial_state: lane.initial_state,
-            initial_value: lane.initial_value,
-            steps: lane.steps,
-            completed: lane.completed,
-            terminated: lane.terminated,
-            raw_return: lane.raw_return,
-            min_cart_clearance_m: lane.min_cart_clearance_m,
-            force_switches: lane.force_switches,
-        }).collect()
+        lanes
+            .into_iter()
+            .map(|lane| ReferenceEvaluationEpisode {
+                key: lane.key,
+                initial_state: lane.initial_state,
+                initial_value: lane.initial_value,
+                steps: lane.steps,
+                completed: lane.completed,
+                terminated: lane.terminated,
+                raw_return: lane.raw_return,
+                min_cart_clearance_m: lane.min_cart_clearance_m,
+                force_switches: lane.force_switches,
+            })
+            .collect()
     }
 
     fn value(&self, observation: [f32; INPUTS]) -> f32 {
         let valid = self.model.valid();
-        let input = obs_tensor::<<AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend>(
-            &self.device, &[observation],
-        );
-        valid.critic.forward(input).to_data().to_vec::<f32>().unwrap()[0]
+        let input = obs_tensor::<
+            <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
+        >(&self.device, &[observation]);
+        valid
+            .critic
+            .forward(input)
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()[0]
     }
 
     pub fn train_updates(&mut self, updates: usize) {
-        assert!(self.metrics.updates + updates <= self.config.total_updates,
-                "CleanRL reference total training budget exceeded");
+        assert!(
+            self.metrics.updates + updates <= self.config.total_updates,
+            "CleanRL reference total training budget exceeded"
+        );
         for _ in 0..updates {
             let (rows, returns, advantages) = self.collect();
             self.optimize(&rows, &returns, &advantages);
@@ -618,16 +708,23 @@ impl CleanRlReferenceTrainer {
         let mut rows = Vec::with_capacity(lanes * steps);
         for _ in 0..steps {
             let observations = self.lanes.iter().map(|l| l.observation).collect::<Vec<_>>();
-            let inputs = obs_tensor::<<AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend>(
-                &self.device, &observations,
-            );
+            let inputs = obs_tensor::<
+                <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
+            >(&self.device, &observations);
             let policy_logits = valid.actor.forward(inputs.clone());
             // Record the same log-softmax used by PPO replay. Logging ln(1-p)
             // can produce a non-unit ratio even when the actor is unchanged.
             let log_probs = activation::log_softmax(policy_logits.clone(), 1)
-                .to_data().to_vec::<f32>().unwrap();
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap();
             let logits = policy_logits.to_data().to_vec::<f32>().unwrap();
-            let values = valid.critic.forward(inputs).to_data().to_vec::<f32>().unwrap();
+            let values = valid
+                .critic
+                .forward(inputs)
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap();
             for (i, lane) in self.lanes.iter_mut().enumerate() {
                 let distribution = [logits[2 * i], logits[2 * i + 1]];
                 let action = choose_action(distribution, &mut lane.action_rng);
@@ -637,16 +734,27 @@ impl CleanRlReferenceTrainer {
                     &mut lane.environment_rng,
                 );
                 let final_value = if step.truncated {
-                    let input = obs_tensor::<<AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend>(
-                        &self.device, &[step.observation],
-                    );
-                    valid.critic.forward(input).to_data().to_vec::<f32>().unwrap()[0]
-                } else { 0.0 };
+                    let input = obs_tensor::<
+                        <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
+                    >(&self.device, &[step.observation]);
+                    valid
+                        .critic
+                        .forward(input)
+                        .to_data()
+                        .to_vec::<f32>()
+                        .unwrap()[0]
+                } else {
+                    0.0
+                };
                 rows.push(Sample {
                     observation: lane.observation,
-                    action, old_log_prob: log_prob, old_value: values[i],
-                    raw_reward: step.reward, done: step.done,
-                    truncated: step.truncated, final_value,
+                    action,
+                    old_log_prob: log_prob,
+                    old_value: values[i],
+                    raw_reward: step.reward,
+                    done: step.done,
+                    truncated: step.truncated,
+                    final_value,
                 });
                 self.metrics.environment_steps += 1;
                 lane.observation = if step.done {
@@ -658,13 +766,21 @@ impl CleanRlReferenceTrainer {
             }
         }
         let observations = self.lanes.iter().map(|l| l.observation).collect::<Vec<_>>();
-        let values = valid.critic.forward(
-            obs_tensor::<<AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend>(
-                &self.device, &observations,
-            ),
-        ).to_data().to_vec::<f32>().unwrap();
+        let values = valid
+            .critic
+            .forward(obs_tensor::<
+                <AutodiffBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend,
+            >(&self.device, &observations))
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap();
         let (returns, advantages) = gae_targets(
-            &rows, &values, lanes, steps, self.config.gamma, self.config.gae_lambda,
+            &rows,
+            &values,
+            lanes,
+            steps,
+            self.config.gamma,
+            self.config.gae_lambda,
         );
         (rows, returns, advantages)
     }
@@ -675,9 +791,15 @@ impl CleanRlReferenceTrainer {
         for _ in 0..self.config.epochs {
             permutation.shuffle(&mut self.optimizer_rng);
             for batch in permutation.chunks(self.config.minibatch_size) {
-                let observations = batch.iter().map(|&i| rows[i].observation).collect::<Vec<_>>();
+                let observations = batch
+                    .iter()
+                    .map(|&i| rows[i].observation)
+                    .collect::<Vec<_>>();
                 let actions = batch.iter().map(|&i| rows[i].action).collect::<Vec<_>>();
-                let old_log_probs = batch.iter().map(|&i| rows[i].old_log_prob).collect::<Vec<_>>();
+                let old_log_probs = batch
+                    .iter()
+                    .map(|&i| rows[i].old_log_prob)
+                    .collect::<Vec<_>>();
                 let old_values = batch.iter().map(|&i| rows[i].old_value).collect::<Vec<_>>();
                 let targets = batch.iter().map(|&i| returns[i]).collect::<Vec<_>>();
                 let batch_adv = batch.iter().map(|&i| advantages[i]).collect::<Vec<_>>();
@@ -697,14 +819,19 @@ impl CleanRlReferenceTrainer {
                     &normalized_adv,
                     self.config.clip_epsilon,
                 );
-                self.metrics.last_policy_loss = policy_loss.clone().to_data().to_vec::<f32>().unwrap()[0];
-                self.metrics.last_value_loss = value_loss.clone().to_data().to_vec::<f32>().unwrap()[0];
+                self.metrics.last_policy_loss =
+                    policy_loss.clone().to_data().to_vec::<f32>().unwrap()[0];
+                self.metrics.last_value_loss =
+                    value_loss.clone().to_data().to_vec::<f32>().unwrap()[0];
                 self.metrics.last_entropy = entropy.clone().to_data().to_vec::<f32>().unwrap()[0];
                 let loss = policy_loss + value_loss.mul_scalar(self.config.value_coefficient)
                     - entropy.mul_scalar(self.config.entropy_coefficient);
                 let grads = GradientsParams::from_grads(loss.backward(), &self.model);
-                let grads = clip_global_gradients(&self.model, grads, self.config.maximum_gradient_norm);
-                self.model = self.optimizer.step(learning_rate, self.model.clone(), grads);
+                let grads =
+                    clip_global_gradients(&self.model, grads, self.config.maximum_gradient_norm);
+                self.model = self
+                    .optimizer
+                    .step(learning_rate, self.model.clone(), grads);
             }
         }
         self.metrics.last_learning_rate = learning_rate;
@@ -717,8 +844,14 @@ mod tests {
 
     fn example(value: f32, reward: f32, done: bool, truncated: bool, final_value: f32) -> Sample {
         Sample {
-            observation: [0.0; INPUTS], action: 0, old_log_prob: 0.0,
-            old_value: value, raw_reward: reward, done, truncated, final_value,
+            observation: [0.0; INPUTS],
+            action: 0,
+            old_log_prob: 0.0,
+            old_value: value,
+            raw_reward: reward,
+            done,
+            truncated,
+            final_value,
         }
     }
 
@@ -762,7 +895,9 @@ mod tests {
     fn minibatch_advantage_normalization_is_sample_std() {
         let result = mini_batch_advantages(&[1.0, 3.0, 5.0, 7.0]);
         let expected = [-1.161895, -0.387298, 0.387298, 1.161895];
-        for (a,b) in result.iter().zip(expected) { assert!((a-b).abs() < 1e-5); }
+        for (a, b) in result.iter().zip(expected) {
+            assert!((a - b).abs() < 1e-5);
+        }
     }
 
     #[test]
@@ -770,21 +905,25 @@ mod tests {
         let c = CleanRlReferenceConfig::default();
         assert_eq!(c.total_updates, 976);
         assert_eq!(c.rate_for_update(0), 2.5e-4);
-        assert!((c.rate_for_update(975) - 2.5e-4/976.0).abs() < 1e-12);
+        assert!((c.rate_for_update(975) - 2.5e-4 / 976.0).abs() < 1e-12);
     }
 
     #[test]
     fn orthogonal_initialization_has_correct_input_output_scale() {
         let mut rng = StdRng::seed_from_u64(77);
         let model = orthogonal_linear::<crate::backend::TrainBackend, _>(
-            &Default::default(), 4, 64, 2.0_f32.sqrt(), &mut rng,
+            &Default::default(),
+            4,
+            64,
+            2.0_f32.sqrt(),
+            &mut rng,
         );
         let data = model.weight.val().to_data().to_vec::<f32>().unwrap();
         for a in 0..4 {
             for b in 0..4 {
-                let dot: f32 = (0..64).map(|j| data[a*64+j]*data[b*64+j]).sum();
-                let expected = if a == b {2.0} else {0.0};
-                assert!((dot-expected).abs() < 1e-4);
+                let dot: f32 = (0..64).map(|j| data[a * 64 + j] * data[b * 64 + j]).sum();
+                let expected = if a == b { 2.0 } else { 0.0 };
+                assert!((dot - expected).abs() < 1e-4);
             }
         }
     }
@@ -797,8 +936,12 @@ mod tests {
         let model = ActorCritic::<AutodiffBackend>::new(&device, &mut rng);
         let mut gradients = GradientsParams::new();
         let layers = [
-            &model.actor.input, &model.actor.hidden, &model.actor.output,
-            &model.critic.input, &model.critic.hidden, &model.critic.output,
+            &model.actor.input,
+            &model.actor.hidden,
+            &model.actor.output,
+            &model.critic.input,
+            &model.critic.hidden,
+            &model.critic.output,
         ];
         let mut total_squared = 0.0_f64;
         for (index, layer) in layers.iter().enumerate() {
@@ -808,10 +951,12 @@ mod tests {
             let [biases]: [usize; 1] = layer.bias.as_ref().unwrap().shape().dims();
             total_squared += f64::from(gain * gain) * (weights + biases) as f64;
             let weight = Tensor::<TrainBackend, 2>::from_data(
-                TensorData::new(vec![gain; weights], shape), &device,
+                TensorData::new(vec![gain; weights], shape),
+                &device,
             );
             let bias = Tensor::<TrainBackend, 1>::from_data(
-                TensorData::new(vec![gain; biases], [biases]), &device,
+                TensorData::new(vec![gain; biases], [biases]),
+                &device,
             );
             gradients.register::<TrainBackend, 2>(layer.weight.id, weight);
             gradients.register::<TrainBackend, 1>(layer.bias.as_ref().unwrap().id, bias);
@@ -824,10 +969,18 @@ mod tests {
         let mut new_squared = 0.0_f64;
         for (index, layer) in layers.iter().enumerate() {
             let expected = ((index + 1) as f64 * coefficient) as f32;
-            let w = clipped.get::<TrainBackend, 2>(layer.weight.id)
-                .unwrap().to_data().to_vec::<f32>().unwrap();
-            let b = clipped.get::<TrainBackend, 1>(layer.bias.as_ref().unwrap().id)
-                .unwrap().to_data().to_vec::<f32>().unwrap();
+            let w = clipped
+                .get::<TrainBackend, 2>(layer.weight.id)
+                .unwrap()
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap();
+            let b = clipped
+                .get::<TrainBackend, 1>(layer.bias.as_ref().unwrap().id)
+                .unwrap()
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap();
             for x in w.into_iter().chain(b) {
                 assert!((x - expected).abs() < 1e-6, "joint clip was not uniform");
                 new_squared += f64::from(x) * f64::from(x);
@@ -842,21 +995,24 @@ mod tests {
     fn clipped_ppo_objective_matches_independent_pytorch_fixture() {
         let device = Default::default();
         let logits = Tensor::<crate::backend::TrainBackend, 2>::from_data(
-            TensorData::new(
-                vec![0.25, -0.8, -0.3, 0.4, 1.2, -0.6, -0.8, 0.4],
-                [4, 2],
-            ), &device,
+            TensorData::new(vec![0.25, -0.8, -0.3, 0.4, 1.2, -0.6, -0.8, 0.4], [4, 2]),
+            &device,
         );
         let values = Tensor::<crate::backend::TrainBackend, 2>::from_data(
-            TensorData::new(vec![0.9, -0.3, -0.5, 1.8], [4, 1]), &device,
+            TensorData::new(vec![0.9, -0.3, -0.5, 1.8], [4, 1]),
+            &device,
         );
         let advantages = mini_batch_advantages(&[-2.0, -0.4, 0.7, 1.2]);
         let (pg, vf, entropy) = ppo_objective_terms(
-            logits, values, &device, &[0, 1, 1, 0],
+            logits,
+            values,
+            &device,
+            &[0, 1, 1, 0],
             &[-0.8, -0.1, -0.7, -1.4],
             &[0.3, -0.5, 0.1, 2.0],
             &[2.0, -1.0, 0.8, 0.0],
-            &advantages, 0.2,
+            &advantages,
+            0.2,
         );
         let scalar = |value: Tensor<crate::backend::TrainBackend, 1>| {
             value.to_data().to_vec::<f32>().unwrap()[0]
@@ -891,7 +1047,10 @@ mod tests {
         let trainer = CleanRlReferenceTrainer::new(config);
         let before_action = trainer.act_deterministic([0.0; INPUTS]);
         let keys = [55_000_001_u64, 55_000_002, 55_000_003];
-        for mode in [ReferenceEvaluationMode::Deterministic, ReferenceEvaluationMode::Stochastic] {
+        for mode in [
+            ReferenceEvaluationMode::Deterministic,
+            ReferenceEvaluationMode::Stochastic,
+        ] {
             let original = trainer.evaluate_seeded(&keys, 24, mode);
             let repeat = trainer.evaluate_seeded(&keys, 24, mode);
             assert_eq!(original, repeat, "evaluation changed training or RNG");
@@ -914,8 +1073,12 @@ mod tests {
     #[test]
     fn small_native_training_session_preserves_real_physics_and_finite_policy() {
         let mut c = CleanRlReferenceConfig {
-            environments: 2, steps_per_environment: 4, minibatch_size: 4,
-            epochs: 1, total_updates: 2, ..Default::default()
+            environments: 2,
+            steps_per_environment: 4,
+            minibatch_size: 4,
+            epochs: 1,
+            total_updates: 2,
+            ..Default::default()
         };
         c.environment.max_steps = 3; // Exercise timeouts during actual training.
         let mut trainer = CleanRlReferenceTrainer::new(c);

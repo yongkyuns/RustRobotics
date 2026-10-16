@@ -38,9 +38,8 @@ mod cohort {
         let mut environment_rng = StdRng::seed_from_u64(root.gen());
         let mut eval_config = config.environment;
         eval_config.max_steps = EVAL_TICKS;
-        let env = PendulumEnv::new_with_rng(
-            config.plant.model(), eval_config, &mut environment_rng,
-        );
+        let env =
+            PendulumEnv::new_with_rng(config.plant.model(), eval_config, &mut environment_rng);
         let s = env.state();
         [s[0], s[1], s[2], s[3]]
     }
@@ -61,7 +60,11 @@ mod cohort {
                 }
             }
         }
-        assert_eq!(difficult.len(), PANEL_SIZE, "insufficient difficult reset keys");
+        assert_eq!(
+            difficult.len(),
+            PANEL_SIZE,
+            "insufficient difficult reset keys"
+        );
         (ordinary, difficult)
     }
 
@@ -72,10 +75,16 @@ mod cohort {
             "usage: cleanrl_reference_cohort SEED CREATE_ONLY_CSV_PATH"
         );
         let seed: u64 = args[1].parse().expect("seed must be u64");
-        assert!((201..=204).contains(&seed), "fixed development seeds 201..204 only");
+        assert!(
+            (201..=204).contains(&seed),
+            "fixed development seeds 201..204 only"
+        );
         let path = &args[2];
-        let out = OpenOptions::new().write(true).create_new(true)
-            .open(path).expect("result path already exists or cannot be created");
+        let out = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("result path already exists or cannot be created");
         let mut out = BufWriter::new(out);
         writeln!(
             out,

@@ -6,16 +6,27 @@ use super::*;
 #[test]
 fn maximum_routes_half_gradient_to_each_equal_operand() {
     let device = Default::default();
-    let left = Tensor::<AutodiffBackend, 1>::from_data([2.0, 4.0, 7.0], &device)
-        .require_grad();
-    let right = Tensor::<AutodiffBackend, 1>::from_data([3.0, 4.0, 5.0], &device)
-        .require_grad();
+    let left = Tensor::<AutodiffBackend, 1>::from_data([2.0, 4.0, 7.0], &device).require_grad();
+    let right = Tensor::<AutodiffBackend, 1>::from_data([3.0, 4.0, 5.0], &device).require_grad();
     let loss = torch_maximum(left.clone(), right.clone()).sum();
     let grads = loss.backward();
-    assert_eq!(left.grad(&grads).unwrap().to_data().to_vec::<f32>().unwrap(),
-               vec![0.0, 0.5, 1.0]);
-    assert_eq!(right.grad(&grads).unwrap().to_data().to_vec::<f32>().unwrap(),
-               vec![1.0, 0.5, 0.0]);
+    assert_eq!(
+        left.grad(&grads)
+            .unwrap()
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap(),
+        vec![0.0, 0.5, 1.0]
+    );
+    assert_eq!(
+        right
+            .grad(&grads)
+            .unwrap()
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap(),
+        vec![1.0, 0.5, 0.0]
+    );
 }
 
 #[test]
@@ -24,30 +35,58 @@ fn clipped_objective_backward_matches_pytorch_not_just_the_loss() {
     let logits = Tensor::<AutodiffBackend, 2>::from_data(
         TensorData::new(vec![0.25, -0.8, -0.3, 0.4, 1.2, -0.6, -0.8, 0.4], [4, 2]),
         &device,
-    ).require_grad();
+    )
+    .require_grad();
     let values = Tensor::<AutodiffBackend, 2>::from_data(
-        TensorData::new(vec![0.9, -0.3, -0.5, 1.8], [4, 1]), &device,
-    ).require_grad();
+        TensorData::new(vec![0.9, -0.3, -0.5, 1.8], [4, 1]),
+        &device,
+    )
+    .require_grad();
     let advantages = mini_batch_advantages(&[-2.0, -0.4, 0.7, 1.2]);
     let (pg, vf, entropy) = ppo_objective_terms(
-        logits.clone(), values.clone(), &device, &[0, 1, 1, 0],
-        &[-0.8, -0.1, -0.7, -1.4], &[0.3, -0.5, 0.1, 2.0],
-        &[2.0, -1.0, 0.8, 0.0], &advantages, 0.2,
+        logits.clone(),
+        values.clone(),
+        &device,
+        &[0, 1, 1, 0],
+        &[-0.8, -0.1, -0.7, -1.4],
+        &[0.3, -0.5, 0.1, 2.0],
+        &[2.0, -1.0, 0.8, 0.0],
+        &advantages,
+        0.2,
     );
     let objective = pg + vf.mul_scalar(0.5) - entropy.mul_scalar(0.01);
     let grads = objective.backward();
-    let actual_logits = logits.grad(&grads).unwrap().to_data().to_vec::<f32>().unwrap();
-    let actual_values = values.grad(&grads).unwrap().to_data().to_vec::<f32>().unwrap();
+    let actual_logits = logits
+        .grad(&grads)
+        .unwrap()
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let actual_values = values
+        .grad(&grads)
+        .unwrap()
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap();
     let expected_logits = [
-        0.14183336, -0.14183336, -0.00038799748, 0.00038799748,
-        0.03621648, -0.03621648, -0.16912010, 0.16912010,
+        0.14183336,
+        -0.14183336,
+        -0.00038799748,
+        0.00038799748,
+        0.03621648,
+        -0.03621648,
+        -0.16912010,
+        0.16912010,
     ];
     let expected_values = [0.0, 0.0875, -0.1625, 0.1125];
     for (a, b) in actual_logits.iter().zip(expected_logits) {
-        assert!((a-b).abs() < 2e-6, "categorical policy gradient {a} != {b}");
+        assert!(
+            (a - b).abs() < 2e-6,
+            "categorical policy gradient {a} != {b}"
+        );
     }
     for (a, b) in actual_values.iter().zip(expected_values) {
-        assert!((a-b).abs() < 2e-6, "clipped critic gradient {a} != {b}");
+        assert!((a - b).abs() < 2e-6, "clipped critic gradient {a} != {b}");
     }
 }
 
@@ -60,15 +99,20 @@ fn frozen_log_softmax_record_has_unit_ratio_for_rare_actions() {
         &device,
     );
     let recorded = activation::log_softmax(logits.clone(), 1)
-        .to_data().to_vec::<f32>().unwrap();
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap();
     let actions = [1, 0, 1];
     let previous = [recorded[1], recorded[2], recorded[5]];
     assert!(previous.iter().all(|x| x.is_finite()));
     assert!((previous[0] + 16.0).abs() < 1e-5);
     assert!((previous[2] + 200.0).abs() < 1e-5);
     let current = (activation::log_softmax(logits, 1) * masks(&device, &actions)).sum_dim(1);
-    let ratio = (current - tensor_scalars(&device, &previous)).exp()
-        .to_data().to_vec::<f32>().unwrap();
+    let ratio = (current - tensor_scalars(&device, &previous))
+        .exp()
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap();
     assert_eq!(ratio, vec![1.0, 1.0, 1.0]);
 }
 
@@ -78,7 +122,7 @@ fn rare_category_is_not_rounded_away_by_one_minus_probability() {
     assert!(p[1] > 0.0);
     let true_rare = (-16.0_f64).exp() / (1.0 + (-16.0_f64).exp());
     assert!((f64::from(p[1]) / true_rare - 1.0).abs() < 1e-6);
-    assert!((f64::from(1.0-p[0]) / true_rare - 1.0).abs() > 0.05);
+    assert!((f64::from(1.0 - p[0]) / true_rare - 1.0).abs() > 0.05);
 }
 
 #[test]
