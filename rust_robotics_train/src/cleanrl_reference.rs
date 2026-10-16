@@ -754,7 +754,10 @@ impl CleanRlReferenceTrainer {
         mode: ReferenceEvaluationMode,
         actuator: ReferenceActuation,
         trace_key: Option<u64>,
-    ) -> (Vec<ReferenceEvaluationEpisode>, Vec<ReferenceEvaluationStep>) {
+    ) -> (
+        Vec<ReferenceEvaluationEpisode>,
+        Vec<ReferenceEvaluationStep>,
+    ) {
         assert!(!keys.is_empty() && horizon > 0);
         let mut traces = Vec::new();
         struct EvalLane {
