@@ -1,0 +1,148 @@
+name: Experimental PPO actuator sensitivity
+
+on:
+  push:
+    branches: ["experiment/ppo-cleanrl-native-reference"]
+    paths: [".github/workflows/cleanrl-actuator-sensitivity.yml"]
+  workflow_dispatch:
+
+# Formatting captured from failed run 38898625739, rerun on corrected source.
+permissions:
+  contents: read
+
+concurrency:
+  group: experimental-cleanrl-actuator
+  cancel-in-progress: false
+
+jobs:
+  actuator:
+    name: Four fixed PPO policies, actuator stress and witness traces
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-ppo-cleanrl-experiment-v1
+      - name: Record provenance
+        run: |
+          mkdir -p actuator-evidence
+          git rev-parse HEAD > actuator-evidence/source-sha.txt
+          rustc --version >> actuator-evidence/source-sha.txt
+          cargo --version >> actuator-evidence/source-sha.txt
+      - name: Source format and focused Rust tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
+          cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
+      - name: Retain rustfmt correction if validation fails
+        if: failure()
+        shell: bash
+        run: |
+          cargo fmt --all
+          git diff -- rust_robotics_train > actuator-evidence/rustfmt.patch
+      - name: Build release diagnostic once
+        run: cargo build --locked --release -p rust_robotics_train --features cleanrl-reference --example cleanrl_actuator_sensitivity
+      - name: Reproduce four policies with frozen actuator modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./target/release/examples/cleanrl_actuator_sensitivity actuator-evidence \
+            2>&1 | tee actuator-evidence/run.log
+      - name: Verify all observations and nominal baseline before interpreting stress
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections
+          import csv
+          import hashlib
+          import itertools
+          from pathlib import Path
+          directory=Path("actuator-evidence")
+          with (directory/"episodes.csv").open(newline="") as f:
+              rows=list(csv.DictReader(f))
+          with (directory/"witness-traces.csv").open(newline="") as f:
+              traces=list(csv.DictReader(f))
+          seeds=(201,202,203,204)
+          modes=("deterministic","stochastic")
+          panels=("ordinary","difficult")
+          actuators=("ideal","delay_one_tick","hold_two_ticks","slew_five_n_per_tick")
+          groups=collections.defaultdict(list)
+          for row in rows:
+              assert int(row["seed"]) in seeds and int(row["updates"])==976
+              assert row["completed"] in ("true","false")
+              assert row["terminated"] in ("true","false")
+              assert 1<=int(row["steps"])<=1500
+              groups[(int(row["seed"]),row["actuator"],row["mode"],row["panel"])].append(row)
+          expected=set(itertools.product(seeds,actuators,modes,panels))
+          assert set(groups)==expected, expected-set(groups)
+          assert len(rows)==4096, len(rows)
+          for group,subset in groups.items():
+              assert len(subset)==64, (group,len(subset))
+              assert len({r["key"] for r in subset})==64, group
+          baseline_difficult={
+              (201,"deterministic"):63,(201,"stochastic"):63,
+              (202,"deterministic"):63,(202,"stochastic"):63,
+              (203,"deterministic"):63,(203,"stochastic"):63,
+              (204,"deterministic"):64,(204,"stochastic"):63
+          }
+          for seed in seeds:
+              for mode in modes:
+                  ordinary=groups[(seed,"ideal",mode,"ordinary")]
+                  difficult=groups[(seed,"ideal",mode,"difficult")]
+                  assert sum(r["completed"]=="true" for r in ordinary)==64
+                  assert sum(r["completed"]=="true" for r in difficult)==baseline_difficult[(seed,mode)]
+          trace_groups=collections.defaultdict(list)
+          for row in traces:
+              assert int(row["key"])==4100100100
+              trace_groups[(int(row["seed"]),row["actuator"],row["mode"])].append(row)
+          assert len(trace_groups)==len(seeds)*len(actuators)*len(modes)
+          for (seed,actuator,mode),episode_trace in trace_groups.items():
+              assert [int(row["tick"]) for row in episode_trace]==list(range(1,len(episode_trace)+1))
+              witness=[r for r in groups[(seed,actuator,mode,"difficult")] if int(r["key"])==4100100100]
+              assert len(witness)==1
+              assert len(episode_trace)==int(witness[0]["steps"])
+              if witness[0]["completed"]=="false":
+                  assert episode_trace[-1]["terminated"]=="true"
+                  assert episode_trace[-1]["rail_breached"]=="true" or episode_trace[-1]["angle_breached"]=="true"
+          summary=[
+              "# PPO evaluation-only actuator sensitivity",
+              "",
+              "Complete data is required for this workflow to pass. A green run is not a success threshold.",
+              "",
+              "| Actuator | Seed | Ordinary deterministic | Ordinary stochastic | Difficult deterministic | Difficult stochastic |",
+              "| :-- | --: | --: | --: | --: | --: |"
+          ]
+          for act in actuators:
+              for seed in seeds:
+                  counts=[]
+                  for panel in panels:
+                      for mode in modes:
+                          sub=groups[(seed,act,mode,panel)]
+                          counts.append(f'{sum(r["completed"]=="true" for r in sub)}/64')
+                  # Deliberately order columns as ordinary det/stoch then difficult det/stoch
+                  summary.append(f'| {act} | {seed} | ' + ' | '.join(counts) + ' |')
+          summary+=["","Shared failing witness: key 4100100100; 1500 ticks; same four trained development seeds.",
+                    "The stress policy is unchanged; only evaluation actuation is transformed.",
+                    "No new training seed or independent confirmation is represented."]
+          (directory/"summary.md").write_text("\n".join(summary)+"\n")
+          for name in ("episodes.csv","witness-traces.csv"):
+              digest=hashlib.sha256((directory/name).read_bytes()).hexdigest()
+              with (directory/"source-sha.txt").open("a") as f:
+                  f.write(f"{name}_sha256={digest}\n")
+          print("\n".join(summary))
+          PY
+      - name: Retain full evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppo-categorical-actuator-stress-evidence
+          path: actuator-evidence/
+          retention-days: 14
+          if-no-files-found: warn

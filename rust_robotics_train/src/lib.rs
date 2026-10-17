@@ -13,6 +13,9 @@
 //! embedding the full training runtime inside the UI layer.
 pub mod algorithm;
 pub mod backend;
+/// Experimental, isolated parity control. Not the production PPO path.
+#[cfg(feature = "cleanrl-reference")]
+pub mod cleanrl_reference;
 pub mod env;
 pub mod model;
 pub mod trainer;

@@ -1,0 +1,242 @@
+name: Experimental PPO force witness replay
+
+# Rerun pinned force witness after E0277 dereference and rustfmt fixes.
+
+on:
+  push:
+    branches: ["experiment/ppo-cleanrl-native-reference"]
+    paths:
+      - ".github/workflows/cleanrl-force-witness.yml"
+  workflow_dispatch:
+
+# Reproduce the completed matched action comparison and append force traces at the last checkpoint.
+permissions:
+  contents: read
+
+concurrency:
+  group: experimental-ppo-force-witness
+  cancel-in-progress: true
+
+jobs:
+  ablation:
+    name: Compare forces on frozen categorical/Gaussian recovery witnesses
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-ppo-cleanrl-experiment-v1
+      - name: Record frozen source and experiment protocol
+        shell: bash
+        run: |
+          mkdir -p action-ablation-evidence
+          {
+            git rev-parse HEAD
+            rustc --version
+            cargo --version
+            printf 'arms=categorical,squashed_gaussian\n'
+            printf 'seeds=201,202,203,204\n'
+            printf 'updates_per_seed=976\n'
+            printf 'interactions_per_seed=499712\n'
+            printf 'checkpoints=0,64,128,256,512,768,976\n'
+            printf 'evaluation_timestep_s=0.01\n'
+            printf 'evaluation_ticks=1500\n'
+            printf 'gaussian_entropy=pre_tanh_differential_entropy\n'
+            printf 'experiment=development_only_not_independent_confirmation\n'
+          } > action-ablation-evidence/provenance.txt
+      - name: Validate numerical/gradient tests and formatting before learning
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
+          cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
+      - name: Capture rustfmt patch on failure
+        if: failure()
+        shell: bash
+        run: |
+          cargo fmt --all
+          git diff -- rust_robotics_train > action-ablation-evidence/rustfmt.patch
+      - name: Build one release runner for both action distributions
+        run: cargo build --locked --release -p rust_robotics_train --features cleanrl-reference --example cleanrl_action_ablation
+      - name: Full fixed-budget experiments for all seeds in both arms
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arm in categorical squashed_gaussian; do
+            for seed in 201 202 203 204; do
+              printf 'started_%s_%s=yes\n' "$arm" "$seed" >> action-ablation-evidence/provenance.txt
+              ./target/release/examples/cleanrl_action_ablation "$arm" "$seed" \
+                "action-ablation-evidence/$arm-$seed.csv" \
+                "action-ablation-evidence/$arm-$seed-trace.csv" \
+                2>&1 | tee "action-ablation-evidence/$arm-$seed.log"
+              printf 'completed_%s_%s=yes\n' "$arm" "$seed" >> action-ablation-evidence/provenance.txt
+            done
+          done
+      - name: Assert complete data and original categorical baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections, csv, hashlib, itertools, os
+          from pathlib import Path
+          folder=Path('action-ablation-evidence')
+          seeds=(201,202,203,204)
+          arms=('categorical','squashed_gaussian')
+          checkpoints=(0,64,128,256,512,768,976)
+          panels=('ordinary','difficult','heldout_ordinary','heldout_difficult')
+          common=('heldout_ordinary','heldout_difficult')
+          modes=('deterministic','stochastic')
+          expected=set(itertools.product(checkpoints,panels,modes))
+          common_keys={}
+          data={}
+          for arm in arms:
+              for seed in seeds:
+                  path=folder/f'{arm}-{seed}.csv'
+                  with path.open(newline='') as stream:
+                      reader=csv.DictReader(stream)
+                      assert {'distribution','seed','updates','train_steps','panel','mode','key','completed','force_switches'}.issubset(reader.fieldnames or [])
+                      rows=list(reader)
+                  assert len(rows)==3584,(arm,seed,len(rows))
+                  groups=collections.defaultdict(list)
+                  for row in rows:
+                      assert row['distribution']==arm and int(row['seed'])==seed
+                      cp=int(row['updates'])
+                      assert int(row['train_steps'])==cp*512,(arm,seed,cp)
+                      assert row['completed'] in ('true','false')
+                      assert int(row['force_switches'])<int(row['steps'])
+                      groups[(cp,row['panel'],row['mode'])].append(row)
+                  assert set(groups)==expected,(arm,seed,expected-set(groups))
+                  for key,subset in groups.items():
+                      assert len(subset)==64 and len({r['key'] for r in subset})==64,(arm,seed,key)
+                  for panel in common:
+                      for checkpoint in checkpoints:
+                          for mode in modes:
+                              keys=tuple(sorted(int(r['key']) for r in groups[(checkpoint,panel,mode)]))
+                              if panel not in common_keys:
+                                  common_keys[panel]=keys
+                              else:
+                                  assert keys==common_keys[panel],(arm,seed,checkpoint,panel,mode)
+                  data[(arm,seed)]=groups
+                  digest=hashlib.sha256(path.read_bytes()).hexdigest()
+                  with (folder/'provenance.txt').open('a') as stream:
+                      stream.write(f'{arm}_{seed}_sha256={digest}\n')
+          baseline={(201,'deterministic'):63,(201,'stochastic'):63,
+                    (202,'deterministic'):63,(202,'stochastic'):63,
+                    (203,'deterministic'):63,(203,'stochastic'):63,
+                    (204,'deterministic'):64,(204,'stochastic'):63}
+          for seed in seeds:
+              groups=data[('categorical',seed)]
+              for mode in modes:
+                  assert sum(r['completed']=='true' for r in groups[(976,'heldout_ordinary',mode)])==64
+                  assert sum(r['completed']=='true' for r in groups[(976,'heldout_difficult',mode)])==baseline[(seed,mode)]
+          lines=['# PPO action-space ablation (exposed development seeds only)','',
+                 'A successful workflow verifies evidence completeness, not learning quality.','',
+                 '| Distribution | Seed | Updates | Common ordinary det | Common ordinary stoch | Common difficult det | Common difficult stoch |',
+                 '| :-- | --: | --: | --: | --: | --: | --: |']
+          for arm in arms:
+              for seed in seeds:
+                  groups=data[(arm,seed)]
+                  for cp in checkpoints:
+                      counts=[]
+                      for panel in common:
+                          for mode in modes:
+                              counts.append(str(sum(r['completed']=='true' for r in groups[(cp,panel,mode)]))+'/64')
+                      lines.append(f'| {arm} | {seed} | {cp} | '+' | '.join(counts)+' |')
+          lines+=['','Total: 2 distributions x 4 seeds x 976 updates x 512 interactions = 3,997,696 training interactions.',
+                  'Total evaluation records: 2 x 4 x 7 x 4 panels x 2 modes x 64 keys = 28,672.',
+                  'Training RNG streams diverge with different sampled actions; no trajectory identity is asserted.',
+                  'Gaussian entropy is pre-tanh differential entropy; categorical entropy is Shannon entropy.',
+                  'No evidence here qualifies production continuous PPO or fresh-seed acceptance.']
+          summary='\n'.join(lines)+'\n'
+          (folder/'summary.md').write_text(summary)
+          print(summary)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as stream:
+              stream.write(summary)
+          PY
+      - name: Verify exact 64-lane trace replay and physical force statistics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections, csv, hashlib, os, statistics
+          from pathlib import Path
+          folder=Path('action-ablation-evidence')
+          witnesses=(4100100015,4100100021,4100100170,4100100100)
+          rows=[]
+          for arm in ('categorical','squashed_gaussian'):
+              for seed in (201,202,203,204):
+                  with (folder/f'{arm}-{seed}.csv').open(newline='') as handle:
+                      originals=list(csv.DictReader(handle))
+                  baseline={(x['mode'],int(x['key'])):x for x in originals
+                            if int(x['updates'])==976 and x['panel']=='heldout_difficult'}
+                  with (folder/f'{arm}-{seed}-trace.csv').open(newline='') as handle:
+                      trace=list(csv.DictReader(handle))
+                  groups=collections.defaultdict(list)
+                  for frame in trace:
+                      key=int(frame['key'])
+                      assert key in witnesses and frame['distribution']==arm
+                      assert int(frame['seed'])==seed
+                      assert frame['mode'] in ('deterministic','stochastic')
+                      for field in ('obs_x','obs_xdot','obs_theta','obs_omega',
+                                    'before_x','before_xdot','before_theta','before_omega',
+                                    'desired_force_n','applied_force_n',
+                                    'after_x','after_xdot','after_theta','after_omega'):
+                          float(frame[field])
+                      assert abs(float(frame['desired_force_n']))<=20.0001
+                      groups[(frame['mode'],key)].append(frame)
+                  assert set(groups)=={(mode,key) for mode in ('deterministic','stochastic')
+                                       for key in witnesses}
+                  for (mode,key),frames in groups.items():
+                      original=baseline[(mode,key)]
+                      ticks=[int(x['tick']) for x in frames]
+                      assert ticks==list(range(1,len(frames)+1)),(arm,seed,mode,key)
+                      assert len(frames)==int(original['steps'])
+                      assert frames[-1]['terminated']==original['terminated']
+                      assert frames[-1]['truncated']==original['completed']
+                      first=frames[:30]
+                      early_abs=statistics.mean(abs(float(x['desired_force_n'])) for x in first)
+                      early_applied=statistics.mean(abs(float(x['applied_force_n'])) for x in first)
+                      rms=(sum(float(x['desired_force_n'])**2 for x in frames)/len(frames))**0.5
+                      saturation=sum(abs(float(x['desired_force_n']))>=18.0
+                                     for x in frames)/len(frames)
+                      rows.append((arm,seed,mode,key,original['completed'],len(frames),
+                                   early_abs,early_applied,rms,saturation,
+                                   frames[-1]['rail_breached'],frames[-1]['angle_breached']))
+                  digest=hashlib.sha256((folder/f'{arm}-{seed}-trace.csv').read_bytes()).hexdigest()
+                  with (folder/'provenance.txt').open('a') as handle:
+                      handle.write(f'{arm}_{seed}_trace_sha256={digest}\n')
+          assert len(rows)==64,len(rows)
+          report=[
+              '# Frozen development-force witness replay',
+              '',
+              'All traces use the same 64-lane inference batch and exactly reproduce the nominal evaluator.',
+              'These keys were selected after inspecting prior development failures, NOT for independent acceptance.',
+              '',
+              '| Arm | Seed | Mode | Key | Complete | Ticks | First 0.3s mean absolute commanded N | First 0.3s mean applied N | RMS commanded N | Commands >=18N (%) | Rail | Angle |',
+              '| :-- | --: | :-- | --: | :-- | --: | --: | --: | --: | --: | :-- | :-- |'
+          ]
+          for arm,seed,mode,key,ok,ticks,early,applied,rms,sat,rail,angle in rows:
+              report.append(f'| {arm} | {seed} | {mode} | {key} | {ok} | {ticks} | {early:.3f} | {applied:.3f} | {rms:.3f} | {sat*100:.1f} | {rail} | {angle} |')
+          report+=['',f'Rows: 64 episode probes. All {sum(x[5] for x in rows)} physical-tick trace rows verified.',
+                   'No new training seeds, policy hyperparameter changes or reward modifications.']
+          text='\n'.join(report)+'\n'
+          (folder/'force-witness-summary.md').write_text(text)
+          print(text)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as handle:
+              handle.write(text)
+          PY
+      - name: Retain complete and partial evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ppo-action-force-witness
+          path: action-ablation-evidence/
+          retention-days: 14
+          if-no-files-found: warn

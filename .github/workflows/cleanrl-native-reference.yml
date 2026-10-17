@@ -1,0 +1,64 @@
+name: Experimental CleanRL native PPO
+
+on:
+  push:
+    branches: ["experiment/ppo-cleanrl-native-reference"]
+    paths:
+      - "rust_robotics_train/**"
+      - "rust_robotics_core/**"
+      - "rust_robotics_algo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/cleanrl-native-reference.yml"
+  pull_request:
+    branches: ["master", "fix/ppo-shared-nonlinear-plant"]
+    paths:
+      - "rust_robotics_train/**"
+      - "rust_robotics_core/**"
+      - "rust_robotics_algo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/cleanrl-native-reference.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cleanrl-native-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  native-reference:
+    name: Compile and test native categorical PPO reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile native reference and cohort runner
+        run: cargo check --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples
+      - name: Verify categorical gradients, timeout GAE and live native smoke
+        run: |
+          cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
+      - name: Enforce strict warnings
+        run: cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Save formatting patch on failure
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff -- rust_robotics_train > "$RUNNER_TEMP/cleanrl-format.patch"
+      - name: Upload formatting correction if needed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanrl-native-format
+          path: ${{ runner.temp }}/cleanrl-format.patch
+          if-no-files-found: ignore
