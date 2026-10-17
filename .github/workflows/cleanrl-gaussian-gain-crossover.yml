@@ -1,0 +1,101 @@
+name: Experimental PPO Gaussian gain crossover
+
+on:
+  push:
+    branches: ["experiment/ppo-cleanrl-native-reference"]
+    paths:
+      - ".github/workflows/cleanrl-gaussian-gain-crossover.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: experimental-ppo-gaussian-gain-crossover
+  cancel-in-progress: true
+
+jobs:
+  crossover:
+    name: Fixed training gain x absolute evaluation gain (3 by 3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-ppo-cleanrl-experiment-v1
+      - name: Prepare immutable source provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p crossover-evidence
+          {
+            printf 'source_sha='
+            git rev-parse HEAD
+            rustc --version
+            cargo --version
+            printf 'training_gains=gain_1p0,gain_1p5,gain_2p0\n'
+            printf 'evaluation_absolute_gains=gain_1p0,gain_1p5,gain_2p0\n'
+            printf 'development_seeds=201,202,203,204\n'
+            printf 'updates_per_policy=976\n'
+            printf 'training_interactions_per_policy=499712\n'
+            printf 'evaluation_checkpoint=976\n'
+            printf 'evaluation_panels=ordinary,difficult,heldout_ordinary,heldout_difficult\n'
+            printf 'horizon_ticks=1500\n'
+            printf 'original_diagonal_reference_run=38979375155\n'
+          } > crossover-evidence/provenance.txt
+      - name: Gate Rust source and numerical regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked -p rust_robotics_train --features cleanrl-reference --lib cleanrl_reference:: -- --nocapture
+          cargo clippy --locked -p rust_robotics_train --features cleanrl-reference --lib --tests --examples -- -D warnings
+      - name: Capture rustfmt on preflight failure
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff -- rust_robotics_train > crossover-evidence/rustfmt.patch
+      - name: Download original full-budget gain artifact for exact diagonal verification
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 38979375155
+          name: native-ppo-gaussian-train-force-gain
+          github-token: ${{ github.token }}
+          path: prior-train-gain-evidence
+      - name: Build release runner once
+        run: cargo build --locked --release -p rust_robotics_train --features cleanrl-reference --example cleanrl_gain_crossover
+      - name: Train 12 fixed Gaussian policies and evaluate 3 absolute gain settings each
+        shell: bash
+        run: |
+          set -euo pipefail
+          for gain in gain_1p0 gain_1p5 gain_2p0; do
+            for seed in 201 202 203 204; do
+              printf 'started_%s_%s=yes\n' "$gain" "$seed" >> crossover-evidence/provenance.txt
+              ./target/release/examples/cleanrl_gain_crossover "$gain" "$seed" \
+                "crossover-evidence/$gain-$seed.csv" \
+                2>&1 | tee "crossover-evidence/$gain-$seed.log"
+              printf 'completed_%s_%s=yes\n' "$gain" "$seed" >> crossover-evidence/provenance.txt
+            done
+          done
+      - name: Validate exact prior diagonal and entire crossover matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_cleanrl_gain_crossover.py \
+            crossover-evidence prior-train-gain-evidence \
+            --output crossover-evidence/summary.md
+      - name: Retain source, full CSVs, logs and partial failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ppo-gaussian-gain-crossover
+          path: crossover-evidence/
+          retention-days: 14
+          if-no-files-found: warn
