@@ -158,9 +158,7 @@ mod cohort {
                     ("deterministic", ReferenceEvaluationMode::Deterministic),
                     ("stochastic", ReferenceEvaluationMode::Stochastic),
                 ] {
-                    let rows = trainer.evaluate_seeded_at_gain(
-                        keys, EVAL_TICKS, mode, eval_gain,
-                    );
+                    let rows = trainer.evaluate_seeded_at_gain(keys, EVAL_TICKS, mode, eval_gain);
                     assert_eq!(rows.len(), PANEL_SIZE);
                     let success = rows.iter().filter(|row| row.completed).count();
                     for row in rows {
@@ -193,7 +191,8 @@ mod cohort {
                     );
                 }
             }
-            out.flush().expect("retain every evaluation gain matrix slice");
+            out.flush()
+                .expect("retain every evaluation gain matrix slice");
         }
     }
 }

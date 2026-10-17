@@ -1,5 +1,7 @@
 name: Experimental PPO Gaussian gain crossover
 
+# Retry after two rustfmt corrections; all 3x3 policy/evaluation gates unchanged.
+
 on:
   push:
     branches: ["experiment/ppo-cleanrl-native-reference"]
