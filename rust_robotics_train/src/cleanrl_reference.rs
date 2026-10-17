@@ -788,7 +788,28 @@ impl CleanRlReferenceTrainer {
         horizon: usize,
         mode: ReferenceEvaluationMode,
     ) -> Vec<ReferenceEvaluationEpisode> {
+        self.evaluate_seeded_at_gain(keys, horizon, mode, self.config.continuous_force_gain)
+    }
+
+    /// Read-only post-training evaluation with an ABSOLUTE Gaussian force gain,
+    /// independent of the gain used during collection and policy updates.
+    /// The native plant, physical reward, reset seeds, batch shape and RNG
+    /// streams are identical to evaluate_seeded. No optimizer, model, or live
+    /// training lane is modified. Categorical policies may only use gain=1.
+    pub fn evaluate_seeded_at_gain(
+        &self,
+        keys: &[u64],
+        horizon: usize,
+        mode: ReferenceEvaluationMode,
+        evaluation_gain: f32,
+    ) -> Vec<ReferenceEvaluationEpisode> {
         assert!(!keys.is_empty() && horizon > 0);
+        assert!(evaluation_gain.is_finite() && evaluation_gain > 0.0);
+        assert!(
+            self.config.action_distribution == ReferenceActionDistribution::SquashedGaussian
+                || evaluation_gain == 1.0,
+            "categorical evaluation must retain force gain 1"
+        );
         struct EvalLane {
             key: u64,
             env: PendulumEnv,
@@ -860,7 +881,7 @@ impl CleanRlReferenceTrainer {
                     self.config.action_distribution,
                     mode,
                     env_config.max_force,
-                    self.config.continuous_force_gain,
+                    evaluation_gain,
                     &mut lane.action_rng,
                 );
                 if let Some(previous) = lane.previous_action {
@@ -1671,6 +1692,32 @@ mod tests {
         );
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.raw_return.is_finite()));
+    }
+
+    #[test]
+    fn absolute_evaluation_gain_preserves_frozen_nominal_outcomes() {
+        let keys = [4_000_100_000_u64, 4_100_100_100, 4_100_100_015];
+        for gain in [1.0_f32, 1.5, 2.0] {
+            let config = CleanRlReferenceConfig {
+                action_distribution: ReferenceActionDistribution::SquashedGaussian,
+                continuous_force_gain: gain,
+                ..Default::default()
+            };
+            let trainer = CleanRlReferenceTrainer::new(config);
+            for mode in [
+                ReferenceEvaluationMode::Deterministic,
+                ReferenceEvaluationMode::Stochastic,
+            ] {
+                let nominal = trainer.evaluate_seeded(&keys, 24, mode);
+                let equivalent = trainer.evaluate_seeded_at_gain(&keys, 24, mode, gain);
+                assert_eq!(nominal, equivalent, "same gain changed evaluator");
+                let counterfactual = trainer.evaluate_seeded_at_gain(&keys, 24, mode, 2.0);
+                assert_eq!(counterfactual.len(), keys.len());
+                assert!(counterfactual.iter().all(|row| row.raw_return.is_finite()));
+            }
+            assert_eq!(trainer.metrics().updates, 0);
+            assert_eq!(trainer.metrics().environment_steps, 0);
+        }
     }
 
     #[test]
