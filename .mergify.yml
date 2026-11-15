@@ -1,0 +1,45 @@
+# Opt-in only: never enroll existing PRs without the merge-train label.
+# Requires the Mergify GitHub App and Merge Queue/Workflow Automation enabled.
+# Keep protected-branch requirements; don't globally require path-filtered jobs.
+merge_queue:
+  mode: serial
+  max_parallel_checks: 2
+  status_comments: outcomes
+
+queue_rules:
+  - name: master
+    merge_method: merge
+    batch_size: 2
+    queue_conditions:
+      - base = master
+      - -draft
+      - label = merge-train
+      - check-success = @github-actions/Quality
+      - check-success = @github-actions/Build & Test (ubuntu-latest)
+      - check-success = @github-actions/Build & Test (windows-latest)
+      - check-success = @github-actions/Build & Test (macos-15)
+      - check-success = @github-actions/Build & Test (macos-latest)
+      - check-success = @github-actions/WASM & Browser
+      - check-success = @github-actions/Documentation
+    merge_conditions:
+      - check-success = @github-actions/Quality
+      - check-success = @github-actions/Build & Test (ubuntu-latest)
+      - check-success = @github-actions/Build & Test (windows-latest)
+      - check-success = @github-actions/Build & Test (macos-15)
+      - check-success = @github-actions/Build & Test (macos-latest)
+      - check-success = @github-actions/WASM & Browser
+      - check-success = @github-actions/Documentation
+      # Also wait for every other reported GitHub Actions job, including
+      # path-selected integration suites. Missing required checks fail closed.
+      - "-check-failure *= @github-actions/**"
+      - "-check-pending *= @github-actions/**"
+
+pull_request_rules:
+  - name: Queue explicitly opted-in master PRs
+    conditions:
+      - base = master
+      - -draft
+      - label = merge-train
+    actions:
+      queue:
+        name: master
